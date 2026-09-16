@@ -42,7 +42,7 @@ def _adapt_deit_state_dict(state_dict, target_keys):
 
 
 def checkpoint_payload(
-    model, text_model, image_model, language, optimizer=None, scheduler=None,
+    model, text_model, image_model, optimizer=None, scheduler=None,
     epoch=0, global_step=0, best_metric=None, epochs_without_improvement=0,
 ):
     return {
@@ -51,9 +51,8 @@ def checkpoint_payload(
         "model_config": model.model_config,
         "text_model": text_model,
         "image_model": image_model,
-        "language": language,
         "encoder_revisions": {
-            "text": getattr(model.ques_model.phobert.config, "_commit_hash", None),
+            "text": getattr(model.question_encoder.text_encoder.config, "_commit_hash", None),
             "image": getattr(model.image_model.model.config, "_commit_hash", None),
         },
         "preprocessing": {
@@ -108,16 +107,37 @@ def load_model(checkpoint_path, device):
         **model_config,
     )
     state = _adapt_deit_state_dict(checkpoint["model_state_dict"], model.state_dict())
+    state = _adapt_legacy_text_keys(state)
     model.load_state_dict(state, strict=True)
     model = model.to(device)
     model.eval()
-    return model, checkpoint.get("language", "vi")
+    return model
+
+
+def _adapt_legacy_text_keys(state_dict):
+    """Map legacy text-branch modules to the current English names."""
+    converted = {}
+    for key, value in state_dict.items():
+        updated = key
+        parts = key.split(".")
+        if len(parts) > 2 and parts[0] == "ques_model":
+            if parts[1] == "lstm":
+                updated = ".".join(["question_encoder", *parts[1:]])
+            else:
+                updated = ".".join(["question_encoder", "text_encoder", *parts[2:]])
+        elif len(parts) > 2 and parts[0] == "ans_model":
+            updated = ".".join(["answer_embedding", "token_embeddings", *parts[2:]])
+        converted[updated] = value
+    # Leave unknown legacy entries intact so strict loading still reports any
+    # genuine architecture mismatch rather than silently discarding parameters.
+    return converted
 
 
 def restore_training_state(checkpoint, model, optimizer, scheduler):
     if checkpoint.get("format_version") != 3:
         raise ValueError("Only version-3 checkpoints contain resumable training state")
     state = _adapt_deit_state_dict(checkpoint["model_state_dict"], model.state_dict())
+    state = _adapt_legacy_text_keys(state)
     model.load_state_dict(state, strict=True)
     if checkpoint.get("optimizer_state_dict") is not None:
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])

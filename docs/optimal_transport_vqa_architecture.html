@@ -105,8 +105,8 @@
   <header class="hero">
     <div class="eyebrow">OT-VQA · System architecture guide</div>
     <h1>How an image and a question become an answer</h1>
-    <p>A visual, component-by-component explanation of SAN compatibility, Balanced Optimal Transport, question-conditioned Unbalanced Optimal Transport, barycentric fusion, and autoregressive answer generation.</p>
-    <div class="hero-meta"><span class="pill">Standalone HTML</span><span class="pill">Tensor contracts</span><span class="pill">Training + inference</span><span class="pill">Interactive Sinkhorn intuition</span><span class="pill">Measured bottleneck analysis</span></div>
+    <p>A visual, component-by-component explanation of the English-only VQA pipeline: SAN compatibility, Balanced Optimal Transport, question-conditioned Unbalanced Optimal Transport, barycentric fusion, and autoregressive answer generation.</p>
+    <div class="hero-meta"><span class="pill">English text pipeline</span><span class="pill">Tensor contracts</span><span class="pill">Training + inference</span><span class="pill">Interactive Sinkhorn intuition</span><span class="pill">Measured bottleneck analysis</span></div>
   </header>
 
   <div class="layout">
@@ -187,12 +187,12 @@
       </section>
 
       <section id="encoders">
-        <div class="eyebrow">Stage 1</div><h2>Frozen encoders preserve spatial and linguistic structure</h2>
+        <div class="eyebrow">Stage 1</div><h2>English text and image encoders preserve structure</h2>
         <div class="grid">
           <div class="card"><span class="tag">Vision</span><h3>DeiT spatial tokens</h3><p>The image processor normalizes an already-scaled image without rescaling it again. DeiT produces two special tokens followed by a regular patch grid. OT receives only the patch tokens, so every visual row in the plan maps to a location in the image.</p><div class="equation">DeiT(I) = [CLS, DISTILL, v₁ … vₙ]<br>V = [v₁ … vₙ] <span class="shape">∈ ℝᴮˣᴺˣᴰᵛ</span></div></div>
-          <div class="card"><span class="tag">Language</span><h3>Contextual question tokens</h3><p>The text encoder retains one vector per token. Special and padding tokens remain in the stored sequence for positional consistency, but their mask prevents them from receiving marginal or transport mass.</p><div class="equation">Q = TextEncoder(tokenize(q))<br>mask = PAD ∨ SPECIAL<br>Q <span class="shape">∈ ℝᴮˣᴹˣᴰᑫ</span></div></div>
+          <div class="card"><span class="tag">English text</span><h3>English BERT question tokens</h3><p>The default encoder is <code>bert-base-uncased</code>. English text receives whitespace normalization, then BERT tokenization. The encoder retains one vector per token. Special and padding tokens remain in the sequence for positional consistency, but their mask excludes them from marginal and transport mass.</p><div class="equation">q′ = normalize_english_whitespace(q)<br>Q = BERT(tokenize(q′))<br>mask = PAD ∨ SPECIAL<br>Q <span class="shape">∈ ℝᴮˣᴹˣᴰᑫ</span></div></div>
         </div>
-        <div class="callout"><b>Why freeze them?</b> The first controlled OT comparison isolates the fusion mechanism, makes float16 caching valid, reduces compute, and prevents stale cached features from silently diverging from online features.</div>
+        <div class="callout"><b>English-only text flow.</b> The CLI has no language selector. Training, validation, caching, and prediction use one whitespace normalizer and the English text encoder recorded in the checkpoint. Vietnamese-specific segmenter dependencies and dataset paths have been removed; a Vietnamese encoder name is rejected before model weights load. Compatible English checkpoints map legacy text-module keys onto the generic question encoder and answer embedding names. <b>Why freeze the encoders?</b> The first controlled OT comparison isolates fusion, makes float16 caching valid, reduces compute, and prevents cached features from diverging from online features.</div>
       </section>
 
       <section id="marginals">
@@ -356,11 +356,12 @@
         <div class="filemap">
           <div class="file"><b>model/optimal_transport.py</b><span class="small">OTConfig, marginals, hybrid cost, log-domain solver, barycentric fusion, diagnostics.</span></div>
           <div class="file"><b>model/vqa_model.py</b><span class="small">SAN/OT selection, online and cached encoding, decoding, generation.</span></div>
-          <div class="file"><b>model/features_extraction.py</b><span class="small">Frozen DeiT patches, contextual question tokens, answer embeddings.</span></div>
+          <div class="file"><b>model/features_extraction.py</b><span class="small">Frozen DeiT patches, English BERT question tokens, answer embeddings.</span></div>
           <div class="file"><b>model/decoder_model.py</b><span class="small">Causal self-attention and fused-memory cross-attention masks.</span></div>
           <div class="file"><b>train.py · test.py · predict.py</b><span class="small">Optimization, generated evaluation, inference, and CLI diagnostics.</span></div>
           <div class="file"><b>diagnose_training.py</b><span class="small">Learning-curve analysis, output diversity, dataset coverage, and image/question shuffle interventions.</span></div>
-          <div class="file"><b>utils/checkpoint.py</b><span class="small">Atomic version-3 save, resume, v2 SAN and DeiT-key compatibility.</span></div>
+          <div class="file"><b>utils/data_processing.py · utils/vqa_dataset.py</b><span class="small">English whitespace normalization and generic image/question/answer loading.</span></div>
+          <div class="file"><b>utils/checkpoint.py</b><span class="small">Atomic version-3 save, resume, v2 SAN, DeiT-key, and legacy English text-key compatibility.</span></div>
           <div class="file"><b>utils/feature_cache.py · precompute_features.py</b><span class="small">Cache manifest, validation, collation, and frozen feature production.</span></div>
           <div class="file"><b>utils/transport_visualization.py</b><span class="small">Plan, cost, marginal, patch-mass, and convergence figure.</span></div>
           <div class="file"><b>configs/ot_cpu.json · ot_mps.json · ot_gpu.json</b><span class="small">Resource-specific OT dimensions, regularization, and iteration limits.</span></div>

@@ -2,8 +2,7 @@ from collections import Counter
 
 
 def normalize_text(text):
-    # Segmented Vietnamese uses underscores inside words.
-    return " ".join(text.lower().replace("_", " ").strip().split())
+    return " ".join(text.lower().strip().split())
 
 
 def compute_em_and_f1(references, hypotheses):

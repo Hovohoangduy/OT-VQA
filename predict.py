@@ -33,15 +33,15 @@ def main():
                         default="auto")
     args = parser.parse_args()
     device = resolve_device(args.device)
-    model, language = load_model(args.checkpoint, device)
+    model = load_model(args.checkpoint, device)
     with Image.open(args.image) as source:
         display_image = source.convert("RGB")
         image = Config.transforms(display_image).unsqueeze(0).to(device)
-    question = preprocess_text(args.question, language)
+    question = preprocess_text(args.question)
     diagnostics = args.diagnostics or args.diagnostics_output is not None
     result = model.generate(image, [question], return_diagnostics=diagnostics)
     ids = result.generated_ids if diagnostics else result
-    print(model.answers_from_ids(ids)[0].replace("_", " "))
+    print(model.answers_from_ids(ids)[0])
     if diagnostics:
         transport = result.transport
         if transport is None:
@@ -61,11 +61,11 @@ def main():
             }
             print(json.dumps(payload, sort_keys=True))
             if args.diagnostics_output:
-                encoded = model.ques_model.tokenizer(
+                encoded = model.question_encoder.tokenizer(
                     [question], max_length=Config.MAX_LEN_QUES,
                     truncation=True, padding=True, return_tensors="pt",
                 )
-                tokens = model.ques_model.tokenizer.convert_ids_to_tokens(
+                tokens = model.question_encoder.tokenizer.convert_ids_to_tokens(
                     encoded["input_ids"][0].tolist()
                 )
                 save_transport_diagnostics(

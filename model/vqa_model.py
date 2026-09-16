@@ -10,7 +10,10 @@ from torch import nn
 
 from configs.config import Config
 from model.decoder_model import Decoder
-from model.features_extraction import AnsEmbedding, ImageEmbedding, QuesEmbedding
+from model.features_extraction import (
+    AnswerEmbedding, ImageEmbedding, QuestionEmbedding,
+    validate_english_text_model,
+)
 from model.optimal_transport import OTConfig, OptimalTransportFusion, TransportOutput
 from model.sans import StackAttention
 
@@ -34,7 +37,7 @@ class VQAModel(nn.Module):
     def __init__(
         self, vocab_size=None, output_size=768, d_model=768, num_heads=4,
         ffn_hidden=2048, drop_prob=0.1, num_layers=4, num_att_layers=2,
-        mode='train', text_model=Config.textmodel_dir, image_model=Config.image_model,
+        mode='train', text_model=Config.text_model, image_model=Config.image_model,
         fusion='san', ot_config=None, freeze_answer_embeddings=False,
     ):
         super().__init__()
@@ -42,6 +45,7 @@ class VQAModel(nn.Module):
             raise ValueError('output_size must equal d_model and at least one attention layer is needed')
         if fusion not in {'san', 'balanced_ot', 'uot'}:
             raise ValueError("fusion must be 'san', 'balanced_ot', or 'uot'")
+        validate_english_text_model(text_model)
         self.mode = mode
         self.fusion_type = fusion
         self.text_model_name = str(text_model)
@@ -60,11 +64,11 @@ class VQAModel(nn.Module):
             freeze_answer_embeddings=freeze_answer_embeddings,
         )
         self.image_model = ImageEmbedding(image_model)
-        self.ques_model = QuesEmbedding(output_size=output_size, model_name=text_model)
-        self.ans_model = AnsEmbedding(model_name=text_model)
+        self.question_encoder = QuestionEmbedding(output_size=output_size, model_name=text_model)
+        self.answer_embedding = AnswerEmbedding(model_name=text_model)
         if freeze_answer_embeddings:
-            self.ans_model.freeze()
-        self.tokenizer = self.ans_model.tokenizer
+            self.answer_embedding.freeze()
+        self.tokenizer = self.answer_embedding.tokenizer
         self.pad_token_id = self.tokenizer.pad_token_id
         self.bos_token_id = (self.tokenizer.bos_token_id if self.tokenizer.bos_token_id is not None
                              else self.tokenizer.cls_token_id)
@@ -74,8 +78,8 @@ class VQAModel(nn.Module):
             raise ValueError('Tokenizer needs PAD, BOS/CLS and EOS/SEP tokens')
 
         image_dim = self.image_model.model.config.hidden_size
-        question_dim = self.ques_model.phobert.config.hidden_size
-        answer_dim = self.ans_model.phobert_embed.word_embeddings.embedding_dim
+        question_dim = self.question_encoder.text_encoder.config.hidden_size
+        answer_dim = self.answer_embedding.token_embeddings.word_embeddings.embedding_dim
         # Preserve original SAN names so version-2 checkpoints load strictly.
         self.image_projection = nn.Identity() if image_dim == d_model else nn.Linear(image_dim, d_model)
         self.answer_projection = nn.Identity() if answer_dim == d_model else nn.Linear(answer_dim, d_model)
@@ -87,9 +91,9 @@ class VQAModel(nn.Module):
             config=parsed_ot,
         )
         if self.ot_fusion is not None:
-            self.ques_model.freeze_encoder()
+            self.question_encoder.freeze_encoder()
         self.decoder = Decoder(d_model, ffn_hidden, num_heads, drop_prob, num_layers)
-        actual_vocab = self.ans_model.phobert_embed.word_embeddings.num_embeddings
+        actual_vocab = self.answer_embedding.token_embeddings.word_embeddings.num_embeddings
         if vocab_size is not None and vocab_size != actual_vocab:
             raise ValueError('vocab_size must match the text model embedding vocabulary')
         self.mlp = nn.Sequential(
@@ -125,7 +129,7 @@ class VQAModel(nn.Module):
         image_embeddings, _ = self.image_model(images, image_ids=anno_ids)
         if self.ot_fusion is None:
             projected_images = self.image_projection(image_embeddings)
-            context = self.ques_model(questions)
+            context = self.question_encoder(questions)
             for layer in self.san_model:
                 context = layer(projected_images, context.unsqueeze(1))
             memory = context.unsqueeze(1)
@@ -135,7 +139,7 @@ class VQAModel(nn.Module):
                     memory.shape[:2], dtype=torch.bool, device=memory.device
                 ),
             )
-        question_embeddings, question_mask, _ = self.ques_model.encode_tokens(questions)
+        question_embeddings, question_mask, _ = self.question_encoder.encode_tokens(questions)
         return self.encode_from_features(
             image_embeddings, question_embeddings, question_mask, return_diagnostics
         )
@@ -148,7 +152,7 @@ class VQAModel(nn.Module):
         return encoded.memory, encoded.memory_padding_mask, encoded.transport
 
     def decode(self, input_ids, memory, causal=True, memory_padding_mask=None):
-        target = self.answer_projection(self.ans_model.embed_ids(input_ids))
+        target = self.answer_projection(self.answer_embedding.embed_ids(input_ids))
         target_length = input_ids.size(1)
         blocked = input_ids.eq(self.pad_token_id)[:, None, None, :].expand(
             -1, 1, target_length, -1
@@ -180,7 +184,7 @@ class VQAModel(nn.Module):
             )
         encoded = self.encode(images, questions, anno_ids, return_diagnostics)
         memory, memory_mask, transport = self._unpack_encoder_output(encoded)
-        ids = self.ans_model.tokenize(answers, max_len)
+        ids = self.answer_embedding.tokenize(answers, max_len)
         logits = self.decode(ids[:, :-1], memory, causal=mask,
                              memory_padding_mask=memory_mask)
         if return_diagnostics:
@@ -197,7 +201,7 @@ class VQAModel(nn.Module):
             return_diagnostics,
         )
         memory, memory_mask, transport = self._unpack_encoder_output(encoded)
-        ids = self.ans_model.tokenize(answers, max_len)
+        ids = self.answer_embedding.tokenize(answers, max_len)
         logits = self.decode(ids[:, :-1], memory, causal=mask,
                              memory_padding_mask=memory_mask)
         if return_diagnostics:

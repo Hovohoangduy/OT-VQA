@@ -20,7 +20,7 @@ from utils.data_processing import load_dataframe
 from utils.device import resolve_device, seed_everything
 from utils.feature_cache import FeatureCacheDataset, collate_feature_cache
 from utils.metrics import compute_em_and_f1
-from utils.ViTextVQA_dataset import ViTextVQA_Dataset
+from utils.vqa_dataset import VQADataset
 
 
 def _forward_batch(model, batch, device, diagnostics=False):
@@ -100,7 +100,7 @@ def train(model, train_loader, num_epochs, optimizer, scheduler, criterion,
     return losses, em_scores, f1_scores
 
 
-def _make_loader(args, split, shuffle, language, text_model, image_model):
+def _make_loader(args, split, shuffle, text_model, image_model):
     csv_path = getattr(args, f"{split}_csv_path")
     if args.feature_cache:
         candidate = Path(args.feature_cache) / split
@@ -108,9 +108,9 @@ def _make_loader(args, split, shuffle, language, text_model, image_model):
         cache = FeatureCacheDataset(cache_path, csv_path, text_model, image_model)
         return DataLoader(cache, batch_size=args.batch_size, shuffle=shuffle,
                           collate_fn=collate_feature_cache)
-    frame = load_dataframe(csv_path, language)
+    frame = load_dataframe(csv_path)
     image_path = getattr(args, f"{split}_img_path") or args.img_path
-    dataset = ViTextVQA_Dataset(frame, transform=Config.transforms, img_path=image_path)
+    dataset = VQADataset(frame, transform=Config.transforms, img_path=image_path)
     return DataLoader(dataset, batch_size=args.batch_size, shuffle=shuffle)
 
 
@@ -137,11 +137,10 @@ def main():
         if resume["format_version"] != 3:
             raise ValueError("Training can resume only from a version-3 checkpoint")
         text_model, image_model = resume["text_model"], resume["image_model"]
-        language = resume.get("language", args.language)
         model = VQAModel(text_model=text_model, image_model=image_model,
                          **resume["model_config"]).to(device)
     else:
-        text_model, image_model, language = args.text_model, args.image_model, args.language
+        text_model, image_model = args.text_model, args.image_model
         ot_config = OTConfig.from_json(args.ot_profile) if args.ot_profile else OTConfig()
         model = VQAModel(text_model=text_model, image_model=image_model,
                          output_size=args.d_model, d_model=args.d_model,
@@ -152,8 +151,8 @@ def main():
     if args.feature_cache and model.fusion_type == "san":
         raise ValueError("Feature caches contain token features and require OT fusion")
 
-    train_loader = _make_loader(args, "train", True, language, text_model, image_model)
-    dev_loader = _make_loader(args, "dev", False, language, text_model, image_model)
+    train_loader = _make_loader(args, "train", True, text_model, image_model)
+    dev_loader = _make_loader(args, "dev", False, text_model, image_model)
     if not len(train_loader) or not len(dev_loader):
         raise ValueError("Training and development datasets must be non-empty")
     train_criterion = nn.CrossEntropyLoss(
@@ -220,7 +219,7 @@ def main():
             epochs_without_improvement += 1
         checkpoint_args = dict(
             model=model, text_model=text_model, image_model=image_model,
-            language=language, optimizer=optimizer, scheduler=scheduler,
+            optimizer=optimizer, scheduler=scheduler,
             epoch=epoch + 1, global_step=global_step, best_metric=best_metric,
             epochs_without_improvement=epochs_without_improvement,
         )

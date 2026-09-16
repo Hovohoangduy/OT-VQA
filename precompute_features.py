@@ -7,11 +7,11 @@ import torch
 from torch.utils.data import DataLoader
 
 from configs.config import Config
-from model.features_extraction import ImageEmbedding, QuesEmbedding
+from model.features_extraction import ImageEmbedding, QuestionEmbedding
 from utils.data_processing import load_dataframe
 from utils.device import resolve_device
 from utils.feature_cache import file_fingerprint, write_feature_cache
-from utils.ViTextVQA_dataset import ViTextVQA_Dataset
+from utils.vqa_dataset import VQADataset
 
 
 def _json_value(value):
@@ -29,9 +29,9 @@ def main():
     parser.add_argument("--csv", required=True)
     parser.add_argument("--img_path", required=True)
     parser.add_argument("--output", required=True)
-    parser.add_argument("--text_model", required=True)
+    parser.add_argument("--text_model", default=Config.text_model,
+                        help="English Hugging Face tokenizer and text encoder")
     parser.add_argument("--image_model", default=Config.image_model)
-    parser.add_argument("--language", choices=["vi", "en"], default="en")
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--device", choices=["auto", "cpu", "cuda", "mps"],
                         default="auto")
@@ -41,11 +41,11 @@ def main():
 
     device = resolve_device(args.device)
     print(f"Precomputing on device: {device}")
-    frame = load_dataframe(args.csv, args.language)
-    dataset = ViTextVQA_Dataset(frame, Config.transforms, args.img_path)
+    frame = load_dataframe(args.csv)
+    dataset = VQADataset(frame, Config.transforms, args.img_path)
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False)
     image_encoder = ImageEmbedding(args.image_model).to(device).eval()
-    question_encoder = QuesEmbedding(model_name=args.text_model).to(device).eval()
+    question_encoder = QuestionEmbedding(model_name=args.text_model).to(device).eval()
     samples = []
     with torch.no_grad():
         for anno_ids, images, questions, answers in loader:
@@ -67,9 +67,8 @@ def main():
         "dataset_fingerprint": file_fingerprint(args.csv),
         "text_model": args.text_model,
         "image_model": args.image_model,
-        "text_revision": getattr(question_encoder.phobert.config, "_commit_hash", None),
+        "text_revision": getattr(question_encoder.text_encoder.config, "_commit_hash", None),
         "image_revision": getattr(image_encoder.model.config, "_commit_hash", None),
-        "language": args.language,
         "question_max_length": Config.MAX_LEN_QUES,
         "tokenizer": {
             "class": type(question_encoder.tokenizer).__name__,

@@ -22,6 +22,17 @@ Question-Conditioned Unbalanced Optimal Transport (UOT) proposal in
 `docs/secret_docs/DCNC_HoVoHoangDuy2.pdf` into ordered engineering work with explicit
 interfaces, tensor shapes, tests, experiment controls, and completion criteria.
 
+The codebase supports English text processing and English text encoders only. The
+default is `bert-base-uncased`; an explicitly configured PhoBERT/VinAI or Vietnamese
+encoder name fails immediately with a clear error. There is no language-selection CLI
+option, Vietnamese segmenter dependency, language-specific dataset class, or language
+field in new checkpoints. Training, validation, cached feature generation, and prediction
+share whitespace-only normalization and the English tokenizer recorded in the checkpoint.
+The dataset loader is `utils/vqa_dataset.py` and is independent of language. Checkpoint
+loading migrates legacy English model-state keys to the current generic encoder names;
+this preserves compatible English checkpoints without retaining the old language-specific
+code path.
+
 The first implementation covers image-question alignment and transport-plan feature
 fusion. It does **not** implement adaptive retrieval, RAG, evidence selection, teacher
 models, student models, or knowledge distillation. Those components depend on a stable,
@@ -87,7 +98,7 @@ construct a transport plan, enforce or relax marginal distributions, measure unm
 mass, or use a Sinkhorn iteration. Documentation and experiment names must keep the
 terms `SAN`, `Balanced OT`, and `UOT` distinct.
 
-The existing version-2 checkpoint in `data/gqa_model/vi_text.pt` remains a SAN
+The existing version-2 checkpoint in `data/gqa_model/best.pt` remains a SAN
 checkpoint. Its loading and prediction behavior must remain supported.
 
 ### 2.2 Target system
@@ -357,7 +368,7 @@ Use checkpoint format version 3 for new training. Save:
 - model state and architecture dimensions;
 - fusion type and complete `OTConfig`;
 - text/image encoder identifiers and revisions;
-- preprocessing language and token limits;
+- English preprocessing and token limits;
 - optimizer and scheduler state;
 - epoch, global step, best validation metric, best epoch, and early-stopping state;
 - Python and CPU, CUDA, or MPS PyTorch random states.
@@ -671,7 +682,6 @@ python train.py \
   --dev_csv_path data/gqa_dataset/val.csv \
   --train_img_path data/gqa_dataset/images/train \
   --dev_img_path data/gqa_dataset/images/val \
-  --text_model bert-base-uncased --language en \
   --fusion uot --ot_profile configs/ot_mps.json \
   --d_model 384 --ffn_hidden 1024 --num_layers 2 \
   --drop_prob 0.2 --freeze_answer_embeddings \

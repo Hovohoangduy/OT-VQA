@@ -1,11 +1,13 @@
+"""Dataset that pairs English questions and answers with image files."""
+
 from pathlib import Path
 
 from PIL import Image
 from torch.utils.data import Dataset
 
 
-class ViTextVQA_Dataset(Dataset):
-    def __init__(self, dataframe, transform=None, img_path="data/images/st_images"):
+class VQADataset(Dataset):
+    def __init__(self, dataframe, transform=None, img_path="data/gqa_dataset/images"):
         self.data = dataframe
         self.transform = transform
         self.img_path = Path(img_path)

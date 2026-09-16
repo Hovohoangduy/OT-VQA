@@ -5,28 +5,28 @@ Unbalanced OT fusion. Evaluation and prediction generate answers without referen
 
 ```bash
 python -m pip install -r requirements.txt
-python train.py --train_csv_path data/csv/ViTextVQA_train.csv --dev_csv_path data/csv/ViTextVQA_dev.csv --img_path data/images/st_images --model_path data/vietnamese_san
-python test.py --dev_csv_path data/csv/ViTextVQA_dev.csv --img_path data/images/st_images --model_path data/vietnamese_san
-python predict.py --checkpoint data/vietnamese_san/best.pt --image path/to/image.jpg --question "Trong ảnh có gì?"
+python train.py --model_path data/gqa_model
+python test.py --model_path data/gqa_model
+python predict.py --checkpoint data/gqa_model/best.pt --image path/to/image.jpg --question "What is in the picture?"
 ```
 
-The first run downloads DeiT and PhoBERT. Vietnamese questions and answers are word segmented consistently during training and prediction. CSVs require `image`, `question`, and `answer`; `anno_id` is optional. Image paths are relative to `--img_path`. Training needs only its training CSV; evaluation loads only its selected split. Use `--split test --test_csv_path ...` to score a labelled test set. Prediction needs no answer or CSV.
+This repository supports English text and uses `bert-base-uncased` by default. The first run downloads DeiT and English BERT. Questions and answers receive whitespace normalization before the encoder tokenizer processes them. CSVs require `image`, `question`, and `answer`; `anno_id` is optional. Image paths are relative to `--img_path`. Training needs only its training CSV; evaluation loads only its selected split. Use `--split test --test_csv_path ...` to score a labelled test set. Prediction needs no answer or CSV.
 
 **Retrain old checkpoints.** The previous code used an incorrect objective and exposed full answers through cross-attention. Corrected training predicts the next token from a shifted answer prefix with causal attention. New version-3 checkpoints include the fusion configuration, optimizer, scheduler, progress, preprocessing settings, and random states. Version-2 SAN checkpoints still load; an old bare state dictionary raises an explanatory error.
 
 Training EM/F1 are teacher-forced diagnostics. `test.py` calculates EM/F1 from autoregressive generation and reports teacher-forced loss separately. No quality claim can be made without retraining and evaluating on real held-out data.
 
-## Existing English GQA subset
+## English GQA dataset
 
 The included subset uses bare image filenames and separate image folders. Use an English text encoder and English preprocessing:
 
 ```bash
-python train.py --train_csv_path data/gqa_dataset/train.csv --dev_csv_path data/gqa_dataset/val.csv --train_img_path data/gqa_dataset/images/train --dev_img_path data/gqa_dataset/images/val --text_model bert-base-uncased --language en --model_path data/gqa_model
+python train.py --train_csv_path data/gqa_dataset/train.csv --dev_csv_path data/gqa_dataset/val.csv --train_img_path data/gqa_dataset/images/train --dev_img_path data/gqa_dataset/images/val --model_path data/gqa_model
 python test.py --dev_csv_path data/gqa_dataset/val.csv --dev_img_path data/gqa_dataset/images/val --model_path data/gqa_model
-python predict.py --checkpoint data/gqa_model/vi_text.pt --image data/gqa_dataset/images/test/IMAGE_ID.jpg --question "What color is it?"
+python predict.py --checkpoint data/gqa_model/best.pt --image data/gqa_dataset/images/test/IMAGE_ID.jpg --question "What color is it?"
 ```
 
-PhoBERT is a Vietnamese encoder; do not use the Vietnamese defaults for this English dataset. The downloader now writes split-relative image paths such as `train/123.jpg`, so newly downloaded CSVs use `--img_path data/gqa_dataset/images` for all splits. Its generated corpus contains training text only; the existing corpus predates this correction.
+The downloader writes split-relative image paths such as `train/123.jpg`, so newly downloaded CSVs can use `--img_path data/gqa_dataset/images` for all splits. Its generated corpus contains training text only; the existing corpus predates this correction.
 
 ## Optimal Transport fusion
 
@@ -39,7 +39,6 @@ python train.py \
   --dev_csv_path data/gqa_dataset/val.csv \
   --train_img_path data/gqa_dataset/images/train \
   --dev_img_path data/gqa_dataset/images/val \
-  --text_model bert-base-uncased --language en \
   --fusion uot --ot_profile configs/ot_cpu.json \
   --model_path data/gqa_uot --diagnostics
 
@@ -63,14 +62,13 @@ Frozen encoder features can be cached as float16. Build both split caches under 
 root so training can select `train/` and `dev/` automatically:
 
 ```bash
-python precompute_features.py --csv data/gqa_dataset/train.csv --img_path data/gqa_dataset/images/train --output data/gqa_cache/train --text_model bert-base-uncased --language en
-python precompute_features.py --csv data/gqa_dataset/val.csv --img_path data/gqa_dataset/images/val --output data/gqa_cache/dev --text_model bert-base-uncased --language en
+python precompute_features.py --csv data/gqa_dataset/train.csv --img_path data/gqa_dataset/images/train --output data/gqa_cache/train --text_model bert-base-uncased
+python precompute_features.py --csv data/gqa_dataset/val.csv --img_path data/gqa_dataset/images/val --output data/gqa_cache/dev --text_model bert-base-uncased
 
 python train.py \
   --train_csv_path data/gqa_dataset/train.csv \
   --dev_csv_path data/gqa_dataset/val.csv \
   --feature_cache data/gqa_cache \
-  --text_model bert-base-uncased --language en \
   --fusion uot --ot_profile configs/ot_cpu.json \
   --model_path data/gqa_uot_cached
 ```
@@ -101,7 +99,6 @@ python train.py \
   --dev_csv_path data/gqa_dataset/val.csv \
   --train_img_path data/gqa_dataset/images/train \
   --dev_img_path data/gqa_dataset/images/val \
-  --text_model bert-base-uncased --language en \
   --fusion uot --ot_profile configs/ot_mps.json \
   --d_model 384 --ffn_hidden 1024 --num_layers 2 \
   --drop_prob 0.2 --freeze_answer_embeddings \

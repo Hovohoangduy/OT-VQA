@@ -14,7 +14,7 @@ from utils.checkpoint import load_model
 from utils.data_processing import load_dataframe
 from utils.device import resolve_device, seed_everything
 from utils.metrics import compute_em_and_f1, normalize_text
-from utils.ViTextVQA_dataset import ViTextVQA_Dataset
+from utils.vqa_dataset import VQADataset
 
 
 def _latest_run(path: Path) -> list[dict]:
@@ -178,9 +178,9 @@ def main():
     device = resolve_device(args.device)
     checkpoint = Path(args.checkpoint)
     metrics = Path(args.metrics) if args.metrics else checkpoint.parent / "metrics.jsonl"
-    model, language = load_model(checkpoint, device)
-    frame = load_dataframe(args.dev_csv_path, language)
-    dataset = ViTextVQA_Dataset(frame, Config.transforms, args.dev_img_path)
+    model = load_model(checkpoint, device)
+    frame = load_dataframe(args.dev_csv_path)
+    dataset = VQADataset(frame, Config.transforms, args.dev_img_path)
     trainable = sum(parameter.numel() for parameter in model.parameters()
                     if parameter.requires_grad)
     report = {
@@ -196,7 +196,7 @@ def main():
         ),
     }
     if args.train_csv_path:
-        train_frame = load_dataframe(args.train_csv_path, language)
+        train_frame = load_dataframe(args.train_csv_path)
         report["dataset"] = _dataset_report(train_frame, frame)
     output = Path(args.output) if args.output else checkpoint.parent / "bottleneck_report.json"
     output.parent.mkdir(parents=True, exist_ok=True)

@@ -20,7 +20,8 @@ from model.optimal_transport import OTConfig
 from model.decoder_model import MultiHeadAttention, MultiHeadCrossAttention, scaled_dot_product
 from model.sans import StackAttention
 from utils.data_processing import process_dataframe
-from utils.ViTextVQA_dataset import ViTextVQA_Dataset
+from utils.data_processing import preprocess_text
+from utils.vqa_dataset import VQADataset
 from utils.metrics import compute_em_and_f1
 from utils.json_to_csv import convert_json_folder
 from utils.checkpoint import load_model, save_checkpoint
@@ -72,8 +73,8 @@ class ModelLogicTests(unittest.TestCase):
         loss = nn.functional.cross_entropy(logits.transpose(1, 2), targets, ignore_index=model.pad_token_id)
         loss.backward()
         self.assertTrue(torch.isfinite(loss))
-        self.assertIsNotNone(model.ques_model.lstm.weight_ih_l0.grad)
-        self.assertIsNotNone(model.ans_model.phobert_embed.word_embeddings.weight.grad)
+        self.assertIsNotNone(model.question_encoder.lstm.weight_ih_l0.grad)
+        self.assertIsNotNone(model.answer_embedding.token_embeddings.word_embeddings.weight.grad)
         self.assertIsNone(next(model.image_model.model.parameters()).grad)
         self.assertFalse(model.image_model.model.training)
         self.assertIsNot(model.san_model[0], model.san_model[1])
@@ -143,8 +144,8 @@ class ModelLogicTests(unittest.TestCase):
         image = self.root / 'sample.jpg'
         Image.new('RGB', (32, 32), color='red').save(image)
         frame = pd.DataFrame({'image': ['sample.jpg'] * 3, 'question': ['what color ?'] * 3, 'answer': ['red'] * 3})
-        frame = process_dataframe(frame, 'en')
-        loader = DataLoader(ViTextVQA_Dataset(frame, Config.transforms, self.root), batch_size=2)
+        frame = process_dataframe(frame)
+        loader = DataLoader(VQADataset(frame, Config.transforms, self.root), batch_size=2)
         criterion = nn.CrossEntropyLoss(ignore_index=model.pad_token_id)
         optimizer = torch.optim.AdamW(model.parameters(), lr=0.001)
         scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda _: 1)
@@ -165,10 +166,20 @@ class ModelLogicTests(unittest.TestCase):
     def test_checkpoint_round_trip_and_legacy_rejection(self):
         model = self.make_model().eval()
         path = self.root / 'checkpoint.pt'
-        torch.save({'format_version': 2, 'model_state_dict': model.state_dict(),
-                    'text_model': str(self.text), 'image_model': str(self.visual), 'language': 'en', 'model_config': model.model_config}, path)
-        restored, language = load_model(path, torch.device('cpu'))
-        self.assertEqual(language, 'en')
+        legacy_state = {}
+        for key, value in model.state_dict().items():
+            if key.startswith('question_encoder.text_encoder.'):
+                key = key.replace('question_encoder.text_encoder.', 'ques_model.text_encoder.', 1)
+                key = key.replace('ques_model.text_encoder.', 'ques_model.legacy_encoder.', 1)
+            elif key.startswith('question_encoder.lstm.'):
+                key = key.replace('question_encoder.lstm.', 'ques_model.lstm.', 1)
+            elif key.startswith('answer_embedding.token_embeddings.'):
+                key = key.replace('answer_embedding.token_embeddings.', 'ans_model.legacy_embeddings.', 1)
+            legacy_state[key] = value
+        torch.save({'format_version': 2, 'model_state_dict': legacy_state,
+                    'text_model': str(self.text), 'image_model': str(self.visual),
+                    'model_config': model.model_config}, path)
+        restored = load_model(path, torch.device('cpu'))
         for key, value in model.state_dict().items():
             torch.testing.assert_close(value, restored.state_dict()[key])
         torch.save(model.state_dict(), path)
@@ -182,12 +193,23 @@ class ModelLogicTests(unittest.TestCase):
             freeze_answer_embeddings=True,
         )
         model.train()
-        self.assertFalse(model.ans_model.phobert_embed.training)
+        self.assertFalse(model.answer_embedding.token_embeddings.training)
         self.assertFalse(any(
             parameter.requires_grad
-            for parameter in model.ans_model.phobert_embed.parameters()
+            for parameter in model.answer_embedding.token_embeddings.parameters()
         ))
         self.assertTrue(model.model_config['freeze_answer_embeddings'])
+
+    def test_text_preprocessing_is_english_and_whitespace_only(self):
+        self.assertEqual(preprocess_text('  What   color is it?  '), 'What color is it?')
+        with self.assertRaisesRegex(ValueError, 'English encoder'):
+            self.make_vqa_model_with_text_name('vinai/phobert-base-v2')
+
+    def make_vqa_model_with_text_name(self, text_model):
+        return VQAModel(
+            text_model=text_model, image_model=str(self.visual),
+            output_size=16, d_model=16, ffn_hidden=32, num_layers=1,
+        )
 
     def test_attention_head_merge_and_cross_attention_lengths(self):
         torch.manual_seed(4)
@@ -209,7 +231,7 @@ class ModelLogicTests(unittest.TestCase):
         with torch.no_grad():
             online = model.encode(images, questions, return_diagnostics=True)
             image_features, _ = model.image_model(images)
-            question_features, question_mask, _ = model.ques_model.encode_tokens(questions)
+            question_features, question_mask, _ = model.question_encoder.encode_tokens(questions)
             cached = model.encode_from_features(
                 image_features.half(), question_features.half(), question_mask, True
             )
@@ -224,10 +246,10 @@ class ModelLogicTests(unittest.TestCase):
         path = self.root / 'ot-v3.pt'
         save_checkpoint(
             path, model=model, text_model=str(self.text), image_model=str(self.visual),
-            language='en', epoch=1, global_step=2,
+            epoch=1, global_step=2,
         )
-        restored, language = load_model(path, torch.device('cpu'))
-        self.assertEqual((restored.fusion_type, language), ('uot', 'en'))
+        restored = load_model(path, torch.device('cpu'))
+        self.assertEqual(restored.fusion_type, 'uot')
         with torch.no_grad():
             expected = model.generate(images, questions, max_len=5)
             actual = restored.generate(images, questions, max_len=5)
@@ -275,18 +297,18 @@ class DataLogicTests(unittest.TestCase):
         self.assertEqual(em, 0)
         self.assertAlmostEqual(f1, 2 / 3)
         self.assertEqual(compute_em_and_f1([''], ['']), (1.0, 1.0))
-        self.assertEqual(compute_em_and_f1(['xin_chao'], ['xin chao']), (1.0, 1.0))
+        self.assertEqual(compute_em_and_f1(['Blue car'], ['blue   car']), (1.0, 1.0))
         with self.assertRaises(ValueError):
             compute_em_and_f1(['a'], [])
 
     def test_data_question_column_and_optional_annotations(self):
         frame = pd.DataFrame({'image': ['train/a.jpg'], 'question': [' what  color ? '], 'answer': ['red']})
-        processed = process_dataframe(frame, 'en')
+        processed = process_dataframe(frame)
         self.assertEqual(processed.iloc[0]['question'], 'what color ?')
         self.assertEqual(processed.iloc[0]['anno_id'], 0)
         self.assertNotIn('anno_id', frame.columns)
         self.assertNotIn('quesion', processed.columns)
-        unlabelled = process_dataframe(frame.drop(columns='answer'), 'en', require_answers=False)
+        unlabelled = process_dataframe(frame.drop(columns='answer'), require_answers=False)
         self.assertEqual(unlabelled.iloc[0]['answer'], '')
 
     def test_json_alternative_answers_are_not_concatenated(self):
@@ -306,9 +328,9 @@ class DataLogicTests(unittest.TestCase):
                 rows = materialize_split('train', [{'id': 'a'}], {'a': {'question': 'color?', 'answer': 'red'}}, root, 1)
             self.assertEqual(rows[0]['image'], 'train/a.jpg')
             self.assertEqual(rows[0]['anno_id'], 'a')
-            frame = process_dataframe(pd.read_csv(root / 'train.csv'), 'en')
+            frame = process_dataframe(pd.read_csv(root / 'train.csv'))
             Image.new('RGB', (32, 32)).save(root / 'images' / 'train' / 'a.jpg')
-            sample = ViTextVQA_Dataset(frame, Config.transforms, root / 'images')[0]
+            sample = VQADataset(frame, Config.transforms, root / 'images')[0]
             self.assertEqual(sample[2:], ('color?', 'red'))
 
 

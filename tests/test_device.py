@@ -7,7 +7,11 @@ from utils.device import resolve_device
 
 class DeviceSelectionTests(unittest.TestCase):
     def test_cli_defaults_to_auto_and_accepts_mps(self):
-        self.assertEqual(get_args([]).device, "auto")
+        args = get_args([])
+        self.assertEqual(args.device, "auto")
+        self.assertEqual(args.text_model, "bert-base-uncased")
+        self.assertFalse(hasattr(args, "language"))
+        self.assertEqual(args.train_csv_path, "data/gqa_dataset/train.csv")
         self.assertEqual(get_args(["--device", "mps"]).device, "mps")
 
     def test_auto_prefers_cuda_then_mps_then_cpu(self):

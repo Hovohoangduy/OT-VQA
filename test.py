@@ -15,7 +15,7 @@ from utils.data_processing import load_dataframe
 from utils.device import resolve_device
 from utils.feature_cache import FeatureCacheDataset, collate_feature_cache
 from utils.metrics import compute_em_and_f1
-from utils.ViTextVQA_dataset import ViTextVQA_Dataset
+from utils.vqa_dataset import VQADataset
 
 
 def evaluation(model, test_loader, criterion, vocab_swap=None, device=None,
@@ -112,10 +112,8 @@ def main():
     device = resolve_device(args.device)
     print(f"Evaluating on device: {device}")
     default = Path(args.model_path) / "best.pt"
-    if not default.exists():
-        default = Path(args.model_path) / "vi_text.pt"
     checkpoint = Path(args.checkpoint) if args.checkpoint else default
-    model, language = load_model(checkpoint, device)
+    model = load_model(checkpoint, device)
     csv_path = args.dev_csv_path if args.split == "dev" else args.test_csv_path
     if args.feature_cache:
         if model.fusion_type == "san":
@@ -126,9 +124,9 @@ def main():
         loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False,
                             collate_fn=collate_feature_cache)
     else:
-        frame = load_dataframe(csv_path, language)
+        frame = load_dataframe(csv_path)
         split_image_path = (args.dev_img_path if args.split == "dev" else args.test_img_path)
-        dataset = ViTextVQA_Dataset(
+        dataset = VQADataset(
             frame, transform=Config.transforms,
             img_path=split_image_path or args.img_path,
         )

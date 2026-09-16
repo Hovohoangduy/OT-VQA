@@ -6,6 +6,12 @@ from transformers import AutoModel, AutoTokenizer, AutoImageProcessor, DeiTModel
 from configs.config import Config
 
 
+def validate_english_text_model(model_name):
+    name = str(model_name).lower().replace("_", "-")
+    if any(marker in name for marker in ("phobert", "vietnam", "vinai/")):
+        raise ValueError("Vietnamese text encoders are not supported; use an English encoder")
+
+
 class ImageEmbedding(nn.Module):
     def __init__(self, model_name=Config.image_model):
         super().__init__()
@@ -35,23 +41,24 @@ class ImageEmbedding(nn.Module):
         return hidden_states[:, 2:]
 
 
-class QuesEmbedding(nn.Module):
-    def __init__(self, input_size=None, output_size=768, model_name=Config.textmodel_dir):
+class QuestionEmbedding(nn.Module):
+    def __init__(self, input_size=None, output_size=768, model_name=Config.text_model):
         super().__init__()
+        validate_english_text_model(model_name)
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.phobert = AutoModel.from_pretrained(model_name)
-        self.lstm = nn.LSTM(input_size or self.phobert.config.hidden_size, output_size, batch_first=True)
+        self.text_encoder = AutoModel.from_pretrained(model_name)
+        self.lstm = nn.LSTM(input_size or self.text_encoder.config.hidden_size, output_size, batch_first=True)
         self.encoder_frozen = False
 
     def freeze_encoder(self):
         self.encoder_frozen = True
-        self.phobert.requires_grad_(False)
-        self.phobert.eval()
+        self.text_encoder.requires_grad_(False)
+        self.text_encoder.eval()
 
     def train(self, mode=True):
         super().train(mode)
         if self.encoder_frozen:
-            self.phobert.eval()
+            self.text_encoder.eval()
         return self
 
     def encode_tokens(self, questions):
@@ -61,13 +68,13 @@ class QuesEmbedding(nn.Module):
             return_special_tokens_mask=True,
         )
         special_mask = tokens.pop('special_tokens_mask').bool()
-        tokens = tokens.to(next(self.phobert.parameters()).device)
+        tokens = tokens.to(next(self.text_encoder.parameters()).device)
         special_mask = special_mask.to(tokens['input_ids'].device)
         if self.encoder_frozen:
             with torch.no_grad():
-                embeddings = self.phobert(**tokens).last_hidden_state
+                embeddings = self.text_encoder(**tokens).last_hidden_state
         else:
-            embeddings = self.phobert(**tokens).last_hidden_state
+            embeddings = self.text_encoder(**tokens).last_hidden_state
         padding_mask = tokens['attention_mask'].eq(0) | special_mask
         return embeddings, padding_mask, tokens['input_ids']
 
@@ -81,22 +88,23 @@ class QuesEmbedding(nn.Module):
         return hidden.squeeze(0)
 
 
-class AnsEmbedding(nn.Module):
-    def __init__(self, input_size=768, model_name=Config.textmodel_dir):
+class AnswerEmbedding(nn.Module):
+    def __init__(self, input_size=768, model_name=Config.text_model):
         super().__init__()
+        validate_english_text_model(model_name)
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.phobert_embed = AutoModel.from_pretrained(model_name).embeddings
+        self.token_embeddings = AutoModel.from_pretrained(model_name).embeddings
         self.embedding_frozen = False
 
     def freeze(self):
         self.embedding_frozen = True
-        self.phobert_embed.requires_grad_(False)
-        self.phobert_embed.eval()
+        self.token_embeddings.requires_grad_(False)
+        self.token_embeddings.eval()
 
     def train(self, mode=True):
         super().train(mode)
         if self.embedding_frozen:
-            self.phobert_embed.eval()
+            self.token_embeddings.eval()
         return self
 
     def tokenize(self, answers, max_len=Config.MAX_LEN_ANS):
@@ -110,10 +118,10 @@ class AnsEmbedding(nn.Module):
         rows = tok(list(answers), add_special_tokens=False, truncation=True,
                    max_length=max_len - 2)['input_ids']
         rows = [[bos] + row + [eos] + [tok.pad_token_id] * (max_len - len(row) - 2) for row in rows]
-        return torch.tensor(rows, dtype=torch.long, device=next(self.phobert_embed.parameters()).device)
+        return torch.tensor(rows, dtype=torch.long, device=next(self.token_embeddings.parameters()).device)
 
     def embed_ids(self, input_ids):
-        return self.phobert_embed(input_ids=input_ids)
+        return self.token_embeddings(input_ids=input_ids)
 
     def forward(self, answers, max_len=Config.MAX_LEN_ANS):
         ids = self.tokenize(answers, max_len)
