@@ -1,0 +1,11 @@
+numpy
+pandas
+matplotlib
+underthesea
+rouge-score
+pycocoevalcap
+vncorenlp
+pillow
+torch
+transformers
+torchvision
