@@ -1,38 +1,30 @@
 import json
-import os
+from pathlib import Path
+
 import pandas as pd
+
 from configs.arg_parser import get_args
 
-args = get_args()
 
-input_dir = args.json_folder_path
-output_dir = args.csv_folder_path
-
-if not os.path.exists(output_dir):
-    os.makedirs(output_dir)
-
-for file_name in os.listdir(input_dir):
-    if file_name.endswith('.json'):
-        json_file_path = os.path.join(input_dir, file_name)
-
-        with open(json_file_path, 'r', encoding='utf-8') as file:
-            data = json.load(file)
-
+def convert_json_folder(input_dir, output_dir):
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for source in sorted(Path(input_dir).glob("*.json")):
+        data = json.loads(source.read_text(encoding="utf-8"))
         rows = []
+        for annotation in data["annotations"]:
+            answers = annotation.get("answers", [])
+            if isinstance(answers, str):
+                answers = [answers]
+            # Multiple annotations are alternative correct answers, not one long answer.
+            answer = answers[0] if answers else ""
+            rows.append({"anno_id": annotation["id"], "image": f"{annotation['image_id']}.jpg",
+                         "question": annotation["question"], "answer": answer})
+        target = output_dir / f"{source.stem}.csv"
+        pd.DataFrame(rows, columns=["anno_id", "image", "question", "answer"]).to_csv(target, index=False)
+        print(f"Created {target}")
 
-        for anno in data["annotations"]:
-            anno_id = anno["id"]
-            image = f"{anno['image_id']}.jpg" 
-            question = anno["question"]
-            answer = ", ".join(anno["answers"])
-            
-            rows.append([anno_id, image, question, answer])
 
-        df = pd.DataFrame(rows, columns=["anno_id", "image", "question", "answer"])
-
-        csv_file_name = os.path.splitext(file_name)[0] + '.csv'
-        csv_file_path = os.path.join(output_dir, csv_file_name)
-        
-        df.to_csv(csv_file_path, index=False)
-        
-        print(f"CSV file '{csv_file_name}' has been created successfully.")
+if __name__ == "__main__":
+    args = get_args()
+    convert_json_folder(args.json_folder_path, args.csv_folder_path)

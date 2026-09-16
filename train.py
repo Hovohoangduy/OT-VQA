@@ -1,139 +1,100 @@
+from pathlib import Path
+
 import matplotlib.pyplot as plt
 import torch
-import torch.nn as nn
+from torch import nn, optim
 from torch.utils.data import DataLoader
-from transformers import AutoTokenizer, get_linear_schedule_with_warmup
-import torch.optim as optim
-from utils.metrics import normalize_text, compute_em_and_f1
+from transformers import get_linear_schedule_with_warmup
+
 from configs.arg_parser import get_args
 from configs.config import Config
-from utils.data_processing import preprocess_data
+from utils.data_processing import load_dataframe
 from utils.ViTextVQA_dataset import ViTextVQA_Dataset
+from utils.metrics import compute_em_and_f1
 from model.vqa_model import VQAModel
 
-### Train model
 
-args = get_args()
-device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+def train(model, train_loader, num_epochs, optimizer, scheduler, criterion, vocab_swap=None, device=None):
+    """
+    Executes the training loop with Teacher Forcing.
 
-def train(model, train_loader, num_epochs, optimizer, scheduler, criterion, vocab_swap, device):
-    print_every = 2000
-    
-    losses = []
-    em_scores = []
-    f1_scores = []
-    
+    Training Flow Pipeline:
+        1. DataLoader yields -> (Images, Questions, Answers)
+        2. Encoder computes -> Context Memory
+        3. Target Shifter (inside model.forward):
+             - Decoder Input: ids[:, :-1]  (e.g. [BOS, t1, t2, EOS])
+             - Ground Truth:  ids[:, 1:]   (e.g. [t1, t2, EOS, PAD])
+        4. Decoder predicts -> Next Token Logits
+        5. Loss -> CrossEntropy(Logits, Ground Truth, ignore_index=PAD)
+        6. Backward Pass -> Optimizer Step -> Scheduler Step
+    """
+    device = device or next(model.parameters()).device
+    losses, em_scores, f1_scores = [], [], []
+    if len(train_loader) == 0:
+        raise ValueError("Training dataset is empty")
     for epoch in range(num_epochs):
         model.train()
-        total_loss = 0.0
-        total_em = 0.0
-        total_f1 = 0.0
-        
-        for batch_idx, batch in enumerate(train_loader):
-            anno_id, images, questions, answers = batch
-            if len(images) == args.batch_size:
-                predicted_tokens, ans_embedds = model(images.to(device), questions, answers, anno_id, mode='train', mask=True)
-                predicted_tokens = predicted_tokens.float()
-                ans_embedds = ans_embedds.long()
-                
-                # Prepare references and hypotheses
-                references = [normalize_text(answer).split() for answer in answers]
-                hypotheses = []
-                for i in range(args.batch_size):
-                    sentence_predicted = torch.argmax(predicted_tokens[i], axis=1)
-                    predicted_sentence = []
-                    for idx in sentence_predicted:
-                        if idx == 2:  # End of Sentence Token
-                            break
-                        word = vocab_swap.get(idx.item(), "")  # Handle out-of-vocabulary gracefully
-                        if word in {"<pad>", "<s>", "</s>", ""}:
-                            continue
-                        predicted_sentence.append(word)
-                        
-                    predicted_sentence = ' '.join(predicted_sentence).strip()
-                    hypotheses.append(predicted_sentence.split())
-                
-                # Compute EM and F1 scores
-                em_score, f1_score = compute_em_and_f1(references, hypotheses)
-                total_em += em_score
-                total_f1 += f1_score
-                
-                if (batch_idx + 1) % print_every == 0:
-                    print(f"Epoch [{epoch + 1}/{num_epochs}], Batch [{batch_idx + 1}/{len(train_loader)}], Loss: {loss.item():.4f}")
-                    print(f"Exact Match (EM): {em_score:.4f}")
-                    print(f"F1 Score: {f1_score:.4f}")
-                    
-                    for i in range(args.batch_size):
-                        sentence_predicted = torch.argmax(predicted_tokens[i], axis=1)
-                        predicted_sentence = []
-                        for idx in sentence_predicted:
-                            if idx == 2:
-                                break
-                            word = vocab_swap.get(idx.item(), "")
-                            if word in {"<pad>", "<s>", "</s>", ""}:
-                                continue
-                            predicted_sentence.append(word)
-                            
-                        predicted_sentence = ' '.join(predicted_sentence).strip()
-                        print(f"Question: {questions[i]}")
-                        print(f"Answer: {answers[i]}")
-                        print(f"Answer Prediction: {predicted_sentence}")
-                    print("\n")
-                
-                # Compute loss and update model
-                loss = criterion(predicted_tokens.permute(0, 2, 1), ans_embedds)
-                valid_indicies = torch.where(ans_embedds == 1, False, True)
-                loss = loss.sum() / valid_indicies.sum()
-                
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
-                scheduler.step()
-                total_loss += loss.item()
-                losses.append(loss.item())
-        
-        avg_em = total_em / len(train_loader)
-        avg_f1 = total_f1 / len(train_loader)
-        
-        em_scores.append(avg_em)
-        f1_scores.append(avg_f1)
-        
-        print(f"Epoch [{epoch + 1}/{num_epochs}]")
-        print(f"Average Exact Match (EM): {avg_em:.4f}")
-        print(f"Average F1 Score: {avg_f1:.4f}")
-        print("\n")
-    
+        total_loss = total_em = total_f1 = 0.0
+        examples = tokens = 0
+        for batch_idx, (anno_ids, images, questions, answers) in enumerate(train_loader):
+            logits, targets = model(images.to(device), questions, answers, anno_ids)
+            loss = criterion(logits.transpose(1, 2), targets)
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            optimizer.step()
+            scheduler.step()
+            batch_tokens = targets.ne(model.pad_token_id).sum().item()
+            total_loss += loss.item() * batch_tokens
+            tokens += batch_tokens
+            losses.append(loss.item())
+            # Teacher-forced metrics diagnose training only; test.py uses generation.
+            hypotheses = model.answers_from_ids(logits.detach().argmax(-1))
+            em, f1 = compute_em_and_f1(answers, hypotheses)
+            count = len(answers)
+            total_em += em * count
+            total_f1 += f1 * count
+            examples += count
+            if (batch_idx + 1) % 2000 == 0:
+                print(f"Epoch {epoch + 1}, batch {batch_idx + 1}: loss={loss.item():.4f}")
+        em_scores.append(total_em / examples)
+        f1_scores.append(total_f1 / examples)
+        print(f"Epoch {epoch + 1}/{num_epochs}: loss={total_loss / tokens:.4f}, "
+              f"teacher-forced EM={em_scores[-1]:.4f}, F1={f1_scores[-1]:.4f}")
     return losses, em_scores, f1_scores
 
-if __name__=="__main__":
-    tokenizer = AutoTokenizer.from_pretrained(Config.textmodel_dir)
-    vocab = tokenizer.get_vocab()
-    vocab_swap = {value: key for key, value in vocab.items()}
 
-    df_train, _, _ = preprocess_data(args)
-    train_vlsp_dataset = ViTextVQA_Dataset(df_train, transform=Config.transforms)
-    train_loader = DataLoader(train_vlsp_dataset, batch_size=args.batch_size, shuffle=True)
-
-    num_epochs = args.epochs
-    model = VQAModel().to(device)
-    criterion = nn.CrossEntropyLoss(ignore_index=1)
-    optimizer = optim.AdamW(model.parameters(), Config.lr)
-    scheduler = get_linear_schedule_with_warmup(
-        optimizer, 
-        num_warmup_steps=0, 
-        num_training_steps=int(len(train_loader) * args.epochs)
-    )
-    losses, em_scores, f1_scores = train(model, train_loader, num_epochs, optimizer, scheduler, criterion, vocab_swap, device)
-
+def main():
+    args = get_args()
+    if args.batch_size < 1 or args.epochs < 1:
+        raise ValueError("batch_size and epochs must be positive")
+    torch.manual_seed(Config.SEED)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    dataframe = load_dataframe(args.train_csv_path, args.language)
+    dataset = ViTextVQA_Dataset(dataframe, transform=Config.transforms, img_path=args.img_path)
+    if len(dataset) == 0:
+        raise ValueError("Training dataset is empty")
+    loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True)
+    model = VQAModel(text_model=args.text_model, image_model=args.image_model).to(device)
+    criterion = nn.CrossEntropyLoss(ignore_index=model.pad_token_id)
+    optimizer = optim.AdamW((p for p in model.parameters() if p.requires_grad), lr=Config.lr)
+    scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=0,
+                                                num_training_steps=len(loader) * args.epochs)
+    _, em_scores, f1_scores = train(model, loader, args.epochs, optimizer, scheduler, criterion, device=device)
+    destination = Path(args.model_path)
+    destination.mkdir(parents=True, exist_ok=True)
+    torch.save({"format_version": 2, "model_state_dict": model.state_dict(),
+                "text_model": args.text_model, "image_model": args.image_model,
+                "language": args.language, "model_config": model.model_config}, destination / "vi_text.pt")
     plt.figure(figsize=(10, 6))
-    plt.plot(em_scores, label='EM', marker='o')
-    plt.plot(f1_scores, label='F1_SCORE', marker='o')
-    plt.title('Evaluation Metrics')
-    plt.xlabel('Epochs')
-    plt.ylabel('Score')
+    plt.plot(em_scores, label="Teacher-forced EM")
+    plt.plot(f1_scores, label="Teacher-forced F1")
+    plt.xlabel("Epoch")
+    plt.ylabel("Score")
     plt.legend()
-    plt.grid(True)
     plt.tight_layout()
-    plt.savefig('evaluation_metrics_plot.png')
+    plt.savefig(destination / "evaluation_metrics_plot.png")
+    plt.close()
 
-    torch.save(model.state_dict(), args.model_path + "/" + 'vi_text.pt')
+
+if __name__ == "__main__":
+    main()

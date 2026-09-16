@@ -1,87 +1,73 @@
 import torch
-import torch.nn as nn
-from torch.utils.data import DataLoader
+from torch import nn
+from torch.nn.utils.rnn import pack_padded_sequence
 from transformers import AutoModel, AutoTokenizer, AutoImageProcessor, DeiTModel
+
 from configs.config import Config
-from configs.arg_parser import get_args
-from utils.data_processing import preprocess_data
-from utils.ViTextVQA_dataset import ViTextVQA_Dataset
 
-args = get_args()
-device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
-### Image features extraction model
 class ImageEmbedding(nn.Module):
-    def __init__(self):
-        super(ImageEmbedding, self).__init__()
-        self.process = AutoImageProcessor.from_pretrained(Config.image_model)
-        self.model = DeiTModel.from_pretrained(Config.image_model)
-        #self.model = nn.Sequential(*list(self.model.children())[:3])
-        
-        for param in self.model.parameters():
-            param.requires_grad = False
+    def __init__(self, model_name=Config.image_model):
+        super().__init__()
+        self.process = AutoImageProcessor.from_pretrained(model_name)
+        self.model = DeiTModel.from_pretrained(model_name)
+        self.model.requires_grad_(False)
+        self.model.eval()
 
-    def forward(self, image, image_ids):
-        inputs = self.process(image, return_tensors="pt")
+    def train(self, mode=True):
+        super().train(mode)
+        self.model.eval()
+        return self
+
+    def forward(self, image, image_ids=None):
+        # Dataset tensors are already in [0, 1]. Rescaling again divides by 255.
+        inputs = self.process(images=image.detach().cpu(), do_rescale=False, return_tensors="pt")
+        device = next(self.model.parameters()).device
         with torch.no_grad():
             outputs = self.model(**inputs.to(device))
-            
-        image_embedding = outputs.last_hidden_state
-        return image_embedding, image_ids
-    
-### Quesion embedding model
+        return outputs.last_hidden_state, image_ids
+
+
 class QuesEmbedding(nn.Module):
-    def __init__(self, input_size=768, output_size=768):
-        super(QuesEmbedding, self).__init__()
-        self.tokenizer = AutoTokenizer.from_pretrained(Config.textmodel_dir)
-        self.phobert = AutoModel.from_pretrained(Config.textmodel_dir)
-        self.lstm = nn.LSTM(input_size, output_size, batch_first=True)
+    def __init__(self, input_size=None, output_size=768, model_name=Config.textmodel_dir):
+        super().__init__()
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        self.phobert = AutoModel.from_pretrained(model_name)
+        self.lstm = nn.LSTM(input_size or self.phobert.config.hidden_size, output_size, batch_first=True)
 
-    def forward(self, ques):
-        tokenized_input = self.tokenizer(ques, return_tensors='pt', padding='max_length', max_length=Config.MAX_LEN_QUES, truncation=True)
-        ques = self.phobert(**tokenized_input.to(device)).last_hidden_state
-        _, (h, _) = self.lstm(ques)
-        return h.squeeze(0)
-    
-### Answer embedding model
+    def forward(self, questions):
+        tokens = self.tokenizer(list(questions), return_tensors='pt', padding=True,
+                                max_length=Config.MAX_LEN_QUES, truncation=True)
+        tokens = tokens.to(next(self.phobert.parameters()).device)
+        embeddings = self.phobert(**tokens).last_hidden_state
+        lengths = tokens['attention_mask'].sum(1).cpu()
+        packed = pack_padded_sequence(embeddings, lengths, batch_first=True, enforce_sorted=False)
+        _, (hidden, _) = self.lstm(packed)
+        return hidden.squeeze(0)
+
+
 class AnsEmbedding(nn.Module):
-    def __init__(self, input_size=768):
-        super(AnsEmbedding, self).__init__()
-        self.tokenizer = AutoTokenizer.from_pretrained(Config.textmodel_dir)
-        self.phobert_embed = AutoModel.from_pretrained(Config.textmodel_dir).embeddings.to(device)
+    def __init__(self, input_size=768, model_name=Config.textmodel_dir):
+        super().__init__()
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        self.phobert_embed = AutoModel.from_pretrained(model_name).embeddings
 
-    def forward(self, ans):   
-        tokenized_input = self.tokenizer(ans, return_tensors='pt', padding='max_length', max_length=Config.MAX_LEN_ANS, truncation=True, return_attention_mask=False)
-        ans = self.phobert_embed(**tokenized_input.to(device))
-        return tokenized_input['input_ids'], ans
-    
+    def tokenize(self, answers, max_len=Config.MAX_LEN_ANS):
+        if max_len < 2:
+            raise ValueError('Answer length must allow BOS and EOS tokens')
+        tok = self.tokenizer
+        bos = tok.bos_token_id if tok.bos_token_id is not None else tok.cls_token_id
+        eos = tok.eos_token_id if tok.eos_token_id is not None else tok.sep_token_id
+        if bos is None or eos is None or tok.pad_token_id is None:
+            raise ValueError('Tokenizer needs BOS/CLS, EOS/SEP and PAD tokens')
+        rows = tok(list(answers), add_special_tokens=False, truncation=True,
+                   max_length=max_len - 2)['input_ids']
+        rows = [[bos] + row + [eos] + [tok.pad_token_id] * (max_len - len(row) - 2) for row in rows]
+        return torch.tensor(rows, dtype=torch.long, device=next(self.phobert_embed.parameters()).device)
 
-if __name__=="__main__":
-    df_train, _, _ = preprocess_data(args)
-    train_vlsp_dataset = ViTextVQA_Dataset(df_train, transform=Config.transforms)
-    train_loader = DataLoader(train_vlsp_dataset, batch_size=args.batch_size, shuffle=True)
+    def embed_ids(self, input_ids):
+        return self.phobert_embed(input_ids=input_ids)
 
-    image_model = ImageEmbedding().to(device)
-    ques_model = QuesEmbedding(output_size=768).to(device)
-    ans_model = AnsEmbedding()
-
-    for batch in train_loader:
-        anno_ids, images, questions, answers = batch
-        if torch.cuda.is_available():
-            images = images.cuda()
-            questions = questions
-            anno_ids = anno_ids
-            answers = answers
-        
-        with torch.no_grad():
-            image_embeddings, att_ids = image_model(images, image_ids=anno_ids)
-            ques_embeddings = ques_model(questions)
-            ans_vocab, ans_embedds = ans_model(answers)
-        break    
-
-    image_embeddings = image_embeddings.reshape(args.batch_size, 768, -1).permute(0, 2, 1)
-    ques_embeddings = ques_embeddings.unsqueeze(1)
-    print("image embedding size: ", image_embeddings.size())
-    print("question embedding size ", ques_embeddings.size())
-    print("answer vocab size: ", ans_vocab.size())
-    print("answer embedding size: ", ans_embedds.size())
+    def forward(self, answers, max_len=Config.MAX_LEN_ANS):
+        ids = self.tokenize(answers, max_len)
+        return ids, self.embed_ids(ids)

@@ -1,6 +1,6 @@
 import argparse
 
-def get_args():
+def get_args(argv=None):
     parser = argparse.ArgumentParser()
 
     parser.add_argument("--batch_size", type=int, default=4, help="Batch size for training the model")
@@ -13,4 +13,8 @@ def get_args():
     parser.add_argument("--json_folder_path", type=str, default="data/json", help="Path to folder containing JSON files")
     parser.add_argument("--csv_folder_path", type=str, default="data/csv", help="Path to folder where CSV files will be saved")
     
-    return parser.parse_args()
+    parser.add_argument("--text_model", default="vinai/phobert-base-v2")
+    parser.add_argument("--image_model", default="facebook/deit-base-distilled-patch16-224")
+    parser.add_argument("--language", choices=["vi", "en"], default="vi")
+    parser.add_argument("--split", choices=["dev", "test"], default="dev")
+    return parser.parse_args(argv)

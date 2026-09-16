@@ -57,6 +57,8 @@ def rows_url(config: str, split: str, offset: int, length: int = PAGE_SIZE) -> s
 
 
 def fetch_image_records(source_split: str, count: int, workers: int) -> list[dict]:
+    if count < 1 or workers < 1:
+        raise ValueError("count and workers must be positive")
     config = f"{source_split}_balanced_images"
     offsets = list(range(0, count, PAGE_SIZE))
     pages = {}
@@ -177,14 +179,15 @@ def materialize_split(
         annotation = annotations[record["id"]]
         rows.append(
             {
-                "image": f"{record['id']}.jpg",
+                "anno_id": str(record["id"]),
+                "image": f"{name}/{record['id']}.jpg",
                 "question": annotation["question"],
                 "answer": annotation["answer"],
             }
         )
     csv_path = output_dir / f"{name}.csv"
     with csv_path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=("image", "question", "answer"))
+        writer = csv.DictWriter(handle, fieldnames=("anno_id", "image", "question", "answer"))
         writer.writeheader()
         writer.writerows(rows)
     return rows
@@ -238,7 +241,7 @@ def main() -> None:
 
     corpus = "\n".join(
         value
-        for row in (*train_rows, *val_rows, *test_rows)
+        for row in train_rows
         for value in (row["question"], row["answer"])
     )
     (output_dir / "corpus.txt").write_text(corpus + "\n", encoding="utf-8")
