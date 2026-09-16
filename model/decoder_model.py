@@ -116,14 +116,14 @@ class DecoderLayer(nn.Module):
         self.norm3 = LayerNormalization(parameters_shape=[d_model])
         self.dropout3 = nn.Dropout(p=drop_prob)
 
-    def forward(self, x, y, decoder_mask):
+    def forward(self, x, y, decoder_mask, memory_mask=None):
         _y = y
         y = self.self_attention(y, mask=decoder_mask)
         y = self.dropout1(y)
         y = self.norm1(y + _y)
 
         _y = y # 30 x 200 x 512
-        y = self.encoder_decoder_attention(x, y, mask=None)
+        y = self.encoder_decoder_attention(x, y, mask=memory_mask)
         y = self.dropout2(y)
         y = self.norm2(y + _y)
 
@@ -135,9 +135,9 @@ class DecoderLayer(nn.Module):
 
 class SequentialDecoder(nn.Sequential):
     def forward(self, *inputs):
-        x, y, mask = inputs
+        x, y, mask, memory_mask = inputs
         for module in self._modules.values():
-            y = module(x, y, mask)
+            y = module(x, y, mask, memory_mask)
         return y
 
 class Decoder(nn.Module):
@@ -146,6 +146,6 @@ class Decoder(nn.Module):
         self.layers = SequentialDecoder(*[DecoderLayer(d_model, ffn_hidden, num_heads, drop_prob)
                                           for _ in range(num_layers)])
 
-    def forward(self, x, y, mask):
-        y = self.layers(x, y, mask)
+    def forward(self, x, y, mask, memory_mask=None):
+        y = self.layers(x, y, mask, memory_mask)
         return y

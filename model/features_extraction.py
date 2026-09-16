@@ -27,6 +27,13 @@ class ImageEmbedding(nn.Module):
             outputs = self.model(**inputs.to(device))
         return outputs.last_hidden_state, image_ids
 
+    @staticmethod
+    def spatial_tokens(hidden_states):
+        """Remove DeiT's class and distillation tokens, retaining patch tokens."""
+        if hidden_states.size(1) <= 2:
+            raise ValueError("DeiT output does not contain spatial patch tokens")
+        return hidden_states[:, 2:]
+
 
 class QuesEmbedding(nn.Module):
     def __init__(self, input_size=None, output_size=768, model_name=Config.textmodel_dir):
@@ -34,13 +41,41 @@ class QuesEmbedding(nn.Module):
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.phobert = AutoModel.from_pretrained(model_name)
         self.lstm = nn.LSTM(input_size or self.phobert.config.hidden_size, output_size, batch_first=True)
+        self.encoder_frozen = False
+
+    def freeze_encoder(self):
+        self.encoder_frozen = True
+        self.phobert.requires_grad_(False)
+        self.phobert.eval()
+
+    def train(self, mode=True):
+        super().train(mode)
+        if self.encoder_frozen:
+            self.phobert.eval()
+        return self
+
+    def encode_tokens(self, questions):
+        tokens = self.tokenizer(
+            list(questions), return_tensors='pt', padding=True,
+            max_length=Config.MAX_LEN_QUES, truncation=True,
+            return_special_tokens_mask=True,
+        )
+        special_mask = tokens.pop('special_tokens_mask').bool()
+        tokens = tokens.to(next(self.phobert.parameters()).device)
+        special_mask = special_mask.to(tokens['input_ids'].device)
+        if self.encoder_frozen:
+            with torch.no_grad():
+                embeddings = self.phobert(**tokens).last_hidden_state
+        else:
+            embeddings = self.phobert(**tokens).last_hidden_state
+        padding_mask = tokens['attention_mask'].eq(0) | special_mask
+        return embeddings, padding_mask, tokens['input_ids']
 
     def forward(self, questions):
-        tokens = self.tokenizer(list(questions), return_tensors='pt', padding=True,
-                                max_length=Config.MAX_LEN_QUES, truncation=True)
-        tokens = tokens.to(next(self.phobert.parameters()).device)
-        embeddings = self.phobert(**tokens).last_hidden_state
-        lengths = tokens['attention_mask'].sum(1).cpu()
+        embeddings, _, input_ids = self.encode_tokens(questions)
+        # Preserve the SAN baseline contract: summarize all non-padding tokens,
+        # including tokenizer boundary tokens, with the LSTM.
+        lengths = input_ids.ne(self.tokenizer.pad_token_id).sum(1).cpu()
         packed = pack_padded_sequence(embeddings, lengths, batch_first=True, enforce_sorted=False)
         _, (hidden, _) = self.lstm(packed)
         return hidden.squeeze(0)
@@ -51,6 +86,18 @@ class AnsEmbedding(nn.Module):
         super().__init__()
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.phobert_embed = AutoModel.from_pretrained(model_name).embeddings
+        self.embedding_frozen = False
+
+    def freeze(self):
+        self.embedding_frozen = True
+        self.phobert_embed.requires_grad_(False)
+        self.phobert_embed.eval()
+
+    def train(self, mode=True):
+        super().train(mode)
+        if self.embedding_frozen:
+            self.phobert_embed.eval()
+        return self
 
     def tokenize(self, answers, max_len=Config.MAX_LEN_ANS):
         if max_len < 2:

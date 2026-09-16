@@ -1,5 +1,6 @@
 """Offline logic regressions using small real Transformers models, not hub downloads."""
-import importlib.util
+from contextlib import redirect_stdout
+import io
 import json
 from pathlib import Path
 import tempfile
@@ -15,24 +16,16 @@ from transformers import BertConfig, BertModel, BertTokenizer, DeiTConfig, DeiTM
 
 from configs.config import Config
 from model.vqa_model import VQAModel
+from model.optimal_transport import OTConfig
 from model.decoder_model import MultiHeadAttention, MultiHeadCrossAttention, scaled_dot_product
 from model.sans import StackAttention
 from utils.data_processing import process_dataframe
 from utils.ViTextVQA_dataset import ViTextVQA_Dataset
 from utils.metrics import compute_em_and_f1
 from utils.json_to_csv import convert_json_folder
-from utils.checkpoint import load_model
+from utils.checkpoint import load_model, save_checkpoint
 from train import train
 from test import evaluation
-
-
-def load_source(name, filename):
-    import sys
-    spec = importlib.util.spec_from_file_location(name, filename)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
 
 
 class ModelLogicTests(unittest.TestCase):
@@ -53,8 +46,6 @@ class ModelLogicTests(unittest.TestCase):
         DeiTModel(DeiTConfig(hidden_size=16, num_hidden_layers=1, num_attention_heads=4,
                              intermediate_size=32, image_size=32, patch_size=16)).save_pretrained(cls.visual)
         DeiTImageProcessor(size={'height': 32, 'width': 32}, crop_size={'height': 32, 'width': 32}).save_pretrained(cls.visual)
-        cls.alternatives = load_source('openvi_logic', 'model/re-implement_model/OpenviVQA_re-implement.py')
-        cls.text_alternatives = load_source('vitext_logic', 'model/re-implement_model/ViTextVQA_re-implement.py')
 
     @classmethod
     def tearDownClass(cls):
@@ -63,6 +54,14 @@ class ModelLogicTests(unittest.TestCase):
     def make_model(self):
         return VQAModel(text_model=str(self.text), image_model=str(self.visual),
                         output_size=16, d_model=16, ffn_hidden=32, num_layers=2, drop_prob=0)
+
+    def make_ot_model(self, fusion='uot'):
+        return VQAModel(
+            text_model=str(self.text), image_model=str(self.visual),
+            output_size=16, d_model=16, ffn_hidden=32, num_layers=1,
+            drop_prob=0, fusion=fusion,
+            ot_config=OTConfig(ot_dim=8, epsilon=0.1, max_iterations=30),
+        )
 
     def test_shifted_targets_and_backward_for_single_image(self):
         model = self.make_model()
@@ -123,7 +122,7 @@ class ModelLogicTests(unittest.TestCase):
     def test_generation_prefix_eos_and_per_sample_padding(self):
         model = self.make_model()
         seen = []
-        def decode(ids, memory):
+        def decode(ids, memory, **kwargs):
             self.assertFalse(model.training)
             seen.append(ids.clone())
             out = torch.zeros(2, ids.size(1), 12)
@@ -149,9 +148,15 @@ class ModelLogicTests(unittest.TestCase):
         criterion = nn.CrossEntropyLoss(ignore_index=model.pad_token_id)
         optimizer = torch.optim.AdamW(model.parameters(), lr=0.001)
         scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda _: 1)
-        losses, _, _ = train(model, loader, 1, optimizer, scheduler, criterion)
+        output = io.StringIO()
+        with redirect_stdout(output):
+            losses, _, _ = train(
+                model, loader, 1, optimizer, scheduler, criterion,
+                epoch_offset=4, total_epochs=50,
+            )
         self.assertEqual(len(losses), 2)
-        with patch.object(model, 'generate', side_effect=lambda images, questions, ids: torch.tensor([[5, 3]] * len(questions))) as generation:
+        self.assertIn('Epoch 5/50:', output.getvalue())
+        with patch.object(model, 'generate', side_effect=lambda images, questions, ids, **kwargs: torch.tensor([[5, 3]] * len(questions))) as generation:
             loss, em, f1 = evaluation(model, loader, criterion)
         self.assertEqual(generation.call_count, 2)
         self.assertEqual((em, f1), (1.0, 1.0))
@@ -170,6 +175,20 @@ class ModelLogicTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'Retrain'):
             load_model(path, torch.device('cpu'))
 
+    def test_answer_embeddings_can_be_frozen(self):
+        model = VQAModel(
+            text_model=str(self.text), image_model=str(self.visual),
+            output_size=16, d_model=16, ffn_hidden=32, num_layers=1,
+            freeze_answer_embeddings=True,
+        )
+        model.train()
+        self.assertFalse(model.ans_model.phobert_embed.training)
+        self.assertFalse(any(
+            parameter.requires_grad
+            for parameter in model.ans_model.phobert_embed.parameters()
+        ))
+        self.assertTrue(model.model_config['freeze_answer_embeddings'])
+
     def test_attention_head_merge_and_cross_attention_lengths(self):
         torch.manual_seed(4)
         x = torch.randn(2, 5, 16)
@@ -183,88 +202,72 @@ class ModelLogicTests(unittest.TestCase):
         self.assertEqual(cross(torch.randn(2, 3, 16), x).shape, (2, 5, 16))
         self.assertEqual(StackAttention(16, 8, dropout=False)(x, torch.randn(2, 1, 16)).shape, (2, 16))
 
-    def test_qumlag_infers_missing_modality_masks(self):
-        mod = self.alternatives
-        cfg = mod.QuMLAGConfig(vocab_size=12, image_feature_dim=8, hidden_dim=16, num_heads=4,
-                              num_sa_layers=1, num_ga_layers=1, num_decoder_layers=1, ff_dim=32,
-                              dropout=0, max_answer_len=4)
-        model = mod.QuMLAG(cfg).eval()
-        question = torch.tensor([[0, 5, 1]])
-        images = torch.randn(1, 2, 8)
-        _, mask = model.encode(question, images, question.eq(1), None)
-        self.assertEqual(mask.shape, (1, 5))
-        self.assertTrue(mask[0, 2])
-        output = model(question, images, max_decode_len=4)
-        self.assertEqual(output['generated_ids'].size(0), 1)
-        with self.assertRaises(ValueError):
-            model(question, images, max_decode_len=5)
-
-    def make_m4c(self):
-        mod = self.alternatives
-        cfg = mod.M4CConfig(vocab_size=12, d_model=16, num_heads=4, object_feat_dim=8,
-                            ocr_det_feat_dim=8, ocr_rec_feat_dim=4, ocr_fasttext_dim=4,
-                            num_mmt_layers=2, num_question_layers=1, max_answer_len=4,
-                            dropout=0, pretrained_bert=False)
-        return mod.M4C(cfg).eval()
-
-    def test_m4c_causal_mask_blocks_indirect_leakage(self):
-        model = self.make_m4c()
-        mask = model.build_autoregressive_joint_mask(2, 2, 3, 4, torch.device('cpu'))
-        self.assertTrue(mask[:7, 7:].all())
-        self.assertTrue(mask[7, 8:].all())
-        self.assertFalse(mask[8, :9].any())
-        obj, ocr, question = torch.randn(1, 2, 16), torch.randn(1, 2, 16), torch.randn(1, 3, 16)
-        pad2, pad3 = torch.zeros(1, 2, dtype=torch.bool), torch.zeros(1, 3, dtype=torch.bool)
-        first, ap = model.encode_answer_tokens(torch.tensor([[0, 5, 6, 2]]), ocr)
-        second, _ = model.encode_answer_tokens(torch.tensor([[0, 5, 10, 11]]), ocr)
+    def test_ot_online_cached_path_checkpoint_and_diagnostics(self):
+        model = self.make_ot_model().eval()
+        images = torch.rand(2, 3, 32, 32)
+        questions = ['what color ?', 'color ?']
         with torch.no_grad():
-            out1, _, _ = model.mmt_forward(obj, pad2, ocr, pad2, question, pad3, first, ap)
-            out2, _, _ = model.mmt_forward(obj, pad2, ocr, pad2, question, pad3, second, ap)
-        torch.testing.assert_close(out1[:, :2], out2[:, :2])
+            online = model.encode(images, questions, return_diagnostics=True)
+            image_features, _ = model.image_model(images)
+            question_features, question_mask, _ = model.ques_model.encode_tokens(questions)
+            cached = model.encode_from_features(
+                image_features.half(), question_features.half(), question_mask, True
+            )
+        torch.testing.assert_close(online.memory, cached.memory, atol=2e-3, rtol=2e-3)
+        self.assertEqual(cached.memory_padding_mask.tolist(), question_mask.tolist())
+        self.assertTrue(torch.isfinite(cached.transport.plan).all())
+        generated = model.generate_from_features(
+            image_features, question_features, question_mask,
+            max_len=5, return_diagnostics=True,
+        )
+        self.assertEqual(generated.generated_ids.size(0), 2)
+        path = self.root / 'ot-v3.pt'
+        save_checkpoint(
+            path, model=model, text_model=str(self.text), image_model=str(self.visual),
+            language='en', epoch=1, global_step=2,
+        )
+        restored, language = load_model(path, torch.device('cpu'))
+        self.assertEqual((restored.fusion_type, language), ('uot', 'en'))
+        with torch.no_grad():
+            expected = model.generate(images, questions, max_len=5)
+            actual = restored.generate(images, questions, max_len=5)
+        torch.testing.assert_close(actual, expected)
 
-    def test_m4c_can_generate_and_reembed_ocr_pointers(self):
-        model = self.make_m4c()
-        args = dict(question_token_ids=torch.tensor([[0, 5, 2]]), obj_features=torch.randn(1, 2, 8),
-                    obj_boxes=torch.rand(1, 2, 4), ocr_det_features=torch.randn(1, 2, 8),
-                    ocr_rec_features=torch.randn(1, 2, 4), ocr_fasttext_features=torch.randn(1, 2, 4),
-                    ocr_boxes=torch.rand(1, 2, 4))
-        steps = []
-        def scores(answer, ocr, pad):
-            steps.append(answer.size(1))
-            out = torch.zeros(1, answer.size(1), 14)
-            out[:, -1, 12 if answer.size(1) == 1 else 2] = 10
-            return out
-        with patch.object(model, 'compute_scores', side_effect=scores):
-            result = model(**args)
-        self.assertEqual(result['generated_ids'].tolist(), [[12, 2]])
-        self.assertEqual(result['scores'].shape, (1, 2, 14))
-        train_out = model(**args, answer_prev_ids=torch.tensor([[0, 12, 2]]))
-        self.assertEqual(train_out['scores'].shape, (1, 3, 14))
+    def test_uot_tiny_batch_learns_and_generates_without_reference(self):
+        torch.manual_seed(8)
+        model = self.make_ot_model()
+        optimizer = torch.optim.Adam(
+            (parameter for parameter in model.parameters() if parameter.requires_grad),
+            lr=0.02,
+        )
+        images = torch.rand(1, 3, 32, 32)
+        first_loss = None
+        for _ in range(60):
+            logits, targets = model(
+                images, ['what color ?'], ['red'], max_len=6
+            )
+            loss = nn.functional.cross_entropy(
+                logits.transpose(1, 2), targets, ignore_index=model.pad_token_id
+            )
+            first_loss = loss.item() if first_loss is None else first_loss
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+        self.assertLess(loss.item(), first_loss * 0.1)
+        generated = model.generate(images, ['what color ?'], max_len=6)
+        self.assertEqual(model.answers_from_ids(generated), ['red'])
 
-    def test_mlpag_accepts_extended_teacher_forcing_ids(self):
-        mod = self.alternatives
-        cfg = mod.MLPAGConfig(vocab_size=12, image_feature_dim=8, hidden_dim=16, num_heads=4,
-                              num_decoder_layers=1, ff_dim=32, dropout=0, max_answer_len=4)
-        model = mod.MLPAG(cfg).eval()
-        scene = torch.tensor([[5, 6]])
-        ids = torch.tensor([[0, 12, 1]])
-        self.assertEqual(model.map_extended_to_vocab_ids(ids, scene).tolist(), [[0, 5, 1]])
-        out = model(torch.tensor([[0, 5, 2]]), scene, torch.randn(1, 2, 8), decoder_input_ids=ids)
-        self.assertEqual(out['scores'].shape, (1, 3, 14))
-
-    def test_vitext_generation_length_validation(self):
-        mod = self.text_alternatives
-        cfg = mod.TextVQAConfig(vocab_size=12, visual_feature_dim=8, token_embed_dim=8,
-                               hidden_dim=16, num_heads=4, num_encoder_layers=1,
-                               num_decoder_layers=1, ff_dim=32, dropout=0, max_answer_len=4)
-        for model_type in (mod.PreSTUModel, mod.SaLModel):
-            model = model_type(cfg).eval()
-            out = model(torch.randn(1, 2, 8), torch.tensor([[1, 5, 2]]),
-                        torch.tensor([[5, 6]]), torch.rand(1, 2, 4), max_decode_len=4)
-            self.assertEqual(out['generated_ids'].size(0), 1)
-            with self.assertRaises(ValueError):
-                model.greedyGenerate(torch.randn(1, 2, 16), torch.zeros(1, 2, dtype=torch.bool), 5)
-
+    def test_decoder_ignores_padded_ot_memory_tokens(self):
+        model = self.make_ot_model().eval()
+        ids = torch.tensor([[2, 5]])
+        memory = torch.randn(1, 3, 16)
+        changed = memory.clone()
+        changed[:, 2] = 1000
+        mask = torch.tensor([[False, False, True]])
+        with torch.no_grad():
+            first = model.decode(ids, memory, memory_padding_mask=mask)
+            second = model.decode(ids, changed, memory_padding_mask=mask)
+        torch.testing.assert_close(first, second)
 
 class DataLogicTests(unittest.TestCase):
     def test_metrics_count_repeated_words_and_empty_answers(self):

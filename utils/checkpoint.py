@@ -1,15 +1,137 @@
+from __future__ import annotations
+
+import random
+from pathlib import Path
+
 import torch
 
+from configs.config import Config
 from model.vqa_model import VQAModel
 
 
+def _adapt_deit_state_dict(state_dict, target_keys):
+    """Bridge the DeiT module-path rename across Transformers releases."""
+    target_keys = set(target_keys)
+    old_marker = "image_model.model.encoder.layer."
+    new_marker = "image_model.model.layers."
+    source_uses_new = any(key.startswith(new_marker) for key in state_dict)
+    target_uses_new = any(key.startswith(new_marker) for key in target_keys)
+    if source_uses_new == target_uses_new:
+        return state_dict
+    old_to_new = {
+        ".attention.attention.query.": ".attention.q_proj.",
+        ".attention.attention.key.": ".attention.k_proj.",
+        ".attention.attention.value.": ".attention.v_proj.",
+        ".attention.output.dense.": ".attention.o_proj.",
+        ".intermediate.dense.": ".mlp.fc1.",
+        ".output.dense.": ".mlp.fc2.",
+    }
+    converted = {}
+    for key, value in state_dict.items():
+        updated = key
+        if source_uses_new and key.startswith(new_marker):
+            updated = key.replace(new_marker, old_marker, 1)
+            for old, new in old_to_new.items():
+                updated = updated.replace(new, old)
+        elif not source_uses_new and key.startswith(old_marker):
+            updated = key.replace(old_marker, new_marker, 1)
+            for old, new in old_to_new.items():
+                updated = updated.replace(old, new)
+        converted[updated] = value
+    return converted
+
+
+def checkpoint_payload(
+    model, text_model, image_model, language, optimizer=None, scheduler=None,
+    epoch=0, global_step=0, best_metric=None, epochs_without_improvement=0,
+):
+    return {
+        "format_version": 3,
+        "model_state_dict": model.state_dict(),
+        "model_config": model.model_config,
+        "text_model": text_model,
+        "image_model": image_model,
+        "language": language,
+        "encoder_revisions": {
+            "text": getattr(model.ques_model.phobert.config, "_commit_hash", None),
+            "image": getattr(model.image_model.model.config, "_commit_hash", None),
+        },
+        "preprocessing": {
+            "max_question_length": Config.MAX_LEN_QUES,
+            "max_answer_length": Config.MAX_LEN_ANS,
+        },
+        "optimizer_state_dict": optimizer.state_dict() if optimizer is not None else None,
+        "scheduler_state_dict": scheduler.state_dict() if scheduler is not None else None,
+        "epoch": int(epoch),
+        "global_step": int(global_step),
+        "best_metric": best_metric,
+        "epochs_without_improvement": int(epochs_without_improvement),
+        "torch_rng_state": torch.get_rng_state(),
+        "cuda_rng_state": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+        "mps_rng_state": (torch.mps.get_rng_state()
+                          if torch.backends.mps.is_available() else None),
+        "python_rng_state": random.getstate(),
+    }
+
+
+def save_checkpoint(path, **kwargs):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    torch.save(checkpoint_payload(**kwargs), temporary)
+    temporary.replace(path)
+
+
+def read_checkpoint(checkpoint_path, device):
+    # Stage on CPU so loading a large checkpoint does not temporarily duplicate
+    # the complete state dictionary in limited CUDA/MPS device memory.
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+    if not isinstance(checkpoint, dict):
+        raise ValueError("Checkpoint must be a dictionary")
+    version = checkpoint.get("format_version")
+    if version not in {2, 3}:
+        raise ValueError(
+            "Legacy checkpoint was trained with the incorrect decoder/objective. "
+            "Retrain with the corrected train.py before generating answers."
+        )
+    return checkpoint
+
+
 def load_model(checkpoint_path, device):
-    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
-    if not isinstance(checkpoint, dict) or checkpoint.get("format_version") != 2:
-        raise ValueError("Legacy checkpoint was trained with the incorrect decoder/objective. "
-                         "Retrain with the corrected train.py before generating answers.")
-    model = VQAModel(text_model=checkpoint["text_model"], image_model=checkpoint["image_model"],
-                     **checkpoint.get("model_config", {})).to(device)
-    model.load_state_dict(checkpoint["model_state_dict"], strict=True)
+    checkpoint = read_checkpoint(checkpoint_path, device)
+    model_config = dict(checkpoint.get("model_config", {}))
+    if checkpoint["format_version"] == 2:
+        model_config["fusion"] = "san"
+        model_config.pop("ot_config", None)
+    model = VQAModel(
+        text_model=checkpoint["text_model"], image_model=checkpoint["image_model"],
+        **model_config,
+    )
+    state = _adapt_deit_state_dict(checkpoint["model_state_dict"], model.state_dict())
+    model.load_state_dict(state, strict=True)
+    model = model.to(device)
     model.eval()
     return model, checkpoint.get("language", "vi")
+
+
+def restore_training_state(checkpoint, model, optimizer, scheduler):
+    if checkpoint.get("format_version") != 3:
+        raise ValueError("Only version-3 checkpoints contain resumable training state")
+    state = _adapt_deit_state_dict(checkpoint["model_state_dict"], model.state_dict())
+    model.load_state_dict(state, strict=True)
+    if checkpoint.get("optimizer_state_dict") is not None:
+        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+    if checkpoint.get("scheduler_state_dict") is not None:
+        scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+    if checkpoint.get("torch_rng_state") is not None:
+        torch.set_rng_state(checkpoint["torch_rng_state"].cpu())
+    if torch.cuda.is_available() and checkpoint.get("cuda_rng_state") is not None:
+        torch.cuda.set_rng_state_all(
+            [state.cpu() for state in checkpoint["cuda_rng_state"]]
+        )
+    if torch.backends.mps.is_available() and checkpoint.get("mps_rng_state") is not None:
+        torch.mps.set_rng_state(checkpoint["mps_rng_state"].cpu())
+    if checkpoint.get("python_rng_state") is not None:
+        random.setstate(checkpoint["python_rng_state"])
+    return (int(checkpoint.get("epoch", 0)), int(checkpoint.get("global_step", 0)),
+            checkpoint.get("best_metric"))

@@ -1,17 +1,18 @@
 # OT-VQA
 
-Train a Vietnamese visual question answering model, evaluate answers generated without references, and predict from one image/question.
+Train a visual question answering model with SAN, Balanced OT, or question-conditioned
+Unbalanced OT fusion. Evaluation and prediction generate answers without references.
 
 ```bash
 python -m pip install -r requirements.txt
-python train.py --train_csv_path data/csv/ViTextVQA_train.csv --img_path data/images/st_images --model_path data
-python test.py --dev_csv_path data/csv/ViTextVQA_dev.csv --img_path data/images/st_images --model_path data
-python predict.py --checkpoint data/vi_text.pt --image path/to/image.jpg --question "Trong ảnh có gì?"
+python train.py --train_csv_path data/csv/ViTextVQA_train.csv --dev_csv_path data/csv/ViTextVQA_dev.csv --img_path data/images/st_images --model_path data/vietnamese_san
+python test.py --dev_csv_path data/csv/ViTextVQA_dev.csv --img_path data/images/st_images --model_path data/vietnamese_san
+python predict.py --checkpoint data/vietnamese_san/best.pt --image path/to/image.jpg --question "Trong ảnh có gì?"
 ```
 
 The first run downloads DeiT and PhoBERT. Vietnamese questions and answers are word segmented consistently during training and prediction. CSVs require `image`, `question`, and `answer`; `anno_id` is optional. Image paths are relative to `--img_path`. Training needs only its training CSV; evaluation loads only its selected split. Use `--split test --test_csv_path ...` to score a labelled test set. Prediction needs no answer or CSV.
 
-**Retrain old checkpoints.** The previous code used an incorrect objective and exposed full answers through cross-attention. Corrected training predicts the next token from a shifted answer prefix with causal attention. New checkpoints include model settings and preprocessing language. Loading an old bare state dictionary raises an explanatory error.
+**Retrain old checkpoints.** The previous code used an incorrect objective and exposed full answers through cross-attention. Corrected training predicts the next token from a shifted answer prefix with causal attention. New version-3 checkpoints include the fusion configuration, optimizer, scheduler, progress, preprocessing settings, and random states. Version-2 SAN checkpoints still load; an old bare state dictionary raises an explanatory error.
 
 Training EM/F1 are teacher-forced diagnostics. `test.py` calculates EM/F1 from autoregressive generation and reports teacher-forced loss separately. No quality claim can be made without retraining and evaluating on real held-out data.
 
@@ -20,12 +21,137 @@ Training EM/F1 are teacher-forced diagnostics. `test.py` calculates EM/F1 from a
 The included subset uses bare image filenames and separate image folders. Use an English text encoder and English preprocessing:
 
 ```bash
-python train.py --train_csv_path data/gqa_dataset/train.csv --img_path data/gqa_dataset/images/train --text_model bert-base-uncased --language en --model_path data/gqa_model
-python test.py --dev_csv_path data/gqa_dataset/val.csv --img_path data/gqa_dataset/images/val --model_path data/gqa_model
+python train.py --train_csv_path data/gqa_dataset/train.csv --dev_csv_path data/gqa_dataset/val.csv --train_img_path data/gqa_dataset/images/train --dev_img_path data/gqa_dataset/images/val --text_model bert-base-uncased --language en --model_path data/gqa_model
+python test.py --dev_csv_path data/gqa_dataset/val.csv --dev_img_path data/gqa_dataset/images/val --model_path data/gqa_model
 python predict.py --checkpoint data/gqa_model/vi_text.pt --image data/gqa_dataset/images/test/IMAGE_ID.jpg --question "What color is it?"
 ```
 
 PhoBERT is a Vietnamese encoder; do not use the Vietnamese defaults for this English dataset. The downloader now writes split-relative image paths such as `train/123.jpg`, so newly downloaded CSVs use `--img_path data/gqa_dataset/images` for all splits. Its generated corpus contains training text only; the existing corpus predates this correction.
+
+## Optimal Transport fusion
+
+Use `balanced_ot` for exact marginals or `uot` for KL-relaxed marginals. The supplied
+CPU and GPU profiles control OT dimension, regularization, and Sinkhorn iterations.
+
+```bash
+python train.py \
+  --train_csv_path data/gqa_dataset/train.csv \
+  --dev_csv_path data/gqa_dataset/val.csv \
+  --train_img_path data/gqa_dataset/images/train \
+  --dev_img_path data/gqa_dataset/images/val \
+  --text_model bert-base-uncased --language en \
+  --fusion uot --ot_profile configs/ot_cpu.json \
+  --model_path data/gqa_uot --diagnostics
+
+python test.py \
+  --dev_csv_path data/gqa_dataset/val.csv \
+  --dev_img_path data/gqa_dataset/images/val \
+  --checkpoint data/gqa_uot/best.pt --diagnostics
+
+python predict.py \
+  --checkpoint data/gqa_uot/best.pt \
+  --image data/gqa_dataset/images/test/IMAGE_ID.jpg \
+  --question "What color is it?" --diagnostics \
+  --diagnostics_output data/gqa_uot/example_transport.png
+```
+
+Training writes `last.pt` each epoch and updates `best.pt` using generated validation
+F1, with validation loss as the tie-breaker. Resume an interrupted run with
+`--resume data/gqa_uot/last.pt` and keep `--epochs` set to the total target epoch count.
+
+Frozen encoder features can be cached as float16. Build both split caches under one
+root so training can select `train/` and `dev/` automatically:
+
+```bash
+python precompute_features.py --csv data/gqa_dataset/train.csv --img_path data/gqa_dataset/images/train --output data/gqa_cache/train --text_model bert-base-uncased --language en
+python precompute_features.py --csv data/gqa_dataset/val.csv --img_path data/gqa_dataset/images/val --output data/gqa_cache/dev --text_model bert-base-uncased --language en
+
+python train.py \
+  --train_csv_path data/gqa_dataset/train.csv \
+  --dev_csv_path data/gqa_dataset/val.csv \
+  --feature_cache data/gqa_cache \
+  --text_model bert-base-uncased --language en \
+  --fusion uot --ot_profile configs/ot_cpu.json \
+  --model_path data/gqa_uot_cached
+```
+
+The cache manifest fingerprints the CSV and records encoder and preprocessing settings.
+Loading refuses stale data or a different encoder. For standalone evaluation, pass the
+split cache itself, for example `--feature_cache data/gqa_cache/dev`.
+
+## Apple Silicon GPU training with MPS
+
+All entry points accept `--device auto|cpu|cuda|mps`. The default `auto` selects CUDA
+first, then Apple MPS, then CPU. Use `--device mps` when you want the command to fail
+instead of silently falling back if Metal acceleration is unavailable.
+
+Verify that your PyTorch installation can access the Mac GPU:
+
+```bash
+python -c "import torch; print(torch.backends.mps.is_built(), torch.backends.mps.is_available())"
+```
+
+Both values should be `True`. Train the OT model with the MPS-specific profile and a
+conservative initial batch size:
+
+```bash
+python train.py \
+  --device mps --batch_size 2 \
+  --train_csv_path data/gqa_dataset/train.csv \
+  --dev_csv_path data/gqa_dataset/val.csv \
+  --train_img_path data/gqa_dataset/images/train \
+  --dev_img_path data/gqa_dataset/images/val \
+  --text_model bert-base-uncased --language en \
+  --fusion uot --ot_profile configs/ot_mps.json \
+  --d_model 384 --ffn_hidden 1024 --num_layers 2 \
+  --drop_prob 0.2 --freeze_answer_embeddings \
+  --label_smoothing 0.1 --early_stopping_patience 8 \
+  --model_path data/gqa_uot_mps
+
+python test.py --device mps \
+  --dev_csv_path data/gqa_dataset/val.csv \
+  --dev_img_path data/gqa_dataset/images/val \
+  --checkpoint data/gqa_uot_mps/best.pt
+
+python predict.py --device mps \
+  --checkpoint data/gqa_uot_mps/best.pt \
+  --image data/gqa_dataset/images/test/IMAGE_ID.jpg \
+  --question "What color is it?"
+```
+
+If an operation is unsupported by the installed PyTorch MPS backend, macOS can run that
+operation on CPU while leaving supported operations on the GPU:
+
+```bash
+PYTORCH_ENABLE_MPS_FALLBACK=1 python train.py --device mps ...
+```
+
+Start without fallback so unsupported operations are visible. Enable it only if PyTorch
+reports a specific missing MPS kernel. Reducing `--batch_size` is the first response to
+MPS out-of-memory errors. Feature caching further reduces repeated encoder computation.
+
+For small datasets, the compact decoder flags above reduce memorization. Training uses
+generated validation F1 for both `best.pt` and early stopping; `last.pt` remains the most
+recent state. The training loss uses label smoothing while validation loss remains plain
+cross-entropy, so validation loss stays comparable across runs. Fresh runs replace
+`metrics.jsonl`; `--resume` appends to it.
+
+Run the bottleneck diagnostic against a checkpoint to measure output collapse, image
+reliance, question reliance, OT convergence, and the train/validation gap:
+
+```bash
+python diagnose_training.py --device mps \
+  --checkpoint data/gqa_uot_mps/best.pt \
+  --train_csv_path data/gqa_dataset/train.csv \
+  --dev_csv_path data/gqa_dataset/val.csv \
+  --dev_img_path data/gqa_dataset/images/val \
+  --samples 32
+```
+
+The OT device profiles use the convergence settings measured on the GQA checkpoint:
+`epsilon=0.1`, tolerance `1e-3`, and up to 50 iterations. Changing the OT profile changes
+the learned model, so start a new training run instead of resuming a checkpoint made with
+the older profile.
 
 ## Verification
 
@@ -33,12 +159,17 @@ PhoBERT is a Vietnamese encoder; do not use the Vietnamese defaults for this Eng
 python -m unittest discover -s tests -v
 ```
 
-Tests create tiny local BERT/DeiT models and do not download pretrained weights. They check shifted targets, causal isolation, gradients, pixel processing, EOS/padding behavior, partial batches, checkpoint loading, data conversion, and alternative model masks/copy generation.
-
-Files in `model/re-implement_model` are architecture prototypes with synthetic runners. Their printed losses and metrics use random inputs/targets and do not demonstrate training or model accuracy. They need real tokenizers, visual/OCR feature extraction, datasets, optimizer loops, and checkpoint workflows before use as trained models. M4C generated IDs greater than or equal to `vocab_size` identify OCR positions and must be resolved to OCR strings by the caller. The main DeiT/SAN model has no OCR extraction or copy head, which limits scene-text answering.
+Tests create tiny local BERT/DeiT models and do not download pretrained weights. They
+check shifted targets, causal and memory-mask isolation, gradients, Sinkhorn marginals,
+UOT mass relaxation, padding, cache validation, generation, and v2/v3 checkpoint loading.
 
 See [the source review](docs/source_review.md) for the problems found and verification details.
 
-The current main model uses SAN fusion; it does not yet implement an Optimal Transport
-solver. See the [Question-Conditioned UOT implementation plan](docs/optimal_transport_implementation_plan.md)
-for the ordered design, interfaces, tests, and experiment matrix for adding real OT fusion.
+See the [Question-Conditioned UOT implementation plan](docs/optimal_transport_implementation_plan.md)
+for the design, interfaces, tests, and controlled experiment matrix. The implementation
+provides the planned engineering paths; accuracy comparisons still require training the
+documented experiment matrix on held-out data.
+
+Open the standalone [visual OT-VQA architecture guide](docs/optimal_transport_vqa_architecture.html)
+for the full component flow, tensor shapes, equations, training and inference paths,
+interactive Sinkhorn intuition, caching, checkpoints, and transport diagnostics.

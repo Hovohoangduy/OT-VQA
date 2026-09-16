@@ -1,5 +1,19 @@
 # Question-Conditioned Optimal Transport Fusion Implementation Plan
 
+## Implementation status
+
+The engineering work in milestones M1 through M6.1 is implemented in the main pipeline:
+token feature extraction and validated caches, Balanced OT and UOT, learned marginals,
+hybrid costs, barycentric fusion, decoder memory masks, diagnostics, version-3
+checkpoints, generated-answer validation, exact training-state resume, Apple MPS execution,
+early stopping, label smoothing, compact-decoder controls, frozen answer embeddings, and
+image/question reliance diagnostics. SAN remains the default and version-2 SAN
+checkpoints remain supported.
+
+Milestones M0 and M7 are experiment procedures. They still require running the recorded
+SAN baseline and controlled multi-seed comparisons on the target hardware and datasets;
+the implementation does not claim an accuracy improvement before those measurements.
+
 ## 1. Purpose and scope
 
 This document is the implementation roadmap for adding real Optimal Transport (OT)
@@ -24,11 +38,35 @@ The initial engineering dataset is the included English GQA subset:
 This subset validates correctness and integration. It is too small to support broad
 research claims about VQA accuracy.
 
+### 1.1 Measured bottleneck found after the first UOT run
+
+The first 50-epoch-budget GQA UOT experiment successfully exercised the full pipeline, but it
+did not establish a generalization improvement. The stored history and a 32-example
+counterfactual diagnostic show three separate bottlenecks:
+
+| Signal | Measured result | Interpretation |
+| --- | ---: | --- |
+| Best generated validation F1 | `0.29` at epoch 9 | Use `best.pt`; later epochs do not improve the model |
+| Epoch 46 train/validation F1 | `0.999 / 0.21` | Severe memorization after the early peak |
+| Validation loss, epoch 9 → 46 | `2.546 → 3.213` | Confidence grows while generalization worsens |
+| Trainable parameters / examples | `86.5M / 1,000` | Decoder path is oversized for the engineering subset |
+| Unique outputs in 32 examples | `8` | Answer generation collapses to frequent labels |
+| Prediction changes after image shuffle | `31.25%` | Image evidence has weak control over many answers |
+| Prediction changes after question shuffle | `84.38%` | Question and answer priors dominate behavior |
+| Validation answers unseen in training | `19%` | Exact-match performance is partly data-limited |
+| UOT convergence at 25 iterations | `0%`, residual `0.04496` | The solver is truncated before its fixed point |
+
+Image shuffling raised F1 from `0.25` to `0.28125` on the small diagnostic panel. This is
+not evidence that wrong images help. Together with the low prediction-change rate, it
+shows that image changes do not have a consistent causal effect on the generated answer.
+The complete machine-readable result is written to
+`data/gqa_uot/bottleneck_report.json` by `diagnose_training.py`.
+
 ## 2. Current state and target boundary
 
-### 2.1 Current system
+### 2.1 Baseline system
 
-The current main model is a SAN-based VQA baseline:
+The compatibility baseline is the SAN-based VQA model:
 
 ```mermaid
 flowchart LR
@@ -183,17 +221,33 @@ Default full-profile parameters:
 
 | Parameter | Default |
 | --- | ---: |
-| `epsilon` | `0.05` |
+| `epsilon` | `0.1` |
 | `tau_visual` | `1.0` |
 | `tau_question` | `1.0` |
 | `max_iterations` | `50` |
-| `tolerance` | `1e-4` |
+| `tolerance` | `1e-3` |
 | `minimum_mass` | `1e-8` |
 
 Balanced OT uses the same cost and entropy parameter but enforces the supplied
 marginals. UOT is allowed to produce total matched mass below one. Convergence is
 measured from the maximum absolute change in dual/scaling variables over valid entries.
 Return the final residual and iteration count for every batch.
+
+These values supersede the original `epsilon=0.05`, `tolerance=1e-4`, 25-iteration CPU
+configuration. A sweep using costs and marginals from the trained GQA checkpoint measured
+the following behavior:
+
+| ε | Iteration cap | Tolerance | Mean residual | Convergence |
+| ---: | ---: | ---: | ---: | ---: |
+| `0.05` | 25 | `1e-4` | `0.04402` | `0%` |
+| `0.05` | 80 | `1e-3` | `0.00089` | `100%` |
+| `0.10` | 50 | `1e-3` | `0.00054` | `100%` |
+| `0.10` | 100 | `1e-4` | `0.000055` | `100%` |
+
+The selected profile reaches tolerance in about 26 iterations on that batch while leaving
+headroom for harder samples. This is a numerical configuration result, not an accuracy
+claim. Because the OT profile is stored inside a checkpoint, changing it requires a new
+training run; `--resume` intentionally restores the checkpoint's original profile.
 
 Sinkhorn computations always run in float32, including during mixed-precision GPU
 training. Detect and fail on NaN, infinity, negative plan entries, empty valid sets, or
@@ -240,8 +294,8 @@ return_diagnostics: bool
 ```
 
 Validate ranges at construction. Store the complete configuration in every OT
-checkpoint. Provide `configs/ot_cpu.json` and `configs/ot_gpu.json`; avoid introducing a
-configuration framework dependency.
+checkpoint. Provide `configs/ot_cpu.json`, `configs/ot_mps.json`, and
+`configs/ot_gpu.json`; avoid introducing a configuration framework dependency.
 
 Extend the command-line contract with:
 
@@ -250,6 +304,14 @@ Extend the command-line contract with:
 --ot_profile PATH
 --feature_cache PATH
 --resume CHECKPOINT
+--label_smoothing FLOAT
+--early_stopping_patience INT
+--d_model INT
+--ffn_hidden INT
+--num_layers INT
+--num_heads INT
+--drop_prob FLOAT
+--freeze_answer_embeddings
 ```
 
 `san` remains the compatibility default. Documentation and experiments must select
@@ -297,12 +359,17 @@ Use checkpoint format version 3 for new training. Save:
 - text/image encoder identifiers and revisions;
 - preprocessing language and token limits;
 - optimizer and scheduler state;
-- epoch, global step, and best validation metric;
-- Python and PyTorch random states.
+- epoch, global step, best validation metric, best epoch, and early-stopping state;
+- Python and CPU, CUDA, or MPS PyTorch random states.
 
 Write `last.pt` every epoch and update `best.pt` when generated validation F1 improves;
 break ties with lower teacher-forced validation loss. Resume restores the entire training
 state. Version-2 checkpoints load as SAN models without OT modules.
+
+Fresh training replaces `metrics.jsonl` so an old run cannot contaminate plots or best
+epoch analysis. Resumed training appends to the existing history. Training loss may use
+label smoothing, but validation loss remains plain cross-entropy so different runs stay
+comparable.
 
 ### 4.4 Feature cache
 
@@ -389,9 +456,32 @@ the same public commands as SAN.
 3. Implement exact resume, configuration checks, and deterministic seed handling.
 4. Add convergence summaries and failure counters to epoch logs.
 5. Test batched and single-image prediction with diagnostics enabled and disabled.
+6. Stop after a configurable number of generated-F1 validation stalls and persist the
+   patience counter for exact resume.
+7. Log prediction diversity and the most frequent-output fraction next to solver health.
 
 **Exit condition:** an interrupted run resumes consistently, and `best.pt` generates an
 answer in a new Python process without a training CSV or reference answer.
+
+### M6.1 - Generalization and grounding hardening
+
+The first full run exposed a generalization bottleneck after M6 was implemented. Apply
+the following controls before drawing conclusions from M7:
+
+1. Reduce the decoder from `d_model=768`, four layers, and `ffn_hidden=2048` to an
+   engineering starting point of `d_model=384`, two layers, and `ffn_hidden=1024`.
+2. Freeze pretrained answer embeddings and learn the projection, decoder, OT fusion, and
+   vocabulary head around them.
+3. Use dropout `0.2`, training label smoothing `0.1`, and early-stopping patience 8.
+4. Keep generated validation F1 as the primary selection metric and validation
+   cross-entropy as the tie-breaker.
+5. Run shuffled-image and shuffled-question interventions on a fixed validation panel.
+6. Compare output diversity, majority-baseline distance, and image sensitivity across
+   checkpoints, rather than interpreting lower training loss as progress.
+
+**Exit condition:** the new run stops near its validation optimum, all OT batches meet the
+configured convergence criterion, and the selected checkpoint materially outperforms the
+majority baseline while reacting more strongly to shuffled images than the failed run.
 
 ### M7 - Controlled comparison
 
@@ -417,7 +507,7 @@ hyperparameters using test results.
 
 - Frozen, cached image and question encoders.
 - `ot_dim=128`.
-- At most 25 Sinkhorn iterations.
+- `epsilon=0.1`, tolerance `1e-3`, and at most 50 Sinkhorn iterations.
 - Batch size 2-4.
 - Ten-example overfit check before the full 1,000-example split.
 - One seed for integration validation.
@@ -428,13 +518,24 @@ comparative claims.
 
 ### 6.2 Single-GPU experiment profile
 
-- `ot_dim=256` and 50 Sinkhorn iterations.
+- `ot_dim=256`, `epsilon=0.1`, tolerance `1e-3`, and 50 Sinkhorn iterations.
 - Mixed precision for encoders/decoder, with Sinkhorn forced to float32.
 - Batch size selected from available memory without changing gradient accumulation's
   effective batch across variants.
 - Frozen encoders for the first stable comparison; optional last-layer text-encoder
   fine-tuning is a separately named experiment.
 - Three fixed seeds and complete timing/memory logging.
+
+### 6.3 Apple Silicon MPS profile
+
+- Select with `--device mps`; `--device auto` prefers CUDA, then MPS, then CPU.
+- Use `configs/ot_mps.json`, `ot_dim=192`, `epsilon=0.1`, tolerance `1e-3`, and at
+  most 50 Sinkhorn iterations.
+- Begin at batch size 2 and increase only after observing stable unified-memory use.
+- Keep the Sinkhorn solver in float32; do not depend on CUDA-specific autocast behavior.
+- Prefer frozen encoder caches to remove repeated DeiT and text-encoder computation.
+- Load checkpoints through CPU staging before moving the reconstructed model to MPS,
+  avoiding a temporary duplicate model-sized allocation on the GPU.
 
 ## 7. Training and inference flow
 
@@ -450,10 +551,14 @@ flowchart TD
     O --> M[Fused decoder memory]
     M --> TF[Teacher-forced answer decoding]
     TF --> CE[PAD-masked answer loss]
-    CE --> BP[Backward and optimizer step]
+    CE --> LS[Optional label smoothing]
+    LS --> BP[Backward and optimizer step]
     O --> LOG[Transport diagnostics]
     BP --> V[Generated validation evaluation]
     V --> C[Save last and update best checkpoint]
+    C --> S{Patience exhausted?}
+    S -- No --> D
+    S -- Yes --> STOP[Stop and retain best.pt]
 ```
 
 Inference follows the same encoder and OT path, then starts answer decoding at BOS and
@@ -485,6 +590,9 @@ answer.
 - Version-2 SAN checkpoints remain loadable.
 - CPU and GPU profiles expose the same output contract.
 - Batch generation pads completed rows while unfinished rows continue.
+- Frozen answer embeddings remain in evaluation mode and survive checkpoint reload.
+- Early-stopping state and best epoch survive checkpoint resume.
+- Fresh runs reset metrics history while resumed runs append.
 
 ### 8.3 Grounding check
 
@@ -498,6 +606,25 @@ For a fixed validation panel:
 
 This is a behavioral grounding diagnostic. The GQA subset does not provide token-level
 transport supervision, so transport visualizations must not be presented as ground truth.
+
+### 8.4 Automated bottleneck report
+
+Run the implemented counterfactual check without modifying the checkpoint:
+
+```bash
+python diagnose_training.py --device mps \
+  --checkpoint data/gqa_uot/best.pt \
+  --train_csv_path data/gqa_dataset/train.csv \
+  --dev_csv_path data/gqa_dataset/val.csv \
+  --dev_img_path data/gqa_dataset/images/val \
+  --samples 32
+```
+
+The report includes the latest contiguous metrics run, best and last epochs, the
+train/validation gap, prediction-frequency collapse, image/question shuffle sensitivity,
+solver convergence, parameter counts, answer-vocabulary coverage, and the majority
+baseline. A shuffled-modality score is a behavioral diagnostic; use multiple fixed panels
+or the full validation set before comparing small differences.
 
 ## 9. Acceptance criteria
 
@@ -527,9 +654,38 @@ The OT-fusion milestone is complete when:
 | Decoder ignores image | Patch-removal intervention and transport gradients | Check fused memory and decoder cross-attention before tuning accuracy |
 | Cache/online mismatch | Encoder revision, preprocessing, special-token policy | Invalidate and rebuild the cache |
 | Good training loss, poor generation | EOS rate, exposure bias, validation generation | Select checkpoints by generated F1, never teacher-forced metrics alone |
+| Train F1 rises while validation stalls | best epoch, train/validation gap, parameter count | Stop early; reduce decoder capacity; add regularization and data |
+| Few unique generated answers | top-output fraction, answer frequencies, unseen validation answers | Compare majority baseline; rebalance or expand training coverage |
+| Image shuffle rarely changes answers | shuffled-image/question sensitivity, cross-attention gradients | Treat as question-prior collapse; inspect fusion and increase grounded data |
 | OT slower than expected | Pair count, iteration count, caching, diagnostics | Profile cost construction and Sinkhorn separately |
 
-## 11. Deferred roadmap
+## 11. Recommended retraining command
+
+Use a new destination because checkpoint resume reconstructs the old architecture and OT
+configuration exactly:
+
+```bash
+python train.py \
+  --device mps --epochs 50 --batch_size 2 \
+  --train_csv_path data/gqa_dataset/train.csv \
+  --dev_csv_path data/gqa_dataset/val.csv \
+  --train_img_path data/gqa_dataset/images/train \
+  --dev_img_path data/gqa_dataset/images/val \
+  --text_model bert-base-uncased --language en \
+  --fusion uot --ot_profile configs/ot_mps.json \
+  --d_model 384 --ffn_hidden 1024 --num_layers 2 \
+  --drop_prob 0.2 --freeze_answer_embeddings \
+  --label_smoothing 0.1 --early_stopping_patience 8 \
+  --model_path data/gqa_uot_mps_regularized \
+  --diagnostics
+```
+
+Evaluate and diagnose `best.pt`, not the final epoch, before deciding whether another
+model change is justified. If the compact run still remains near the `0.19` majority
+baseline or fails the image-shuffle intervention, expanding and balancing grounded
+training data takes priority over increasing model capacity.
+
+## 12. Deferred roadmap
 
 After OT fusion is stable and its ablations are complete, the transport interface can be
 extended with the proposal's later stages:
