@@ -17,11 +17,12 @@ from transformers import BertConfig, BertModel, BertTokenizer, DeiTConfig, DeiTM
 from configs.config import Config
 from model.vqa_model import VQAModel
 from model.optimal_transport import OTConfig
+from model.ot_san import OTSANConfig
 from model.decoder_model import MultiHeadAttention, MultiHeadCrossAttention, scaled_dot_product
 from model.sans import StackAttention
 from utils.data_processing import process_dataframe
 from utils.data_processing import preprocess_text
-from utils.vqa_dataset import VQADataset
+from utils.vqa_dataset import VQADataset, resolve_image_root
 from utils.metrics import compute_em_and_f1
 from utils.json_to_csv import convert_json_folder
 from utils.checkpoint import load_model, save_checkpoint
@@ -62,6 +63,7 @@ class ModelLogicTests(unittest.TestCase):
             output_size=16, d_model=16, ffn_hidden=32, num_layers=1,
             drop_prob=0, fusion=fusion,
             ot_config=OTConfig(ot_dim=8, epsilon=0.1, max_iterations=30),
+            ot_san_config=OTSANConfig(hidden_dim=8, num_layers=1, dropout=0),
         )
 
     def test_shifted_targets_and_backward_for_single_image(self):
@@ -255,6 +257,56 @@ class ModelLogicTests(unittest.TestCase):
             actual = restored.generate(images, questions, max_len=5)
         torch.testing.assert_close(actual, expected)
 
+    def test_ot_san_online_cached_checkpoint_gradients_and_diagnostics(self):
+        torch.manual_seed(13)
+        model = self.make_ot_model(fusion='uot_san').eval()
+        images = torch.rand(2, 3, 32, 32)
+        questions = ['what color ?', 'color ?']
+        online = model.encode(images, questions, return_diagnostics=True)
+        image_features, _ = model.image_model(images)
+        question_features, question_mask, _ = model.question_encoder.encode_tokens(questions)
+        cached = model.encode_from_features(
+            image_features.half(), question_features.half(), question_mask, True
+        )
+        self.assertEqual(online.memory.shape[1], question_mask.shape[1] + 1)
+        self.assertEqual(online.memory_padding_mask.shape[1], question_mask.shape[1] + 1)
+        self.assertFalse(online.memory_padding_mask[:, 0].any())
+        self.assertIsNotNone(online.ot_san)
+        self.assertEqual(online.ot_san.attention_weights.shape[:2], (2, 1))
+        torch.testing.assert_close(online.memory, cached.memory, atol=2e-3, rtol=2e-3)
+
+        model.train()
+        logits, targets, transport = model(
+            images, questions, ['red', 'blue'], max_len=6,
+            return_diagnostics=True,
+        )
+        loss = nn.functional.cross_entropy(
+            logits.transpose(1, 2), targets, ignore_index=model.pad_token_id
+        )
+        loss.backward()
+        self.assertIsNotNone(transport.ot_san)
+        self.assertIsNotNone(model.ot_san.gate_logit.grad)
+        self.assertIsNotNone(model.ot_fusion.fusion[0].weight.grad)
+
+        path = self.root / 'ot-san-v3.pt'
+        save_checkpoint(
+            path, model=model, text_model=str(self.text), image_model=str(self.visual),
+            epoch=1, global_step=2,
+        )
+        restored = load_model(path, torch.device('cpu'))
+        self.assertEqual(restored.fusion_type, 'uot_san')
+        self.assertEqual(restored.model_config['ot_san_config']['hidden_dim'], 8)
+        model.eval()
+        with torch.no_grad():
+            expected = model.generate(images, questions, max_len=5)
+            actual = restored.generate(images, questions, max_len=5)
+        torch.testing.assert_close(actual, expected)
+
+    def test_balanced_ot_san_selects_balanced_transport(self):
+        model = self.make_ot_model(fusion='balanced_ot_san')
+        self.assertEqual(model.ot_config.transport_type, 'balanced')
+        self.assertIsNotNone(model.ot_san)
+
     def test_uot_tiny_batch_learns_and_generates_without_reference(self):
         torch.manual_seed(8)
         model = self.make_ot_model()
@@ -332,6 +384,23 @@ class DataLogicTests(unittest.TestCase):
             Image.new('RGB', (32, 32)).save(root / 'images' / 'train' / 'a.jpg')
             sample = VQADataset(frame, Config.transforms, root / 'images')[0]
             self.assertEqual(sample[2:], ('color?', 'red'))
+
+    def test_image_root_resolves_bare_and_split_relative_filenames(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / 'images'
+            (root / 'train').mkdir(parents=True)
+            Image.new('RGB', (8, 8)).save(root / 'train' / 'a.jpg')
+
+            bare = pd.DataFrame({'image': ['a.jpg']})
+            self.assertEqual(resolve_image_root(bare, root, 'train'), root / 'train')
+
+            relative = pd.DataFrame({'image': ['train/a.jpg']})
+            self.assertEqual(resolve_image_root(relative, root, 'train'), root)
+
+            explicit = root / 'custom'
+            self.assertEqual(
+                resolve_image_root(bare, root, 'train', override=explicit), explicit
+            )
 
 
 if __name__ == '__main__':

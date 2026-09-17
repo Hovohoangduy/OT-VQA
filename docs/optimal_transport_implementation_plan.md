@@ -483,7 +483,8 @@ the following controls before drawing conclusions from M7:
    engineering starting point of `d_model=384`, two layers, and `ffn_hidden=1024`.
 2. Freeze pretrained answer embeddings and learn the projection, decoder, OT fusion, and
    vocabulary head around them.
-3. Use dropout `0.2`, training label smoothing `0.1`, and early-stopping patience 8.
+3. Use dropout `0.2`, training label smoothing `0.1`, AdamW weight decay `0.05`, global
+   gradient clipping at `1.0`, and early-stopping patience 8.
 4. Keep generated validation F1 as the primary selection metric and validation
    cross-entropy as the tie-breaker.
 5. Run shuffled-image and shuffled-question interventions on a fixed validation panel.
@@ -511,6 +512,12 @@ Use one seed for CPU engineering checks and three seeds for GPU comparisons. Rep
 mean and standard deviation for generated EM/F1, loss, latency, peak memory, transport
 cost, entropy, matched mass, residual, iterations, and convergence rate. Do not select
 hyperparameters using test results.
+
+The standalone architecture guide includes an offline interactive Sinkhorn progress chart.
+Its iteration slider renders illustrative matched mass, marginal residual, and plan entropy
+so readers can see the expected stabilization path and the difference between balanced and
+relaxed transport. The chart is explanatory; experiment logs and solver diagnostics remain
+the authoritative measurements for a trained model.
 
 ## 6. CPU and GPU profiles
 
@@ -685,6 +692,7 @@ python train.py \
   --fusion uot --ot_profile configs/ot_mps.json \
   --d_model 384 --ffn_hidden 1024 --num_layers 2 \
   --drop_prob 0.2 --freeze_answer_embeddings \
+  --weight_decay 0.05 --gradient_clip 1.0 \
   --label_smoothing 0.1 --early_stopping_patience 8 \
   --model_path data/gqa_uot_mps_regularized \
   --diagnostics

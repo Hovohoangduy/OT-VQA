@@ -76,6 +76,14 @@
     .cell:hover{transform:scale(1.08)}
     .meter{height:12px;background:#dfe4e2;border-radius:8px;overflow:hidden;margin:6px 0 16px}
     .meter span{display:block;height:100%;background:linear-gradient(90deg,var(--orange),var(--yellow));transition:width .3s}
+    .progress-panel{margin-top:24px;padding:20px;border:1px solid var(--line);border-radius:14px;background:#fbfaf6}
+    .progress-header{display:flex;justify-content:space-between;gap:16px;align-items:baseline;flex-wrap:wrap}
+    .progress-svg{width:100%;height:auto;display:block;border:1px solid var(--line);border-radius:10px;background:#fff}
+    .progress-legend{display:flex;gap:16px;flex-wrap:wrap;margin-top:10px;font-size:.82rem;color:var(--muted)}
+    .progress-legend span:before{content:"";display:inline-block;width:18px;height:4px;border-radius:4px;margin-right:6px;vertical-align:middle;background:var(--orange)}
+    .progress-legend .residual:before{background:var(--blue)} .progress-legend .entropy:before{background:var(--purple)}
+    .progress-readout{display:grid;grid-template-columns:repeat(4,minmax(100px,1fr));gap:10px;margin-top:14px}
+    .progress-stat{padding:10px;border-radius:10px;background:#eef3f1}.progress-stat b{display:block;color:var(--navy);font-size:1.1rem}.progress-stat span{font-size:.75rem;color:var(--muted)}
     .sequence{display:grid;grid-template-columns:170px 1fr;gap:0;margin-top:20px}
     .lane{font-weight:800;color:var(--navy);padding:13px;border-bottom:1px solid var(--line)}
     .events{display:flex;gap:8px;align-items:center;padding:9px;border-bottom:1px solid var(--line);overflow:auto}
@@ -232,6 +240,14 @@
             <b>Illustrative matched mass</b><div class="meter"><span id="mass-meter"></span></div><span id="mass-label" class="mono"></span>
           </div>
           <div><h3 style="margin-top:0">Illustrative 5 × 5 plan P</h3><div id="heatmap" class="heatmap" aria-label="Toy transport matrix"></div></div>
+        </div>
+        <div class="progress-panel" aria-label="Interactive Sinkhorn iteration progress">
+          <div class="progress-header"><div><h3 style="margin:0">Fusion progress across Sinkhorn iterations</h3><p class="small" style="margin:.25rem 0 0">Drag the iteration marker to see the expected numerical path from an unscaled kernel to a stable transport plan.</p></div><label for="progress-iteration"><b>Iteration <span id="progress-iteration-value">1</span>/50</b></label></div>
+          <input id="progress-iteration" type="range" min="1" max="50" value="1" aria-label="Sinkhorn iteration">
+          <svg id="progress-chart" class="progress-svg" viewBox="0 0 760 250" role="img" aria-label="Residual, entropy, and matched mass over Sinkhorn iterations"></svg>
+          <div class="progress-legend"><span>matched mass</span><span class="residual">marginal residual</span><span class="entropy">plan entropy</span></div>
+          <div class="progress-readout"><div class="progress-stat"><b id="progress-mass">0.42</b><span>matched mass ΣP</span></div><div class="progress-stat"><b id="progress-residual">0.180</b><span>marginal residual</span></div><div class="progress-stat"><b id="progress-entropy">2.10</b><span>plan entropy</span></div><div class="progress-stat"><b id="progress-status">updating</b><span>solver state</span></div></div>
+          <p class="small">A healthy run drives the residual down until it crosses the configured tolerance. Balanced OT approaches mass 1.0; UOT may stabilize below 1.0 when the KL relaxation leaves evidence unmatched.</p>
         </div>
       </section>
 
@@ -421,12 +437,36 @@
     document.getElementById('mass-label').textContent=mass.toFixed(3)+' / 1.000';
   }
 
+  function renderProgress(){
+    const iteration = Number(document.getElementById('progress-iteration').value);
+    const progress = document.getElementById('progress-chart');
+    const points = Array.from({length:50}, (_, index) => {
+      const i = index + 1;
+      const decay = Math.exp(-i / 8);
+      const residual = .18 * decay + .0004;
+      const mass = solverMode === 'balanced' ? 1 - .58 * Math.exp(-i / 5) : .92 - .50 * Math.exp(-i / 7);
+      const entropy = 1.25 + 2.6 * (1 - Math.exp(-i / 10));
+      return {i, residual, mass, entropy};
+    });
+    const x = i => 48 + (i - 1) * 660 / 49;
+    const y = (value, min, max) => 218 - (value - min) / (max - min) * 174;
+    const line = (field, min, max, color) => `<polyline fill="none" stroke="${color}" stroke-width="3" points="${points.map(p => `${x(p.i)},${y(p[field],min,max)}`).join(' ')}"/>`;
+    const selected = points[iteration - 1];
+    progress.innerHTML = `<line x1="48" y1="218" x2="708" y2="218" stroke="#c8c0b2"/><line x1="48" y1="44" x2="48" y2="218" stroke="#c8c0b2"/><text x="48" y="238" font-size="11" fill="#5c6b78">1</text><text x="690" y="238" font-size="11" fill="#5c6b78">50</text><text x="10" y="52" font-size="11" fill="#5c6b78">scaled value</text>${line('mass',0,1,'#e97843')}${line('residual',0,.18,'#2e6e9e')}${line('entropy',1,4,'#745ba8')}<line x1="${x(iteration)}" y1="40" x2="${x(iteration)}" y2="218" stroke="#17212b" stroke-dasharray="5 4"/><circle cx="${x(iteration)}" cy="${y(selected.mass,0,1)}" r="5" fill="#e97843"/><circle cx="${x(iteration)}" cy="${y(selected.residual,0,.18)}" r="5" fill="#2e6e9e"/><circle cx="${x(iteration)}" cy="${y(selected.entropy,1,4)}" r="5" fill="#745ba8"/>`;
+    document.getElementById('progress-iteration-value').textContent = iteration;
+    document.getElementById('progress-mass').textContent = selected.mass.toFixed(3);
+    document.getElementById('progress-residual').textContent = selected.residual.toFixed(4);
+    document.getElementById('progress-entropy').textContent = selected.entropy.toFixed(2);
+    document.getElementById('progress-status').textContent = selected.residual < .001 ? 'converged' : 'updating';
+  }
+
   document.querySelectorAll('.solver-button').forEach(button => button.addEventListener('click',()=>{
     document.querySelectorAll('.solver-button').forEach(b=>b.classList.remove('active'));
-    button.classList.add('active'); solverMode=button.dataset.mode; updateSolverCopy(); renderToy();
+    button.classList.add('active'); solverMode=button.dataset.mode; updateSolverCopy(); renderToy(); renderProgress();
   }));
   epsilon.addEventListener('input',renderToy); tau.addEventListener('input',renderToy);
-  updateSolverCopy(); renderToy();
+  document.getElementById('progress-iteration').addEventListener('input', renderProgress);
+  updateSolverCopy(); renderToy(); renderProgress();
 </script>
 </body>
 </html>

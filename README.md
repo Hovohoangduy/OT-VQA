@@ -33,6 +33,14 @@ The downloader writes split-relative image paths such as `train/123.jpg`, so new
 Use `balanced_ot` for exact marginals or `uot` for KL-relaxed marginals. The supplied
 CPU and GPU profiles control OT dimension, regularization, and Sinkhorn iterations.
 
+Use `balanced_ot_san` or `uot_san` to add a masked Stacked Attention Network after OT
+fusion. OT-SAN prepends a gated global summary to the local OT-fused question tokens, so
+the decoder retains the original alignments while gaining a compact global context. The
+default OT-SAN configuration uses one layer, hidden dimension 128, dropout 0.2, and gate
+logit -2.0. See
+[`docs/ot_san_implementation_plan.md`](docs/ot_san_implementation_plan.md) for tensor
+contracts, tests, and the controlled experiment plan.
+
 ```bash
 python train.py \
   --train_csv_path data/gqa_dataset/train.csv \
@@ -54,9 +62,48 @@ python predict.py \
   --diagnostics_output data/gqa_uot/example_transport.png
 ```
 
+Train the regularized OT-SAN model from scratch on Apple MPS. This command intentionally
+has no `--resume` argument and writes to a new experiment directory:
+
+```bash
+python train.py \
+  --device mps \
+  --epochs 50 \
+  --batch_size 2 \
+  --fusion uot_san \
+  --ot_profile configs/ot_mps.json \
+  --train_csv_path data/gqa_dataset/train.csv \
+  --dev_csv_path data/gqa_dataset/val.csv \
+  --img_path data/gqa_dataset/images \
+  --d_model 384 \
+  --ffn_hidden 1024 \
+  --num_layers 2 \
+  --num_heads 4 \
+  --drop_prob 0.2 \
+  --ot_san_layers 1 \
+  --ot_san_hidden_dim 128 \
+  --ot_san_dropout 0.2 \
+  --ot_san_gate_init -2.0 \
+  --freeze_answer_embeddings \
+  --weight_decay 0.05 \
+  --gradient_clip 1.0 \
+  --label_smoothing 0.1 \
+  --early_stopping_patience 8 \
+  --seed 1105 \
+  --model_path data/gqa_uot_san_scratch_seed1105 \
+  --diagnostics
+```
+
+Use `configs/ot_cpu.json` with `--device cpu` or `configs/ot_gpu.json` with
+`--device cuda` on other hardware. The selected checkpoint is written to
+`data/gqa_uot_san_scratch_seed1105/best.pt`.
+
 Training writes `last.pt` each epoch and updates `best.pt` using generated validation
 F1, with validation loss as the tie-breaker. Resume an interrupted run with
 `--resume data/gqa_uot/last.pt` and keep `--epochs` set to the total target epoch count.
+New runs default to the small-data profile: `d_model=384`, two decoder layers,
+`ffn_hidden=1024`, dropout `0.2`, frozen answer embeddings, AdamW weight decay `0.05`,
+and gradient clipping at `1.0`. Each setting remains configurable from the CLI.
 
 Frozen encoder features can be cached as float16. Build both split caches under one
 root so training can select `train/` and `dev/` automatically:
@@ -102,6 +149,7 @@ python train.py \
   --fusion uot --ot_profile configs/ot_mps.json \
   --d_model 384 --ffn_hidden 1024 --num_layers 2 \
   --drop_prob 0.2 --freeze_answer_embeddings \
+  --weight_decay 0.05 --gradient_clip 1.0 \
   --label_smoothing 0.1 --early_stopping_patience 8 \
   --model_path data/gqa_uot_mps
 

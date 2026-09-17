@@ -20,12 +20,28 @@ def get_args(argv=None):
                         help="English Hugging Face tokenizer and text encoder")
     parser.add_argument("--image_model", default="facebook/deit-base-distilled-patch16-224")
     parser.add_argument("--split", choices=["dev", "test"], default="dev")
-    parser.add_argument("--fusion", choices=["san", "balanced_ot", "uot"], default="san")
+    parser.add_argument(
+        "--fusion",
+        choices=["san", "balanced_ot", "uot", "balanced_ot_san", "uot_san"],
+        default="san",
+    )
     parser.add_argument("--ot_profile", default=None, help="JSON file containing OTConfig fields")
+    parser.add_argument("--ot_san_hidden_dim", type=int, default=128)
+    parser.add_argument("--ot_san_layers", type=int, default=1, choices=[1, 2])
+    parser.add_argument("--ot_san_dropout", type=float, default=0.2)
+    parser.add_argument("--ot_san_gate_init", type=float, default=-2.0)
     parser.add_argument("--feature_cache", default=None, help="Optional precomputed feature-cache folder")
     parser.add_argument("--resume", default=None, help="Version-3 training checkpoint to resume")
     parser.add_argument("--seed", type=int, default=1105)
     parser.add_argument("--lr", type=float, default=None)
+    parser.add_argument(
+        "--weight_decay", type=float, default=0.05,
+        help="AdamW weight decay; the small GQA subset benefits from stronger regularization",
+    )
+    parser.add_argument(
+        "--gradient_clip", type=float, default=1.0,
+        help="Maximum gradient norm; set to 0 to disable clipping",
+    )
     parser.add_argument(
         "--label_smoothing", type=float, default=0.1,
         help="Label smoothing used only by the training loss",
@@ -34,14 +50,16 @@ def get_args(argv=None):
         "--early_stopping_patience", type=int, default=8,
         help="Stop after this many epochs without better generated validation F1; 0 disables",
     )
-    parser.add_argument("--d_model", type=int, default=768)
-    parser.add_argument("--ffn_hidden", type=int, default=2048)
-    parser.add_argument("--num_layers", type=int, default=4)
+    parser.add_argument("--d_model", type=int, default=384)
+    parser.add_argument("--ffn_hidden", type=int, default=1024)
+    parser.add_argument("--num_layers", type=int, default=2)
     parser.add_argument("--num_heads", type=int, default=4)
-    parser.add_argument("--drop_prob", type=float, default=0.1)
+    parser.add_argument("--drop_prob", type=float, default=0.2)
     parser.add_argument(
-        "--freeze_answer_embeddings", action="store_true",
-        help="Keep pretrained answer-token embeddings fixed to reduce overfitting",
+        "--freeze_answer_embeddings",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Freeze pretrained answer-token embeddings (default: enabled)",
     )
     parser.add_argument("--checkpoint", default=None, help="Explicit evaluation checkpoint")
     parser.add_argument("--diagnostics", action="store_true", help="Print OT inference diagnostics")

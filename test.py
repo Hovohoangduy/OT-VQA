@@ -15,7 +15,7 @@ from utils.data_processing import load_dataframe
 from utils.device import resolve_device
 from utils.feature_cache import FeatureCacheDataset, collate_feature_cache
 from utils.metrics import compute_em_and_f1
-from utils.vqa_dataset import VQADataset
+from utils.vqa_dataset import VQADataset, resolve_image_root
 
 
 def evaluation(model, test_loader, criterion, vocab_swap=None, device=None,
@@ -56,7 +56,7 @@ def evaluation(model, test_loader, criterion, vocab_swap=None, device=None,
                 logits, targets, transport = result
                 ids = generated.generated_ids
                 if transport is not None:
-                    diagnostic_rows.append({
+                    row = {
                         "_count": transport.plan.size(0),
                         "transport_cost": transport.transport_cost.mean().item(),
                         "entropy": transport.entropy.mean().item(),
@@ -65,7 +65,16 @@ def evaluation(model, test_loader, criterion, vocab_swap=None, device=None,
                         "residual": transport.residual.mean().item(),
                         "iterations": transport.iterations.float().mean().item(),
                         "convergence_rate": transport.converged.float().mean().item(),
-                    })
+                    }
+                    if generated.ot_san is not None:
+                        row.update({
+                            "ot_san_gate": generated.ot_san.gate.item(),
+                            "ot_san_summary_norm": generated.ot_san.summary_norm.mean().item(),
+                            "ot_san_attention_entropy": (
+                                generated.ot_san.attention_entropy.mean().item()
+                            ),
+                        })
+                    diagnostic_rows.append(row)
             else:
                 logits, targets = result
                 ids = generated
@@ -125,10 +134,15 @@ def main():
                             collate_fn=collate_feature_cache)
     else:
         frame = load_dataframe(csv_path)
-        split_image_path = (args.dev_img_path if args.split == "dev" else args.test_img_path)
+        split_image_path = resolve_image_root(
+            frame,
+            args.img_path,
+            args.split,
+            override=(args.dev_img_path if args.split == "dev" else args.test_img_path),
+        )
         dataset = VQADataset(
             frame, transform=Config.transforms,
-            img_path=split_image_path or args.img_path,
+            img_path=split_image_path,
         )
         loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False)
     result = evaluation(

@@ -15,6 +15,7 @@ from model.features_extraction import (
     validate_english_text_model,
 )
 from model.optimal_transport import OTConfig, OptimalTransportFusion, TransportOutput
+from model.ot_san import OTSAN, OTSANConfig, OTSANOutput
 from model.sans import StackAttention
 
 
@@ -23,44 +24,57 @@ class EncoderOutput:
     memory: torch.Tensor
     memory_padding_mask: torch.Tensor
     transport: Optional[TransportOutput] = None
+    ot_san: Optional[OTSANOutput] = None
 
 
 @dataclass
 class GenerationOutput:
     generated_ids: torch.Tensor
     transport: Optional[TransportOutput] = None
+    ot_san: Optional[OTSANOutput] = None
 
 
 class VQAModel(nn.Module):
-    """VQA generator with selectable SAN, Balanced OT, or UOT fusion."""
+    """VQA generator with selectable SAN, OT, or OT-SAN fusion."""
 
     def __init__(
         self, vocab_size=None, output_size=768, d_model=768, num_heads=4,
         ffn_hidden=2048, drop_prob=0.1, num_layers=4, num_att_layers=2,
         mode='train', text_model=Config.text_model, image_model=Config.image_model,
-        fusion='san', ot_config=None, freeze_answer_embeddings=False,
+        fusion='san', ot_config=None, ot_san_config=None,
+        freeze_answer_embeddings=False,
     ):
         super().__init__()
         if output_size != d_model or num_att_layers < 1:
             raise ValueError('output_size must equal d_model and at least one attention layer is needed')
-        if fusion not in {'san', 'balanced_ot', 'uot'}:
-            raise ValueError("fusion must be 'san', 'balanced_ot', or 'uot'")
+        valid_fusions = {'san', 'balanced_ot', 'uot', 'balanced_ot_san', 'uot_san'}
+        if fusion not in valid_fusions:
+            raise ValueError(
+                "fusion must be 'san', 'balanced_ot', 'uot', "
+                "'balanced_ot_san', or 'uot_san'"
+            )
         validate_english_text_model(text_model)
         self.mode = mode
         self.fusion_type = fusion
         self.text_model_name = str(text_model)
         self.image_model_name = str(image_model)
         parsed_ot = ot_config if isinstance(ot_config, OTConfig) else OTConfig.from_dict(ot_config)
-        if fusion == 'balanced_ot':
+        if fusion in {'balanced_ot', 'balanced_ot_san'}:
             parsed_ot = replace(parsed_ot, transport_type='balanced')
-        elif fusion == 'uot':
+        elif fusion in {'uot', 'uot_san'}:
             parsed_ot = replace(parsed_ot, transport_type='unbalanced')
+        parsed_ot_san = (
+            ot_san_config if isinstance(ot_san_config, OTSANConfig)
+            else OTSANConfig.from_dict(ot_san_config)
+        )
+        uses_ot_san = fusion in {'balanced_ot_san', 'uot_san'}
         self.ot_config = parsed_ot
         self.model_config = dict(
             output_size=output_size, d_model=d_model, num_heads=num_heads,
             ffn_hidden=ffn_hidden, drop_prob=drop_prob, num_layers=num_layers,
             num_att_layers=num_att_layers, fusion=fusion,
             ot_config=parsed_ot.to_dict() if fusion != 'san' else None,
+            ot_san_config=parsed_ot_san.to_dict() if uses_ot_san else None,
             freeze_answer_embeddings=freeze_answer_embeddings,
         )
         self.image_model = ImageEmbedding(image_model)
@@ -90,6 +104,7 @@ class VQAModel(nn.Module):
             visual_dim=image_dim, question_dim=question_dim, model_dim=d_model,
             config=parsed_ot,
         )
+        self.ot_san = OTSAN(d_model, parsed_ot_san) if uses_ot_san else None
         if self.ot_fusion is not None:
             self.question_encoder.freeze_encoder()
         self.decoder = Decoder(d_model, ffn_hidden, num_heads, drop_prob, num_layers)
@@ -119,10 +134,22 @@ class VQAModel(nn.Module):
             visual_tokens, question_embeddings, visual_padding_mask,
             question_padding_mask, return_diagnostics=return_diagnostics,
         )
+        memory = transport.fused_tokens
+        memory_padding_mask = transport.memory_padding_mask
+        ot_san = None
+        if self.ot_san is not None:
+            ot_san = self.ot_san(
+                memory, memory_padding_mask,
+                return_diagnostics=return_diagnostics,
+            )
+            memory = ot_san.memory
+            memory_padding_mask = ot_san.memory_padding_mask
+            transport.ot_san = ot_san
         return EncoderOutput(
-            memory=transport.fused_tokens,
-            memory_padding_mask=transport.memory_padding_mask,
+            memory=memory,
+            memory_padding_mask=memory_padding_mask,
             transport=transport,
+            ot_san=ot_san,
         )
 
     def encode(self, images, questions, anno_ids=None, return_diagnostics=False):
@@ -222,7 +249,11 @@ class VQAModel(nn.Module):
             memory, memory_mask, transport = self._unpack_encoder_output(encoded)
             generated = self._generate_from_memory(memory, memory_mask, max_len)
             if return_diagnostics:
-                return GenerationOutput(generated_ids=generated, transport=transport)
+                return GenerationOutput(
+                    generated_ids=generated,
+                    transport=transport,
+                    ot_san=getattr(encoded, 'ot_san', None),
+                )
             return generated
         finally:
             self.train(was_training)
@@ -263,7 +294,11 @@ class VQAModel(nn.Module):
             memory, memory_mask, transport = self._unpack_encoder_output(encoded)
             generated = self._generate_from_memory(memory, memory_mask, max_len)
             if return_diagnostics:
-                return GenerationOutput(generated_ids=generated, transport=transport)
+                return GenerationOutput(
+                    generated_ids=generated,
+                    transport=transport,
+                    ot_san=getattr(encoded, 'ot_san', None),
+                )
             return generated
         finally:
             self.train(was_training)

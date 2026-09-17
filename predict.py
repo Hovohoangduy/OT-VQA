@@ -59,6 +59,14 @@ def main():
                 "iterations": transport.iterations.item(),
                 "converged": bool(transport.converged.item()),
             }
+            if result.ot_san is not None:
+                payload.update({
+                    "ot_san_gate": result.ot_san.gate.item(),
+                    "ot_san_summary_norm": result.ot_san.summary_norm.item(),
+                    "ot_san_attention_entropy": (
+                        result.ot_san.attention_entropy.mean().item()
+                    ),
+                })
             print(json.dumps(payload, sort_keys=True))
             if args.diagnostics_output:
                 encoded = model.question_encoder.tokenizer(

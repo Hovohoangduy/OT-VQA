@@ -12,6 +12,17 @@ class DeviceSelectionTests(unittest.TestCase):
         self.assertEqual(args.text_model, "bert-base-uncased")
         self.assertFalse(hasattr(args, "language"))
         self.assertEqual(args.train_csv_path, "data/gqa_dataset/train.csv")
+        self.assertEqual(args.d_model, 384)
+        self.assertEqual(args.ffn_hidden, 1024)
+        self.assertEqual(args.num_layers, 2)
+        self.assertEqual(args.drop_prob, 0.2)
+        self.assertEqual(args.ot_san_hidden_dim, 128)
+        self.assertEqual(args.weight_decay, 0.05)
+        self.assertEqual(args.gradient_clip, 1.0)
+        self.assertTrue(args.freeze_answer_embeddings)
+        self.assertFalse(
+            get_args(["--no-freeze_answer_embeddings"]).freeze_answer_embeddings
+        )
         self.assertEqual(get_args(["--device", "mps"]).device, "mps")
 
     def test_auto_prefers_cuda_then_mps_then_cpu(self):

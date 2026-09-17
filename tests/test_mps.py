@@ -8,6 +8,7 @@ from torch.nn.utils.rnn import pack_padded_sequence
 
 from model.decoder_model import Decoder
 from model.optimal_transport import OTConfig, OptimalTransportFusion
+from model.ot_san import OTSAN, OTSANConfig
 
 
 @unittest.skipUnless(
@@ -35,13 +36,21 @@ class MPSSmokeTests(unittest.TestCase):
             visual, question, visual_mask, question_mask,
             return_diagnostics=True,
         )
+        ot_san = OTSAN(
+            12, OTSANConfig(hidden_dim=8, num_layers=1, dropout=0.0)
+        ).to(device)
+        combined = ot_san(
+            transport.fused_tokens, question_mask, return_diagnostics=True
+        )
         target = torch.randn(2, 3, 12, device=device)
         causal_mask = torch.triu(
             torch.ones(3, 3, dtype=torch.bool, device=device), diagonal=1
         )
-        memory_mask = question_mask[:, None, None, :].expand(-1, 1, 3, -1)
+        memory_mask = combined.memory_padding_mask[:, None, None, :].expand(
+            -1, 1, 3, -1
+        )
         decoded = decoder(
-            transport.fused_tokens, target, causal_mask, memory_mask
+            combined.memory, target, causal_mask, memory_mask
         )
         labels = torch.tensor([[1, 2, 0], [2, 1, 1]], device=device)
         logits = torch.nn.Linear(12, 3, device=device)(decoded)
@@ -52,6 +61,7 @@ class MPSSmokeTests(unittest.TestCase):
         self.assertTrue(torch.isfinite(loss).item())
         self.assertTrue(torch.isfinite(transport.plan).all().item())
         self.assertIsNotNone(fusion.pairwise_cost.learned[0].weight.grad)
+        self.assertIsNotNone(ot_san.gate_logit.grad)
 
         # SAN uses a packed LSTM question summary; cover that MPS kernel too.
         lstm = torch.nn.LSTM(7, 12, batch_first=True).to(device)

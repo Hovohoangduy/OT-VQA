@@ -71,6 +71,7 @@ class TransportOutput:
     residual: torch.Tensor
     iterations: torch.Tensor
     converged: torch.Tensor
+    ot_san: Optional[object] = None
 
 
 @dataclass

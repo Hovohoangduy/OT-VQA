@@ -14,13 +14,14 @@ from transformers import get_linear_schedule_with_warmup
 from configs.arg_parser import get_args
 from configs.config import Config
 from model.optimal_transport import OTConfig
+from model.ot_san import OTSANConfig
 from model.vqa_model import VQAModel
 from utils.checkpoint import read_checkpoint, restore_training_state, save_checkpoint
 from utils.data_processing import load_dataframe
 from utils.device import resolve_device, seed_everything
 from utils.feature_cache import FeatureCacheDataset, collate_feature_cache
 from utils.metrics import compute_em_and_f1
-from utils.vqa_dataset import VQADataset
+from utils.vqa_dataset import VQADataset, resolve_image_root
 
 
 def _forward_batch(model, batch, device, diagnostics=False):
@@ -41,7 +42,7 @@ def _forward_batch(model, batch, device, diagnostics=False):
 
 def train(model, train_loader, num_epochs, optimizer, scheduler, criterion,
           vocab_swap=None, device=None, diagnostics=False, epoch_offset=0,
-          total_epochs=None):
+          total_epochs=None, gradient_clip=None):
     """Run teacher-forced optimization; generation is reserved for validation."""
     device = device or next(model.parameters()).device
     losses, em_scores, f1_scores = [], [], []
@@ -59,13 +60,24 @@ def train(model, train_loader, num_epochs, optimizer, scheduler, criterion,
             if diagnostics:
                 logits, targets, transport = result
                 if transport is not None:
-                    diagnostic_rows.append({
+                    row = {
                         "matched_mass": transport.matched_mass.detach().mean().item(),
                         "entropy": transport.entropy.detach().mean().item(),
                         "residual": transport.residual.detach().mean().item(),
                         "iterations": transport.iterations.float().mean().item(),
                         "convergence": transport.converged.float().mean().item(),
-                    })
+                    }
+                    if transport.ot_san is not None:
+                        row.update({
+                            "ot_san_gate": transport.ot_san.gate.detach().item(),
+                            "ot_san_summary_norm": (
+                                transport.ot_san.summary_norm.detach().mean().item()
+                            ),
+                            "ot_san_attention_entropy": (
+                                transport.ot_san.attention_entropy.detach().mean().item()
+                            ),
+                        })
+                    diagnostic_rows.append(row)
             else:
                 logits, targets = result
             loss = criterion(logits.transpose(1, 2), targets)
@@ -73,6 +85,11 @@ def train(model, train_loader, num_epochs, optimizer, scheduler, criterion,
                 raise FloatingPointError("Training loss is NaN or infinity")
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
+            if gradient_clip:
+                torch.nn.utils.clip_grad_norm_(
+                    (parameter for parameter in model.parameters() if parameter.requires_grad),
+                    gradient_clip,
+                )
             optimizer.step()
             scheduler.step()
             batch_tokens = targets.ne(model.pad_token_id).sum().item()
@@ -109,7 +126,12 @@ def _make_loader(args, split, shuffle, text_model, image_model):
         return DataLoader(cache, batch_size=args.batch_size, shuffle=shuffle,
                           collate_fn=collate_feature_cache)
     frame = load_dataframe(csv_path)
-    image_path = getattr(args, f"{split}_img_path") or args.img_path
+    image_path = resolve_image_root(
+        frame,
+        args.img_path,
+        split,
+        override=getattr(args, f"{split}_img_path"),
+    )
     dataset = VQADataset(frame, transform=Config.transforms, img_path=image_path)
     return DataLoader(dataset, batch_size=args.batch_size, shuffle=shuffle)
 
@@ -128,6 +150,16 @@ def main():
         raise ValueError("d_model must be divisible by num_heads")
     if not 0.0 <= args.drop_prob < 1.0:
         raise ValueError("drop_prob must be in [0, 1)")
+    if args.weight_decay < 0:
+        raise ValueError("weight_decay cannot be negative")
+    if args.gradient_clip < 0:
+        raise ValueError("gradient_clip cannot be negative")
+    ot_san_config = OTSANConfig(
+        hidden_dim=args.ot_san_hidden_dim,
+        num_layers=args.ot_san_layers,
+        dropout=args.ot_san_dropout,
+        gate_init=args.ot_san_gate_init,
+    )
     seed_everything(args.seed)
     device = resolve_device(args.device)
     print(f"Training on device: {device}")
@@ -147,7 +179,8 @@ def main():
                          ffn_hidden=args.ffn_hidden, num_layers=args.num_layers,
                          num_heads=args.num_heads, drop_prob=args.drop_prob,
                          freeze_answer_embeddings=args.freeze_answer_embeddings,
-                         fusion=args.fusion, ot_config=ot_config).to(device)
+                         fusion=args.fusion, ot_config=ot_config,
+                         ot_san_config=ot_san_config).to(device)
     if args.feature_cache and model.fusion_type == "san":
         raise ValueError("Feature caches contain token features and require OT fusion")
 
@@ -159,8 +192,14 @@ def main():
         ignore_index=model.pad_token_id, label_smoothing=args.label_smoothing
     )
     validation_criterion = nn.CrossEntropyLoss(ignore_index=model.pad_token_id)
-    optimizer = optim.AdamW((p for p in model.parameters() if p.requires_grad),
-                            lr=args.lr if args.lr is not None else Config.lr)
+    trainable_parameters = [parameter for parameter in model.parameters()
+                            if parameter.requires_grad]
+    optimizer = optim.AdamW(
+        trainable_parameters,
+        lr=args.lr if args.lr is not None else Config.lr,
+        weight_decay=args.weight_decay,
+    )
+    print(f"Trainable parameters: {sum(parameter.numel() for parameter in trainable_parameters):,}")
     scheduler = get_linear_schedule_with_warmup(
         optimizer, num_warmup_steps=0, num_training_steps=len(train_loader) * args.epochs
     )
@@ -201,6 +240,7 @@ def main():
             model, train_loader, 1, optimizer, scheduler, train_criterion,
             device=device, diagnostics=args.diagnostics and model.fusion_type != "san",
             epoch_offset=epoch, total_epochs=args.epochs,
+            gradient_clip=args.gradient_clip or None,
         )
         global_step += len(train_loader)
         validation = evaluation(
