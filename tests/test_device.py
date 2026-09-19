@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import patch
 
 from configs.arg_parser import get_args
+from configs.config import Config
 from utils.device import resolve_device
 
 
@@ -10,6 +11,8 @@ class DeviceSelectionTests(unittest.TestCase):
         args = get_args([])
         self.assertEqual(args.device, "auto")
         self.assertEqual(args.text_model, "bert-base-uncased")
+        self.assertEqual(args.image_model, "google/vit-base-patch16-224-in21k")
+        self.assertEqual(args.image_model, Config.image_model)
         self.assertFalse(hasattr(args, "language"))
         self.assertEqual(args.train_csv_path, "data/gqa_dataset/train.csv")
         self.assertEqual(args.d_model, 384)

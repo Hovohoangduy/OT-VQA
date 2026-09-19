@@ -1,5 +1,7 @@
 import argparse
 
+from configs.config import Config
+
 def get_args(argv=None):
     parser = argparse.ArgumentParser()
 
@@ -18,11 +20,18 @@ def get_args(argv=None):
     
     parser.add_argument("--text_model", default="bert-base-uncased",
                         help="English Hugging Face tokenizer and text encoder")
-    parser.add_argument("--image_model", default="facebook/deit-base-distilled-patch16-224")
+    parser.add_argument("--image_model", default=Config.image_model)
     parser.add_argument("--split", choices=["dev", "test"], default="dev")
     parser.add_argument(
         "--fusion",
-        choices=["san", "balanced_ot", "uot", "balanced_ot_san", "uot_san"],
+        choices=[
+            "san", "ban", "mutan", "cross_attention", "qformer",
+            "balanced_ot", "uot",
+            "balanced_ot_san", "balanced_ot_ban", "balanced_ot_mutan",
+            "balanced_ot_cross_attention", "balanced_ot_qformer",
+            "uot_san", "uot_ban", "uot_mutan", "uot_cross_attention",
+            "uot_qformer",
+        ],
         default="san",
     )
     parser.add_argument("--ot_profile", default=None, help="JSON file containing OTConfig fields")
@@ -30,6 +39,15 @@ def get_args(argv=None):
     parser.add_argument("--ot_san_layers", type=int, default=1, choices=[1, 2])
     parser.add_argument("--ot_san_dropout", type=float, default=0.2)
     parser.add_argument("--ot_san_gate_init", type=float, default=-2.0)
+    parser.add_argument("--fusion_dropout", type=float, default=0.2)
+    parser.add_argument("--ban_glimpses", type=int, default=2)
+    parser.add_argument("--ban_dim", type=int, default=256)
+    parser.add_argument("--mutan_rank", type=int, default=5)
+    parser.add_argument("--mutan_dim", type=int, default=256)
+    parser.add_argument("--cross_fusion_layers", type=int, default=1)
+    parser.add_argument("--qformer_queries", type=int, default=8)
+    parser.add_argument("--qformer_layers", type=int, default=2)
+    parser.add_argument("--qformer_ffn_hidden", type=int, default=512)
     parser.add_argument("--feature_cache", default=None, help="Optional precomputed feature-cache folder")
     parser.add_argument("--resume", default=None, help="Version-3 training checkpoint to resume")
     parser.add_argument("--seed", type=int, default=1105)

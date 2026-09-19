@@ -1,7 +1,8 @@
 # OT-VQA
 
-Train a visual question answering model with SAN, Balanced OT, or question-conditioned
-Unbalanced OT fusion. Evaluation and prediction generate answers without references.
+Train a visual question answering model with SAN, BAN, MUTAN, cross-attention, or a
+lightweight Q-Former, using no OT, Balanced OT, or question-conditioned UOT alignment.
+Evaluation and prediction generate answers without references.
 
 ```bash
 python -m pip install -r requirements.txt
@@ -10,7 +11,18 @@ python test.py --model_path data/gqa_model
 python predict.py --checkpoint data/gqa_model/best.pt --image path/to/image.jpg --question "What is in the picture?"
 ```
 
-This repository supports English text and uses `bert-base-uncased` by default. The first run downloads DeiT and English BERT. Questions and answers receive whitespace normalization before the encoder tokenizer processes them. CSVs require `image`, `question`, and `answer`; `anno_id` is optional. Image paths are relative to `--img_path`. Training needs only its training CSV; evaluation loads only its selected split. Use `--split test --test_csv_path ...` to score a labelled test set. Prediction needs no answer or CSV.
+This repository uses `google/vit-base-patch16-224-in21k` as its default visual encoder and
+`bert-base-uncased` as its default text encoder. The first run downloads both pretrained
+models. Questions and answers receive whitespace normalization before the encoder tokenizer
+processes them. CSVs require `image`, `question`, and `answer`; `anno_id` is optional. Image
+paths are relative to `--img_path`. Training needs only its training CSV; evaluation loads
+only its selected split. Use `--split test --test_csv_path ...` to score a labelled test
+set. Prediction needs no answer or CSV.
+
+The visual and text encoders can still be overridden with `--image_model` and
+`--text_model`. Existing DeiT checkpoints remain loadable because checkpoints store their
+original encoder names. Feature caches created with DeiT cannot be reused with ViT; rebuild
+them so the cache manifest and visual token layout match the selected encoder.
 
 **Retrain old checkpoints.** The previous code used an incorrect objective and exposed full answers through cross-attention. Corrected training predicts the next token from a shifted answer prefix with causal attention. New version-3 checkpoints include the fusion configuration, optimizer, scheduler, progress, preprocessing settings, and random states. Version-2 SAN checkpoints still load; an old bare state dictionary raises an explanatory error.
 
@@ -124,6 +136,100 @@ The cache manifest fingerprints the CSV and records encoder and preprocessing se
 Loading refuses stale data or a different encoder. For standalone evaluation, pass the
 split cache itself, for example `--feature_cache data/gqa_cache/dev`.
 
+## Fusion methods and benchmark
+
+The implemented comparison covers SAN, BAN, MUTAN, cross-attention Transformer, and
+Q-Former with no transport, Balanced OT, and Unbalanced OT (UOT). See
+[`docs/fusion_methods_benchmark_plan.md`](docs/fusion_methods_benchmark_plan.md) for the
+method definitions, fairness controls, tensor contracts, tests, and experiment milestones.
+
+Fusion names are `san`, `ban`, `mutan`, `cross_attention`, and `qformer`. Prefix a token
+fusion with `uot_` or `balanced_ot_`; for example, `uot_ban` and
+`balanced_ot_qformer`. Method settings are available through `--ban_glimpses`,
+`--ban_dim`, `--mutan_rank`, `--mutan_dim`, `--cross_fusion_layers`,
+`--qformer_queries`, `--qformer_layers`, `--qformer_ffn_hidden`, and
+`--fusion_dropout`.
+
+Run the script from the repository root. Make it executable once, then check that every
+requested fusion name is available without starting training:
+
+```bash
+chmod +x scripts/run_fusion_benchmark.sh
+DEVICE=mps PREFLIGHT_ONLY=1 scripts/run_fusion_benchmark.sh
+```
+
+For a short end-to-end smoke test of all fifteen configurations, use one seed and two
+epochs:
+
+```bash
+DEVICE=mps \
+EPOCHS=2 \
+SEEDS="1105" \
+METHODS="san ban mutan cross_attention qformer" \
+TRANSPORTS="none balanced uot" \
+RUN_ROOT=results/fusion_smoke_mps \
+scripts/run_fusion_benchmark.sh
+```
+
+The complete three-seed no-OT versus Balanced-OT versus UOT benchmark is:
+
+```bash
+DEVICE=mps \
+OT_PROFILE=configs/ot_mps.json \
+METHODS="san ban mutan cross_attention qformer" \
+TRANSPORTS="none balanced uot" \
+SEEDS="1105 1106 1107" \
+scripts/run_fusion_benchmark.sh
+```
+
+Use `DEVICE=cpu` or `DEVICE=cuda` to select another backend. The script automatically
+selects `configs/ot_cpu.json`, `configs/ot_mps.json`, or `configs/ot_gpu.json`. Override
+the profile with `OT_PROFILE=path/to/profile.json` when needed. For example, a short CPU
+run of only BAN and MUTAN is:
+
+```bash
+DEVICE=cpu METHODS="ban mutan" SEEDS="1105" EPOCHS=2 \
+RUN_ROOT=results/fusion_smoke scripts/run_fusion_benchmark.sh
+```
+
+To run only selected transport modes, override `TRANSPORTS`. For example, compare
+Balanced OT directly with UOT without training the non-OT baseline:
+
+```bash
+DEVICE=mps \
+TRANSPORTS="balanced uot" \
+SEEDS="1105" \
+RUN_ROOT=results/fusion_balanced_vs_uot \
+scripts/run_fusion_benchmark.sh
+```
+
+Dataset locations and other runner settings can be overridden with environment variables:
+
+```bash
+TRAIN_CSV=data/gqa_dataset/train.csv \
+DEV_CSV=data/gqa_dataset/val.csv \
+IMG_PATH=data/gqa_dataset/images \
+TEXT_MODEL=bert-base-uncased \
+IMAGE_MODEL=google/vit-base-patch16-224-in21k \
+BATCH_SIZE=2 \
+EPOCHS=50 \
+DIAGNOSTICS=1 \
+RUN_ROOT=results/fusion_benchmark/my_run \
+scripts/run_fusion_benchmark.sh
+```
+
+Every run is stored below `RUN_ROOT/<method>/<transport>/seed_<seed>/`. Each directory
+contains the exact command, `train.log`, and a `model/` folder containing `best.pt`,
+`last.pt`, and `metrics.jsonl`. After all runs finish, the root contains `runs`,
+`aggregate`, `paired_deltas`, and `paired_aggregate` reports in both CSV and JSON formats.
+The paired reports calculate Balanced-OT minus no-OT, UOT minus no-OT, and UOT minus
+Balanced-OT deltas whenever both sides of a comparison are present.
+
+The runner deliberately refuses to overwrite an existing `RUN_ROOT` and does not resume
+old checkpoints. Choose a new directory when rerunning an experiment. If training stops
+partway through, completed checkpoints remain available, but launch a new `RUN_ROOT` for
+the next controlled benchmark.
+
 ## Apple Silicon GPU training with MPS
 
 All entry points accept `--device auto|cpu|cuda|mps`. The default `auto` selects CUDA
@@ -204,7 +310,7 @@ the older profile.
 python -m unittest discover -s tests -v
 ```
 
-Tests create tiny local BERT/DeiT models and do not download pretrained weights. They
+Tests create tiny local BERT, ViT, and DeiT models and do not download pretrained weights. They
 check shifted targets, causal and memory-mask isolation, gradients, Sinkhorn marginals,
 UOT mass relaxation, padding, cache validation, generation, and v2/v3 checkpoint loading.
 

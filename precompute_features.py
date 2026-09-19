@@ -1,4 +1,4 @@
-"""Precompute frozen DeiT and contextual question-token features for OT training."""
+"""Precompute frozen ViT/DeiT and contextual question-token features."""
 
 import argparse
 from pathlib import Path
@@ -83,7 +83,10 @@ def main():
             "image_mean": _json_value(image_encoder.process.image_mean),
             "image_std": _json_value(image_encoder.process.image_std),
         },
-        "special_token_policy": "question boundary tokens masked; DeiT CLS/distillation removed in fusion",
+        "special_token_policy": (
+            "question boundary tokens masked; visual CLS/distillation prefix tokens "
+            "removed in fusion"
+        ),
         "visual_source_shape": list(samples[0]["image_features"].shape) if samples else None,
         "question_hidden_size": samples[0]["question_features"].shape[-1] if samples else None,
         "annotation_ids": [str(sample["anno_id"]) for sample in samples],

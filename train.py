@@ -13,6 +13,7 @@ from transformers import get_linear_schedule_with_warmup
 
 from configs.arg_parser import get_args
 from configs.config import Config
+from model.fusion_methods import parse_fusion_spec
 from model.optimal_transport import OTConfig
 from model.ot_san import OTSANConfig
 from model.vqa_model import VQAModel
@@ -136,6 +137,39 @@ def _make_loader(args, split, shuffle, text_model, image_model):
     return DataLoader(dataset, batch_size=args.batch_size, shuffle=shuffle)
 
 
+def _fusion_config_from_args(args):
+    """Return only the active fusion family's checkpointable configuration."""
+    method = parse_fusion_spec(args.fusion).method
+    if method == "ban":
+        return {
+            "glimpses": args.ban_glimpses,
+            "hidden_dim": args.ban_dim,
+            "dropout": args.fusion_dropout,
+        }
+    if method == "mutan":
+        return {
+            "rank": args.mutan_rank,
+            "factor_dim": args.mutan_dim,
+            "dropout": args.fusion_dropout,
+        }
+    if method == "cross_attention":
+        return {
+            "layers": args.cross_fusion_layers,
+            "heads": args.num_heads,
+            "ffn_hidden": args.ffn_hidden,
+            "dropout": args.fusion_dropout,
+        }
+    if method == "qformer":
+        return {
+            "query_tokens": args.qformer_queries,
+            "layers": args.qformer_layers,
+            "heads": args.num_heads,
+            "ffn_hidden": args.qformer_ffn_hidden,
+            "dropout": args.fusion_dropout,
+        }
+    return None
+
+
 def main():
     args = get_args()
     if args.batch_size < 1 or args.epochs < 1:
@@ -148,8 +182,8 @@ def main():
         raise ValueError("model dimensions, layers, and heads must be positive")
     if args.d_model % args.num_heads:
         raise ValueError("d_model must be divisible by num_heads")
-    if not 0.0 <= args.drop_prob < 1.0:
-        raise ValueError("drop_prob must be in [0, 1)")
+    if not 0.0 <= args.drop_prob < 1.0 or not 0.0 <= args.fusion_dropout < 1.0:
+        raise ValueError("drop_prob and fusion_dropout must be in [0, 1)")
     if args.weight_decay < 0:
         raise ValueError("weight_decay cannot be negative")
     if args.gradient_clip < 0:
@@ -180,9 +214,10 @@ def main():
                          num_heads=args.num_heads, drop_prob=args.drop_prob,
                          freeze_answer_embeddings=args.freeze_answer_embeddings,
                          fusion=args.fusion, ot_config=ot_config,
-                         ot_san_config=ot_san_config).to(device)
+                         ot_san_config=ot_san_config,
+                         fusion_config=_fusion_config_from_args(args)).to(device)
     if args.feature_cache and model.fusion_type == "san":
-        raise ValueError("Feature caches contain token features and require OT fusion")
+        raise ValueError("Feature caches contain token features and require token-level fusion")
 
     train_loader = _make_loader(args, "train", True, text_model, image_model)
     dev_loader = _make_loader(args, "dev", False, text_model, image_model)
@@ -194,12 +229,19 @@ def main():
     validation_criterion = nn.CrossEntropyLoss(ignore_index=model.pad_token_id)
     trainable_parameters = [parameter for parameter in model.parameters()
                             if parameter.requires_grad]
+    total_parameter_count = sum(parameter.numel() for parameter in model.parameters())
+    trainable_parameter_count = sum(
+        parameter.numel() for parameter in trainable_parameters
+    )
     optimizer = optim.AdamW(
         trainable_parameters,
         lr=args.lr if args.lr is not None else Config.lr,
         weight_decay=args.weight_decay,
     )
-    print(f"Trainable parameters: {sum(parameter.numel() for parameter in trainable_parameters):,}")
+    print(
+        f"Parameters: total={total_parameter_count:,}, "
+        f"trainable={trainable_parameter_count:,}"
+    )
     scheduler = get_linear_schedule_with_warmup(
         optimizer, num_warmup_steps=0, num_training_steps=len(train_loader) * args.epochs
     )
@@ -238,14 +280,14 @@ def main():
     for epoch in range(start_epoch, args.epochs):
         losses, train_em, train_f1 = train(
             model, train_loader, 1, optimizer, scheduler, train_criterion,
-            device=device, diagnostics=args.diagnostics and model.fusion_type != "san",
+            device=device, diagnostics=args.diagnostics,
             epoch_offset=epoch, total_epochs=args.epochs,
             gradient_clip=args.gradient_clip or None,
         )
         global_step += len(train_loader)
         validation = evaluation(
             model, dev_loader, validation_criterion, device=device,
-            diagnostics=args.diagnostics and model.fusion_type != "san",
+            diagnostics=args.diagnostics,
         )
         val_loss, val_em, val_f1 = validation[:3]
         val_diagnostics = validation[3] if len(validation) > 3 else {}
@@ -270,9 +312,11 @@ def main():
                "train_em": train_em[-1], "train_f1": train_f1[-1],
                "val_loss": val_loss, "val_em": val_em, "val_f1": val_f1,
                "learning_rate": scheduler.get_last_lr()[0],
+               "total_parameters": total_parameter_count,
+               "trainable_parameters": trainable_parameter_count,
                "improved": improved,
                "epochs_without_improvement": epochs_without_improvement}
-        row.update({f"val_ot_{key}": value for key, value in val_diagnostics.items()})
+        row.update({f"val_{key}": value for key, value in val_diagnostics.items()})
         history.append(row)
         with metrics_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(row) + "\n")
@@ -284,8 +328,8 @@ def main():
                 "Validation diagnostics: "
                 f"unique predictions={val_diagnostics.get('unique_predictions', 0):g}, "
                 f"top prediction fraction={val_diagnostics.get('top_prediction_fraction', 0):.3f}, "
-                f"OT convergence={val_diagnostics.get('convergence_rate', 0):.3f}, "
-                f"residual={val_diagnostics.get('residual', 0):.5f}"
+                f"OT convergence={val_diagnostics.get('ot_convergence_rate', 0):.3f}, "
+                f"residual={val_diagnostics.get('ot_residual', 0):.5f}"
             )
         if (args.early_stopping_patience and
                 epochs_without_improvement >= args.early_stopping_patience):

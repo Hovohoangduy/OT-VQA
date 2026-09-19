@@ -12,7 +12,7 @@ The primary blocker was an invalid training/generation contract. The original `t
 | Attention heads | Head output was directly reshaped from `[B,H,T,D]` to `[B,T,H*D]`, mixing token/head positions. | Transpose head and token dimensions before merging. Cross-attention also handles different memory and answer lengths. |
 | Images | DeiT's `[B,N,D]` hidden states were reshaped as if they were channel-first feature maps. | Preserve token/feature order. |
 | Pixels | `ToTensor()` already scaled pixels to `[0,1]`; the image processor rescaled them again. | Disable the second rescaling and retain processor normalization. |
-| Frozen vision encoder | Calling `model.train()` re-enabled its dropout although its parameters were frozen. | Keep the frozen DeiT encoder in evaluation mode. |
+| Frozen vision encoder | Calling `model.train()` re-enabled its dropout although its parameters were frozen. | Keep the frozen ViT/DeiT encoder in evaluation mode. |
 | Stacked attention | All layers referenced one shared object, and each read the original question instead of the preceding context. | Instantiate separate layers and feed each updated context to the next. |
 | Question encoding | LSTM summarized fixed-length sequences after their padding tokens. | Pack by attention-mask lengths and summarize valid question tokens. |
 | Batch sizes | Model reshape used CLI batch size; training/evaluation skipped incomplete batches. Single-image inference could fail. | Infer dimensions from actual tensors and process every batch. |
@@ -38,10 +38,10 @@ Offline regression tests use small locally initialized BERT and DeiT models. The
 
 Both alternative CLI runners also completed all five model paths with small CPU settings. All repository Python files were parsed, and imports of training, evaluation, prediction, model, dataset, and conversion modules succeeded with an unrelated CLI argument present. These checks do not establish production accuracy or replace a controlled held-out evaluation; the available GQA training bottleneck measurements and their limits are documented in the implementation plan. Full-size retraining and CUDA execution were not performed.
 
-The main model uses DeiT/SAN and has no OCR extraction or copy mechanism. Its ability to answer questions about scene text remains limited. The re-implemented models are architecture prototypes, not complete reproductions of published training pipelines. Their synthetic metrics are not accuracy measurements. In particular, M4C copied output IDs must be resolved to the caller's OCR strings; feature inputs alone do not contain that text mapping.
+The main model uses ViT with selectable fusion and has no OCR extraction or copy mechanism. Its ability to answer questions about scene text remains limited. The re-implemented models are architecture prototypes, not complete reproductions of published training pipelines. Their synthetic metrics are not accuracy measurements. In particular, M4C copied output IDs must be resolved to the caller's OCR strings; feature inputs alone do not contain that text mapping.
 
 Long answers and questions remain truncated at configured limits. Checkpoint resume, best-development-checkpoint selection, and multi-reference answer scoring are not implemented. The downloader records a dataset revision as metadata but does not pin requests to that revision; its reproducibility is limited by source changes. Existing GQA `corpus.txt` includes held-out text, so rebuild it from training rows before using it for vocabulary learning or training.
 
 ## Documentation consulted
 
-DeiT expects its processor's pixel preparation; rescaling can be disabled for already scaled tensors. See [Hugging Face DeiT documentation](https://huggingface.co/docs/transformers/model_doc/deit). The supported default text model is English BERT. Implementation conclusions above are based on repository source and regression tests.
+ViT expects its processor's pixel preparation; rescaling can be disabled for already scaled tensors. See [Hugging Face ViT documentation](https://huggingface.co/docs/transformers/model_doc/vit). The supported default text model is English BERT. Implementation conclusions above are based on repository source and regression tests.

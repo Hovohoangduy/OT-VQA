@@ -1,4 +1,4 @@
-"""SAN and Optimal-Transport VQA models with autoregressive generation."""
+"""Selectable multimodal-fusion VQA models with autoregressive generation."""
 
 from __future__ import annotations
 
@@ -14,6 +14,10 @@ from model.features_extraction import (
     AnswerEmbedding, ImageEmbedding, QuestionEmbedding,
     validate_english_text_model,
 )
+from model.fusion_methods import (
+    FusionInput, FusionOutput, build_fusion_module, config_for_method,
+    parse_fusion_spec,
+)
 from model.optimal_transport import OTConfig, OptimalTransportFusion, TransportOutput
 from model.ot_san import OTSAN, OTSANConfig, OTSANOutput
 from model.sans import StackAttention
@@ -25,6 +29,7 @@ class EncoderOutput:
     memory_padding_mask: torch.Tensor
     transport: Optional[TransportOutput] = None
     ot_san: Optional[OTSANOutput] = None
+    fusion_output: Optional[FusionOutput] = None
 
 
 @dataclass
@@ -32,49 +37,68 @@ class GenerationOutput:
     generated_ids: torch.Tensor
     transport: Optional[TransportOutput] = None
     ot_san: Optional[OTSANOutput] = None
+    fusion_output: Optional[FusionOutput] = None
 
 
 class VQAModel(nn.Module):
-    """VQA generator with selectable SAN, OT, or OT-SAN fusion."""
+    """VQA generator with native, balanced-OT, or UOT-augmented fusion."""
 
     def __init__(
         self, vocab_size=None, output_size=768, d_model=768, num_heads=4,
         ffn_hidden=2048, drop_prob=0.1, num_layers=4, num_att_layers=2,
         mode='train', text_model=Config.text_model, image_model=Config.image_model,
-        fusion='san', ot_config=None, ot_san_config=None,
+        fusion='san', ot_config=None, ot_san_config=None, fusion_config=None,
+        fusion_spec=None,
         freeze_answer_embeddings=False,
     ):
         super().__init__()
         if output_size != d_model or num_att_layers < 1:
             raise ValueError('output_size must equal d_model and at least one attention layer is needed')
-        valid_fusions = {'san', 'balanced_ot', 'uot', 'balanced_ot_san', 'uot_san'}
+        methods = {'san', 'ban', 'mutan', 'cross_attention', 'qformer'}
+        valid_fusions = {'san', 'balanced_ot', 'uot'} | methods | {
+            f'balanced_ot_{method}' for method in methods
+        } | {f'uot_{method}' for method in methods}
         if fusion not in valid_fusions:
             raise ValueError(
-                "fusion must be 'san', 'balanced_ot', 'uot', "
-                "'balanced_ot_san', or 'uot_san'"
+                f"Unknown fusion '{fusion}'; expected one of {sorted(valid_fusions)}"
             )
         validate_english_text_model(text_model)
         self.mode = mode
         self.fusion_type = fusion
         self.text_model_name = str(text_model)
         self.image_model_name = str(image_model)
+        self.fusion_spec = parse_fusion_spec(fusion)
+        normalized_spec = {
+            'method': self.fusion_spec.method,
+            'transport': self.fusion_spec.transport,
+        }
+        if fusion_spec is not None and fusion_spec != normalized_spec:
+            raise ValueError(
+                f"fusion_spec {fusion_spec} does not match fusion name '{fusion}'"
+            )
         parsed_ot = ot_config if isinstance(ot_config, OTConfig) else OTConfig.from_dict(ot_config)
-        if fusion in {'balanced_ot', 'balanced_ot_san'}:
+        if self.fusion_spec.transport == 'balanced':
             parsed_ot = replace(parsed_ot, transport_type='balanced')
-        elif fusion in {'uot', 'uot_san'}:
+        elif self.fusion_spec.transport == 'unbalanced':
             parsed_ot = replace(parsed_ot, transport_type='unbalanced')
         parsed_ot_san = (
             ot_san_config if isinstance(ot_san_config, OTSANConfig)
             else OTSANConfig.from_dict(ot_san_config)
         )
         uses_ot_san = fusion in {'balanced_ot_san', 'uot_san'}
+        parsed_fusion_config = config_for_method(
+            self.fusion_spec.method, fusion_config
+        )
         self.ot_config = parsed_ot
         self.model_config = dict(
             output_size=output_size, d_model=d_model, num_heads=num_heads,
             ffn_hidden=ffn_hidden, drop_prob=drop_prob, num_layers=num_layers,
             num_att_layers=num_att_layers, fusion=fusion,
-            ot_config=parsed_ot.to_dict() if fusion != 'san' else None,
+            fusion_spec=normalized_spec,
+            ot_config=parsed_ot.to_dict() if self.fusion_spec.uses_ot else None,
             ot_san_config=parsed_ot_san.to_dict() if uses_ot_san else None,
+            fusion_config=(parsed_fusion_config.to_dict()
+                           if parsed_fusion_config is not None else None),
             freeze_answer_embeddings=freeze_answer_embeddings,
         )
         self.image_model = ImageEmbedding(image_model)
@@ -100,13 +124,25 @@ class VQAModel(nn.Module):
         self.san_model = nn.ModuleList(
             [StackAttention(d=d_model, k=512) for _ in range(num_att_layers)]
         )
-        self.ot_fusion = None if fusion == 'san' else OptimalTransportFusion(
-            visual_dim=image_dim, question_dim=question_dim, model_dim=d_model,
-            config=parsed_ot,
+        self.ot_fusion = (
+            OptimalTransportFusion(
+                visual_dim=image_dim, question_dim=question_dim, model_dim=d_model,
+                config=parsed_ot,
+            ) if self.fusion_spec.uses_ot else None
         )
         self.ot_san = OTSAN(d_model, parsed_ot_san) if uses_ot_san else None
-        if self.ot_fusion is not None:
+        self.fusion_module = build_fusion_module(
+            self.fusion_spec.method, image_dim, question_dim, d_model,
+            parsed_fusion_config, uses_ot=self.fusion_spec.uses_ot,
+        )
+        if fusion != 'san':
             self.question_encoder.freeze_encoder()
+            # These legacy SAN-only parameters stay in the state dict so current
+            # version-3 OT checkpoints still load strictly, but token fusion must
+            # not count or optimize modules that never participate in its graph.
+            self.question_encoder.lstm.requires_grad_(False)
+            self.image_projection.requires_grad_(False)
+            self.san_model.requires_grad_(False)
         self.decoder = Decoder(d_model, ffn_hidden, num_heads, drop_prob, num_layers)
         actual_vocab = self.answer_embedding.token_embeddings.word_embeddings.num_embeddings
         if vocab_size is not None and vocab_size != actual_vocab:
@@ -120,9 +156,12 @@ class VQAModel(nn.Module):
         self, image_embeddings, question_embeddings, question_padding_mask,
         return_diagnostics=False,
     ):
-        if self.ot_fusion is None:
-            raise ValueError('Precomputed token features are supported only for OT fusion')
-        reference = next(self.ot_fusion.parameters())
+        if self.fusion_type == 'san':
+            raise ValueError('Precomputed token features require a token-level fusion')
+        reference_module = self.ot_fusion or self.fusion_module
+        if reference_module is None:
+            raise ValueError('Fusion does not support precomputed token features')
+        reference = next(reference_module.parameters())
         image_embeddings = image_embeddings.to(device=reference.device, dtype=reference.dtype)
         question_embeddings = question_embeddings.to(device=reference.device, dtype=reference.dtype)
         question_padding_mask = question_padding_mask.to(reference.device, dtype=torch.bool)
@@ -130,12 +169,16 @@ class VQAModel(nn.Module):
         visual_padding_mask = torch.zeros(
             visual_tokens.shape[:2], dtype=torch.bool, device=visual_tokens.device
         )
-        transport = self.ot_fusion(
-            visual_tokens, question_embeddings, visual_padding_mask,
-            question_padding_mask, return_diagnostics=return_diagnostics,
+        transport = None
+        if self.ot_fusion is not None:
+            transport = self.ot_fusion(
+                visual_tokens, question_embeddings, visual_padding_mask,
+                question_padding_mask, return_diagnostics=return_diagnostics,
+            )
+        memory = transport.fused_tokens if transport is not None else None
+        memory_padding_mask = (
+            transport.memory_padding_mask if transport is not None else None
         )
-        memory = transport.fused_tokens
-        memory_padding_mask = transport.memory_padding_mask
         ot_san = None
         if self.ot_san is not None:
             ot_san = self.ot_san(
@@ -145,16 +188,47 @@ class VQAModel(nn.Module):
             memory = ot_san.memory
             memory_padding_mask = ot_san.memory_padding_mask
             transport.ot_san = ot_san
+        fusion_output = None
+        if self.fusion_module is not None:
+            fusion_output = self.fusion_module(
+                FusionInput(
+                    visual_tokens=visual_tokens,
+                    question_tokens=question_embeddings,
+                    visual_padding_mask=visual_padding_mask,
+                    question_padding_mask=question_padding_mask,
+                    transport=transport,
+                ),
+                return_diagnostics=return_diagnostics,
+            )
+            if return_diagnostics:
+                valid = ~fusion_output.memory_padding_mask
+                valid_memory = fusion_output.memory.masked_fill(
+                    ~valid.unsqueeze(-1), 0.0
+                )
+                normalizer = valid.sum(1).clamp_min(1)
+                diagnostics = dict(fusion_output.diagnostics or {})
+                diagnostics.update({
+                    "memory_length": valid.sum(1).float(),
+                    "memory_norm": (
+                        valid_memory.float().norm(dim=-1).sum(1) / normalizer
+                    ),
+                })
+                fusion_output.diagnostics = diagnostics
+            memory = fusion_output.memory
+            memory_padding_mask = fusion_output.memory_padding_mask
+        if memory is None or memory_padding_mask is None:
+            raise RuntimeError(f"Fusion '{self.fusion_type}' produced no decoder memory")
         return EncoderOutput(
             memory=memory,
             memory_padding_mask=memory_padding_mask,
             transport=transport,
             ot_san=ot_san,
+            fusion_output=fusion_output,
         )
 
     def encode(self, images, questions, anno_ids=None, return_diagnostics=False):
         image_embeddings, _ = self.image_model(images, image_ids=anno_ids)
-        if self.ot_fusion is None:
+        if self.fusion_type == 'san':
             projected_images = self.image_projection(image_embeddings)
             context = self.question_encoder(questions)
             for layer in self.san_model:
@@ -253,6 +327,7 @@ class VQAModel(nn.Module):
                     generated_ids=generated,
                     transport=transport,
                     ot_san=getattr(encoded, 'ot_san', None),
+                    fusion_output=getattr(encoded, 'fusion_output', None),
                 )
             return generated
         finally:
@@ -298,6 +373,7 @@ class VQAModel(nn.Module):
                     generated_ids=generated,
                     transport=transport,
                     ot_san=getattr(encoded, 'ot_san', None),
+                    fusion_output=getattr(encoded, 'fusion_output', None),
                 )
             return generated
         finally:

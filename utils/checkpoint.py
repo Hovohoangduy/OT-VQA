@@ -102,6 +102,7 @@ def load_model(checkpoint_path, device):
     if checkpoint["format_version"] == 2:
         model_config["fusion"] = "san"
         model_config.pop("ot_config", None)
+        model_config.pop("fusion_spec", None)
     model = VQAModel(
         text_model=checkpoint["text_model"], image_model=checkpoint["image_model"],
         **model_config,

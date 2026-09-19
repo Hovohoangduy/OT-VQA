@@ -87,7 +87,7 @@ Use the following symbols throughout implementation and tests:
 
 | Symbol | Shape | Meaning |
 | --- | --- | --- |
-| `V` | `[B, N, Dv]` | Spatial image tokens after removal of DeiT special tokens |
+| `V` | `[B, N, Dv]` | Spatial image tokens after removal of ViT/DeiT prefix tokens |
 | `Q` | `[B, M, Dq]` | Contextual question-token embeddings |
 | `V_bar` | `[B, N, Dot]` | Projected visual tokens in the OT space |
 | `Q_bar` | `[B, M, Dot]` | Projected question tokens in the OT space |

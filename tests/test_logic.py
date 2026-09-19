@@ -12,10 +12,16 @@ from PIL import Image
 import torch
 from torch import nn
 from torch.utils.data import DataLoader
-from transformers import BertConfig, BertModel, BertTokenizer, DeiTConfig, DeiTModel, DeiTImageProcessor
+from transformers import (
+    BertConfig, BertModel, BertTokenizer,
+    DeiTConfig, DeiTImageProcessor, DeiTModel,
+    ViTConfig, ViTImageProcessor, ViTModel,
+)
 
 from configs.config import Config
 from model.vqa_model import VQAModel
+from model.features_extraction import ImageEmbedding
+from model.fusion_methods import parse_fusion_spec
 from model.optimal_transport import OTConfig
 from model.ot_san import OTSANConfig
 from model.decoder_model import MultiHeadAttention, MultiHeadCrossAttention, scaled_dot_product
@@ -48,6 +54,15 @@ class ModelLogicTests(unittest.TestCase):
         DeiTModel(DeiTConfig(hidden_size=16, num_hidden_layers=1, num_attention_heads=4,
                              intermediate_size=32, image_size=32, patch_size=16)).save_pretrained(cls.visual)
         DeiTImageProcessor(size={'height': 32, 'width': 32}, crop_size={'height': 32, 'width': 32}).save_pretrained(cls.visual)
+        cls.vit_visual = cls.root / 'vit-visual'
+        ViTModel(ViTConfig(
+            hidden_size=16, num_hidden_layers=1, num_attention_heads=4,
+            intermediate_size=32, image_size=32, patch_size=16,
+        )).save_pretrained(cls.vit_visual)
+        ViTImageProcessor(
+            size={'height': 32, 'width': 32},
+            crop_size={'height': 32, 'width': 32},
+        ).save_pretrained(cls.vit_visual)
 
     @classmethod
     def tearDownClass(cls):
@@ -58,12 +73,25 @@ class ModelLogicTests(unittest.TestCase):
                         output_size=16, d_model=16, ffn_hidden=32, num_layers=2, drop_prob=0)
 
     def make_ot_model(self, fusion='uot'):
+        method = parse_fusion_spec(fusion).method
+        fusion_configs = {
+            'ban': {'glimpses': 2, 'hidden_dim': 8, 'dropout': 0},
+            'mutan': {'rank': 2, 'factor_dim': 8, 'dropout': 0},
+            'cross_attention': {
+                'layers': 1, 'heads': 4, 'ffn_hidden': 32, 'dropout': 0,
+            },
+            'qformer': {
+                'query_tokens': 3, 'layers': 1, 'heads': 4,
+                'ffn_hidden': 32, 'dropout': 0,
+            },
+        }
         return VQAModel(
             text_model=str(self.text), image_model=str(self.visual),
             output_size=16, d_model=16, ffn_hidden=32, num_layers=1,
             drop_prob=0, fusion=fusion,
             ot_config=OTConfig(ot_dim=8, epsilon=0.1, max_iterations=30),
             ot_san_config=OTSANConfig(hidden_dim=8, num_layers=1, dropout=0),
+            fusion_config=fusion_configs.get(method),
         )
 
     def test_shifted_targets_and_backward_for_single_image(self):
@@ -118,9 +146,18 @@ class ModelLogicTests(unittest.TestCase):
             actual, _ = model.image_model(images)
             direct = model.image_model.model(**expected).last_hidden_state
         self.assertEqual(actual.shape, (1, 6, 16))
+        self.assertEqual(model.image_model.spatial_tokens(actual).shape, (1, 4, 16))
         torch.testing.assert_close(actual, direct)
         # White pixels normalized using DeiT mean/std are approximately +1.
         self.assertGreater(expected['pixel_values'].mean().item(), 0.9)
+
+    def test_vit_visual_encoder_removes_only_cls_token(self):
+        encoder = ImageEmbedding(str(self.vit_visual)).eval()
+        with torch.no_grad():
+            hidden, _ = encoder(torch.rand(1, 3, 32, 32))
+        self.assertEqual(hidden.shape, (1, 5, 16))
+        self.assertEqual(encoder.num_prefix_tokens, 1)
+        self.assertEqual(encoder.spatial_tokens(hidden).shape, (1, 4, 16))
 
     def test_generation_prefix_eos_and_per_sample_padding(self):
         model = self.make_model()
@@ -306,6 +343,62 @@ class ModelLogicTests(unittest.TestCase):
         model = self.make_ot_model(fusion='balanced_ot_san')
         self.assertEqual(model.ot_config.transport_type, 'balanced')
         self.assertIsNotNone(model.ot_san)
+
+    def test_new_fusion_families_support_online_and_cached_paths(self):
+        images = torch.rand(2, 3, 32, 32)
+        questions = ['what color ?', 'color ?']
+        names = [
+            'ban', 'uot_ban', 'mutan', 'uot_mutan',
+            'cross_attention', 'uot_cross_attention',
+            'qformer', 'uot_qformer',
+        ]
+        for name in names:
+            with self.subTest(fusion=name):
+                model = self.make_ot_model(name).eval()
+                with torch.no_grad():
+                    online = model.encode(images, questions, return_diagnostics=True)
+                    image_features, _ = model.image_model(images)
+                    question_features, question_mask, _ = (
+                        model.question_encoder.encode_tokens(questions)
+                    )
+                    cached = model.encode_from_features(
+                        image_features.half(), question_features.half(),
+                        question_mask, True,
+                    )
+                    generated = model.generate_from_features(
+                        image_features, question_features, question_mask,
+                        max_len=4, return_diagnostics=True,
+                    )
+                torch.testing.assert_close(
+                    online.memory, cached.memory, atol=2e-3, rtol=2e-3
+                )
+                self.assertEqual(
+                    online.memory_padding_mask.shape, online.memory.shape[:2]
+                )
+                self.assertIsNotNone(online.fusion_output.diagnostics)
+                self.assertEqual(generated.generated_ids.size(0), 2)
+                self.assertEqual(
+                    online.transport is not None,
+                    parse_fusion_spec(name).uses_ot,
+                )
+
+    def test_new_fusion_checkpoint_restores_method_configuration(self):
+        for name in ('ban', 'uot_qformer'):
+            with self.subTest(fusion=name):
+                model = self.make_ot_model(name).eval()
+                path = self.root / f'{name}.pt'
+                save_checkpoint(
+                    path, model=model, text_model=str(self.text),
+                    image_model=str(self.visual), epoch=1, global_step=1,
+                )
+                restored = load_model(path, torch.device('cpu'))
+                self.assertEqual(restored.fusion_type, name)
+                self.assertEqual(
+                    restored.model_config['fusion_config'],
+                    model.model_config['fusion_config'],
+                )
+                for key, value in model.state_dict().items():
+                    torch.testing.assert_close(value, restored.state_dict()[key])
 
     def test_uot_tiny_batch_learns_and_generates_without_reference(self):
         torch.manual_seed(8)

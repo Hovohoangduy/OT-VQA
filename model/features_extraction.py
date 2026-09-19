@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 from torch.nn.utils.rnn import pack_padded_sequence
-from transformers import AutoModel, AutoTokenizer, AutoImageProcessor, DeiTModel
+from transformers import AutoImageProcessor, AutoModel, AutoTokenizer
 
 from configs.config import Config
 
@@ -16,7 +16,15 @@ class ImageEmbedding(nn.Module):
     def __init__(self, model_name=Config.image_model):
         super().__init__()
         self.process = AutoImageProcessor.from_pretrained(model_name)
-        self.model = DeiTModel.from_pretrained(model_name)
+        self.model = AutoModel.from_pretrained(model_name)
+        model_type = str(getattr(self.model.config, "model_type", "")).lower()
+        if model_type not in {"vit", "deit"}:
+            raise ValueError(
+                "The visual encoder must be a ViT or DeiT token encoder; "
+                f"received model_type={model_type!r}"
+            )
+        # ViT has one CLS token. Distilled DeiT has CLS and distillation tokens.
+        self.num_prefix_tokens = 2 if model_type == "deit" else 1
         self.model.requires_grad_(False)
         self.model.eval()
 
@@ -33,12 +41,11 @@ class ImageEmbedding(nn.Module):
             outputs = self.model(**inputs.to(device))
         return outputs.last_hidden_state, image_ids
 
-    @staticmethod
-    def spatial_tokens(hidden_states):
-        """Remove DeiT's class and distillation tokens, retaining patch tokens."""
-        if hidden_states.size(1) <= 2:
-            raise ValueError("DeiT output does not contain spatial patch tokens")
-        return hidden_states[:, 2:]
+    def spatial_tokens(self, hidden_states):
+        """Remove ViT/DeiT prefix tokens, retaining only spatial patch tokens."""
+        if hidden_states.size(1) <= self.num_prefix_tokens:
+            raise ValueError("Visual encoder output does not contain spatial patch tokens")
+        return hidden_states[:, self.num_prefix_tokens:]
 
 
 class QuestionEmbedding(nn.Module):

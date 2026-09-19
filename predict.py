@@ -44,13 +44,12 @@ def main():
     print(model.answers_from_ids(ids)[0])
     if diagnostics:
         transport = result.transport
+        payload = {"fusion": model.fusion_type}
         if transport is None:
             if args.diagnostics_output:
                 raise ValueError("diagnostics_output requires a Balanced OT or UOT checkpoint")
-            print(json.dumps({"fusion": "san"}))
         else:
-            payload = {
-                "fusion": model.fusion_type,
+            payload.update({
                 "transport_cost": transport.transport_cost.item(),
                 "entropy": transport.entropy.item(),
                 "matched_mass": transport.matched_mass.item(),
@@ -58,7 +57,7 @@ def main():
                 "residual": transport.residual.item(),
                 "iterations": transport.iterations.item(),
                 "converged": bool(transport.converged.item()),
-            }
+            })
             if result.ot_san is not None:
                 payload.update({
                     "ot_san_gate": result.ot_san.gate.item(),
@@ -67,7 +66,6 @@ def main():
                         result.ot_san.attention_entropy.mean().item()
                     ),
                 })
-            print(json.dumps(payload, sort_keys=True))
             if args.diagnostics_output:
                 encoded = model.question_encoder.tokenizer(
                     [question], max_length=Config.MAX_LEN_QUES,
@@ -80,6 +78,12 @@ def main():
                     transport, args.diagnostics_output,
                     image=display_image, question_tokens=tokens,
                 )
+        if result.fusion_output is not None and result.fusion_output.diagnostics is not None:
+            payload.update({
+                f"fusion_{key}": value.detach().float().mean().item()
+                for key, value in result.fusion_output.diagnostics.items()
+            })
+        print(json.dumps(payload, sort_keys=True))
 
 
 if __name__ == "__main__":

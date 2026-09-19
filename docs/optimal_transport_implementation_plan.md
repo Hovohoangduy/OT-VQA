@@ -81,7 +81,7 @@ The compatibility baseline is the SAN-based VQA model:
 
 ```mermaid
 flowchart LR
-    I[Image] --> VE[Frozen DeiT]
+    I[Image] --> VE[Frozen ViT]
     VE --> V[Visual tokens]
     Q[Question] --> QE[Text encoder and LSTM]
     QE --> G[Global question vector]
@@ -108,7 +108,7 @@ directly in decoder memory construction:
 
 ```mermaid
 flowchart LR
-    I[Image] --> VE[DeiT token encoder]
+    I[Image] --> VE[ViT token encoder]
     Q[Question] --> QE[Contextual text-token encoder]
     VE --> VP[Visual projection]
     QE --> QP[Question projection]
@@ -153,7 +153,8 @@ Use the following symbols throughout code, tests, logs, and visualizations:
 
 ### 3.1 Token selection and projection
 
-- Remove DeiT CLS and distillation tokens before alignment; use spatial patch tokens.
+- Remove the ViT CLS token before alignment; legacy distilled DeiT removes both CLS and
+  distillation tokens.
 - Remove question BOS/CLS, EOS/SEP, and padding tokens from transport using the mask.
 - Reject an example if it has no valid visual or question token after masking.
 - Project both modalities into a shared OT space:
@@ -413,7 +414,8 @@ recorded. It is the comparison anchor for every later milestone.
 
 1. Split question encoding into `encode_tokens()` and optional SAN pooling.
 2. Return contextual question tokens, token IDs, and padding/special-token masks.
-3. Return DeiT spatial patch tokens separately from CLS/distillation tokens.
+3. Return ViT spatial patch tokens separately from the CLS token, while retaining the
+   two-prefix-token compatibility path for distilled DeiT checkpoints.
 4. Implement feature-cache generation, validation, and loading.
 5. Verify online/cache parity before using cached features in training.
 
@@ -551,7 +553,7 @@ comparative claims.
   most 50 Sinkhorn iterations.
 - Begin at batch size 2 and increase only after observing stable unified-memory use.
 - Keep the Sinkhorn solver in float32; do not depend on CUDA-specific autocast behavior.
-- Prefer frozen encoder caches to remove repeated DeiT and text-encoder computation.
+- Prefer frozen encoder caches to remove repeated ViT and text-encoder computation.
 - Load checkpoints through CPU staging before moving the reconstructed model to MPS,
   avoiding a temporary duplicate model-sized allocation on the GPU.
 
