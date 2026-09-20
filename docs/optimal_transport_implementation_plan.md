@@ -153,8 +153,7 @@ Use the following symbols throughout code, tests, logs, and visualizations:
 
 ### 3.1 Token selection and projection
 
-- Remove the ViT CLS token before alignment; legacy distilled DeiT removes both CLS and
-  distillation tokens.
+- Remove the ViT CLS token before alignment to retain the 196 spatial patch tokens.
 - Remove question BOS/CLS, EOS/SEP, and padding tokens from transport using the mask.
 - Reject an example if it has no valid visual or question token after masking.
 - Project both modalities into a shared OT space:
@@ -414,8 +413,7 @@ recorded. It is the comparison anchor for every later milestone.
 
 1. Split question encoding into `encode_tokens()` and optional SAN pooling.
 2. Return contextual question tokens, token IDs, and padding/special-token masks.
-3. Return ViT spatial patch tokens separately from the CLS token, while retaining the
-   two-prefix-token compatibility path for distilled DeiT checkpoints.
+3. Return ViT spatial patch tokens separately from the CLS token.
 4. Implement feature-cache generation, validation, and loading.
 5. Verify online/cache parity before using cached features in training.
 

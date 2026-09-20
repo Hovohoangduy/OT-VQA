@@ -50,6 +50,8 @@ class VQAModel(nn.Module):
         fusion='san', ot_config=None, ot_san_config=None, fusion_config=None,
         fusion_spec=None,
         freeze_answer_embeddings=False,
+        skip_encoders=False, shared_text_encoder=None, shared_tokenizer=None,
+        token_embeddings=None, embeddings_path=None,
     ):
         super().__init__()
         if output_size != d_model or num_att_layers < 1:
@@ -101,9 +103,32 @@ class VQAModel(nn.Module):
                            if parsed_fusion_config is not None else None),
             freeze_answer_embeddings=freeze_answer_embeddings,
         )
-        self.image_model = ImageEmbedding(image_model)
-        self.question_encoder = QuestionEmbedding(output_size=output_size, model_name=text_model)
-        self.answer_embedding = AnswerEmbedding(model_name=text_model)
+        self.skip_encoders = skip_encoders
+        if skip_encoders:
+            self.image_model = ImageEmbedding(image_model, skip_model=True)
+            self.question_encoder = QuestionEmbedding(
+                output_size=output_size, model_name=text_model,
+                tokenizer=shared_tokenizer, skip_model=True,
+            )
+        else:
+            self.image_model = ImageEmbedding(image_model)
+            self.question_encoder = QuestionEmbedding(
+                output_size=output_size, model_name=text_model,
+                text_encoder=shared_text_encoder, tokenizer=shared_tokenizer,
+            )
+        image_dim = self.image_model.hidden_size
+        question_dim = self.question_encoder.hidden_size
+
+        text_encoder_ref = (
+            getattr(self.question_encoder, "text_encoder", None) or shared_text_encoder
+        )
+        self.answer_embedding = AnswerEmbedding(
+            model_name=text_model,
+            text_encoder=text_encoder_ref,
+            tokenizer=self.question_encoder.tokenizer,
+            token_embeddings=token_embeddings,
+            embeddings_path=embeddings_path,
+        )
         if freeze_answer_embeddings:
             self.answer_embedding.freeze()
         self.tokenizer = self.answer_embedding.tokenizer
@@ -115,8 +140,6 @@ class VQAModel(nn.Module):
         if any(value is None for value in (self.pad_token_id, self.bos_token_id, self.eos_token_id)):
             raise ValueError('Tokenizer needs PAD, BOS/CLS and EOS/SEP tokens')
 
-        image_dim = self.image_model.model.config.hidden_size
-        question_dim = self.question_encoder.text_encoder.config.hidden_size
         answer_dim = self.answer_embedding.token_embeddings.word_embeddings.embedding_dim
         # Preserve original SAN names so version-2 checkpoints load strictly.
         self.image_projection = nn.Identity() if image_dim == d_model else nn.Linear(image_dim, d_model)
@@ -156,9 +179,7 @@ class VQAModel(nn.Module):
         self, image_embeddings, question_embeddings, question_padding_mask,
         return_diagnostics=False,
     ):
-        if self.fusion_type == 'san':
-            raise ValueError('Precomputed token features require a token-level fusion')
-        reference_module = self.ot_fusion or self.fusion_module
+        reference_module = self.ot_fusion or self.fusion_module or self.san_model[0]
         if reference_module is None:
             raise ValueError('Fusion does not support precomputed token features')
         reference = next(reference_module.parameters())
@@ -166,6 +187,19 @@ class VQAModel(nn.Module):
         question_embeddings = question_embeddings.to(device=reference.device, dtype=reference.dtype)
         question_padding_mask = question_padding_mask.to(reference.device, dtype=torch.bool)
         visual_tokens = self.image_model.spatial_tokens(image_embeddings)
+
+        if self.fusion_type == 'san':
+            projected_images = self.image_projection(image_embeddings)
+            context = self.question_encoder.forward_from_embeddings(question_embeddings, question_padding_mask)
+            for layer in self.san_model:
+                context = layer(projected_images, context.unsqueeze(1))
+            memory = context.unsqueeze(1)
+            return EncoderOutput(
+                memory=memory,
+                memory_padding_mask=torch.zeros(
+                    memory.shape[:2], dtype=torch.bool, device=memory.device
+                ),
+            )
         visual_padding_mask = torch.zeros(
             visual_tokens.shape[:2], dtype=torch.bool, device=visual_tokens.device
         )

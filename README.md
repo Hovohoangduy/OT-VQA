@@ -20,9 +20,7 @@ only its selected split. Use `--split test --test_csv_path ...` to score a label
 set. Prediction needs no answer or CSV.
 
 The visual and text encoders can still be overridden with `--image_model` and
-`--text_model`. Existing DeiT checkpoints remain loadable because checkpoints store their
-original encoder names. Feature caches created with DeiT cannot be reused with ViT; rebuild
-them so the cache manifest and visual token layout match the selected encoder.
+`--text_model`.
 
 **Retrain old checkpoints.** The previous code used an incorrect objective and exposed full answers through cross-attention. Corrected training predicts the next token from a shifted answer prefix with causal attention. New version-3 checkpoints include the fusion configuration, optimizer, scheduler, progress, preprocessing settings, and random states. Version-2 SAN checkpoints still load; an old bare state dictionary raises an explanatory error.
 
@@ -225,6 +223,15 @@ contains the exact command, `train.log`, and a `model/` folder containing `best.
 The paired reports calculate Balanced-OT minus no-OT, UOT minus no-OT, and UOT minus
 Balanced-OT deltas whenever both sides of a comparison are present.
 
+### Single BERT Loading Optimization
+
+To ensure maximum benchmark efficiency, `scripts/run_fusion_benchmark.sh` (backed by
+`scripts/run_fusion_benchmark.py`) loads BERT and ViT **only once** at the beginning. It precomputes
+the frozen visual/question feature caches into `FEATURE_CACHE` (`data/gqa_cache` by default) along with
+the vocabulary embedding weights (`embeddings.pt`). Each subsequent method, transport, and seed run
+consumes cached features directly with `skip_encoders=True`, avoiding reloading the 440MB BERT model
+and eliminating redundant forward passes across all 15 configurations.
+
 The runner deliberately refuses to overwrite an existing `RUN_ROOT` and does not resume
 old checkpoints. Choose a new directory when rerunning an experiment. If training stops
 partway through, completed checkpoints remain available, but launch a new `RUN_ROOT` for
@@ -310,7 +317,7 @@ the older profile.
 python -m unittest discover -s tests -v
 ```
 
-Tests create tiny local BERT, ViT, and DeiT models and do not download pretrained weights. They
+Tests create tiny local BERT and ViT models and do not download pretrained weights. They
 check shifted targets, causal and memory-mask isolation, gradients, Sinkhorn marginals,
 UOT mass relaxation, padding, cache validation, generation, and v2/v3 checkpoint loading.
 

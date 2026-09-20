@@ -436,6 +436,116 @@ class ModelLogicTests(unittest.TestCase):
             second = model.decode(ids, changed, memory_padding_mask=mask)
         torch.testing.assert_close(first, second)
 
+    def test_vqa_model_shares_bert_between_question_and_answer_embedding(self):
+        model = self.make_model()
+        # AnswerEmbedding should directly reference QuestionEmbedding's BertEmbeddings
+        self.assertIs(
+            model.answer_embedding.token_embeddings,
+            model.question_encoder.text_encoder.embeddings,
+        )
+        self.assertIs(
+            model.answer_embedding.tokenizer,
+            model.question_encoder.tokenizer,
+        )
+
+    def test_vqa_model_san_forward_from_features(self):
+        model = self.make_model()
+        image_features = torch.randn(2, 5, 16)
+        question_features = torch.randn(2, 4, 16)
+        question_padding_mask = torch.tensor([[False, False, False, True],
+                                              [False, False, True, True]])
+        logits, targets = model.forward_from_features(
+            image_features, question_features, question_padding_mask,
+            answers=['red', 'blue'], max_len=6,
+        )
+        self.assertEqual(logits.shape[:2], (2, 5))
+        loss = nn.functional.cross_entropy(logits.transpose(1, 2), targets, ignore_index=model.pad_token_id)
+        loss.backward()
+        self.assertTrue(torch.isfinite(loss))
+
+        generated = model.generate_from_features(
+            image_features, question_features, question_padding_mask, max_len=6,
+        )
+        self.assertEqual(generated.shape, (2, 5))
+
+    def test_vqa_model_skip_encoders(self):
+        base_model = self.make_model()
+        token_embeddings = base_model.question_encoder.text_encoder.embeddings
+        model = VQAModel(
+            text_model=str(self.text), image_model=str(self.visual),
+            output_size=16, d_model=16, ffn_hidden=32, num_layers=1,
+            drop_prob=0, fusion='uot',
+            ot_config=OTConfig(ot_dim=8, epsilon=0.1, max_iterations=10),
+            skip_encoders=True, token_embeddings=token_embeddings,
+        )
+        self.assertIsNone(model.image_model.model)
+        self.assertIsNone(model.question_encoder.text_encoder)
+        self.assertIs(model.answer_embedding.token_embeddings, token_embeddings)
+
+        image_features = torch.randn(2, 5, 16)
+        question_features = torch.randn(2, 4, 16)
+        question_padding_mask = torch.tensor([[False, False, False, True],
+                                              [False, False, True, True]])
+        logits, targets = model.forward_from_features(
+            image_features, question_features, question_padding_mask,
+            answers=['red', 'blue'], max_len=6,
+        )
+        self.assertEqual(logits.shape[:2], (2, 5))
+
+    def test_ensure_feature_cache_and_reuse(self):
+        from scripts.run_fusion_benchmark import ensure_feature_cache
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            img_dir = temp_path / 'images'
+            img_dir.mkdir()
+            img_file = img_dir / '1.jpg'
+            Image.new('RGB', (32, 32), color='red').save(img_file)
+
+            csv_data = pd.DataFrame({
+                'anno_id': [1],
+                'image': ['1.jpg'],
+                'question': ['what color ?'],
+                'answer': ['red'],
+            })
+            train_csv = temp_path / 'train.csv'
+            dev_csv = temp_path / 'dev.csv'
+            csv_data.to_csv(train_csv, index=False)
+            csv_data.to_csv(dev_csv, index=False)
+
+            cache_dir = temp_path / 'cache'
+
+            # 1. First run: extracts features, saves embeddings.pt
+            out_cache = ensure_feature_cache(
+                cache_dir, train_csv, dev_csv, img_dir,
+                str(self.text), str(self.visual),
+                torch.device('cpu'), batch_size=1,
+            )
+            self.assertEqual(out_cache, cache_dir)
+            self.assertTrue((cache_dir / 'embeddings.pt').is_file())
+            self.assertTrue((cache_dir / 'train' / 'features.pt').is_file())
+            self.assertTrue((cache_dir / 'dev' / 'features.pt').is_file())
+
+            # 2. Second run: uses existing cache; patch ImageEmbedding to verify encoders are NOT instantiated
+            with patch('scripts.run_fusion_benchmark.ImageEmbedding', side_effect=AssertionError("Should not load ImageEmbedding")):
+                with patch('scripts.run_fusion_benchmark.QuestionEmbedding', side_effect=AssertionError("Should not load QuestionEmbedding")):
+                    reused_cache = ensure_feature_cache(
+                        cache_dir, train_csv, dev_csv, img_dir,
+                        str(self.text), str(self.visual),
+                        torch.device('cpu'), batch_size=1,
+                    )
+                    self.assertEqual(reused_cache, cache_dir)
+
+            # 3. Model init with skip_encoders and cached embeddings_path loads without BERT
+            model = VQAModel(
+                text_model=str(self.text), image_model=str(self.visual),
+                output_size=16, d_model=16, ffn_hidden=32, num_layers=1,
+                drop_prob=0, fusion='san',
+                skip_encoders=True, embeddings_path=cache_dir / 'embeddings.pt',
+            )
+            self.assertIsNone(model.question_encoder.text_encoder)
+            self.assertIsNone(model.image_model.model)
+            self.assertIsNotNone(model.answer_embedding.token_embeddings)
+
 class DataLogicTests(unittest.TestCase):
     def test_metrics_count_repeated_words_and_empty_answers(self):
         em, f1 = compute_em_and_f1(['a a b'], ['a b b'])

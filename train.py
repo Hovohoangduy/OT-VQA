@@ -198,12 +198,28 @@ def main():
     device = resolve_device(args.device)
     print(f"Training on device: {device}")
 
+    embeddings_file = None
+    if args.feature_cache:
+        cache_path = Path(args.feature_cache)
+        candidates = [
+            cache_path / "embeddings.pt",
+            cache_path / "train" / "embeddings.pt",
+            cache_path / "dev" / "embeddings.pt",
+            cache_path.parent / "embeddings.pt",
+        ]
+        for candidate in candidates:
+            if candidate.is_file():
+                embeddings_file = str(candidate)
+                break
+
     resume = read_checkpoint(args.resume, device) if args.resume else None
     if resume is not None:
         if resume["format_version"] != 3:
             raise ValueError("Training can resume only from a version-3 checkpoint")
         text_model, image_model = resume["text_model"], resume["image_model"]
         model = VQAModel(text_model=text_model, image_model=image_model,
+                         skip_encoders=bool(args.feature_cache),
+                         embeddings_path=embeddings_file,
                          **resume["model_config"]).to(device)
     else:
         text_model, image_model = args.text_model, args.image_model
@@ -215,9 +231,11 @@ def main():
                          freeze_answer_embeddings=args.freeze_answer_embeddings,
                          fusion=args.fusion, ot_config=ot_config,
                          ot_san_config=ot_san_config,
-                         fusion_config=_fusion_config_from_args(args)).to(device)
-    if args.feature_cache and model.fusion_type == "san":
-        raise ValueError("Feature caches contain token features and require token-level fusion")
+                         fusion_config=_fusion_config_from_args(args),
+                         skip_encoders=bool(args.feature_cache),
+                         embeddings_path=embeddings_file).to(device)
+    if args.feature_cache:
+        print("[Model] Feature cache active: ViT and BERT backbones skipped (0 ViT / 0 BERT weights loaded).")
 
     train_loader = _make_loader(args, "train", True, text_model, image_model)
     dev_loader = _make_loader(args, "dev", False, text_model, image_model)

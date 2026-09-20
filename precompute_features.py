@@ -11,7 +11,7 @@ from model.features_extraction import ImageEmbedding, QuestionEmbedding
 from utils.data_processing import load_dataframe
 from utils.device import resolve_device
 from utils.feature_cache import file_fingerprint, write_feature_cache
-from utils.vqa_dataset import VQADataset
+from utils.vqa_dataset import VQADataset, resolve_image_root
 
 
 def _json_value(value):
@@ -42,7 +42,8 @@ def main():
     device = resolve_device(args.device)
     print(f"Precomputing on device: {device}")
     frame = load_dataframe(args.csv)
-    dataset = VQADataset(frame, Config.transforms, args.img_path)
+    image_path = resolve_image_root(frame, args.img_path, "train")
+    dataset = VQADataset(frame, Config.transforms, image_path)
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False)
     image_encoder = ImageEmbedding(args.image_model).to(device).eval()
     question_encoder = QuestionEmbedding(model_name=args.text_model).to(device).eval()
@@ -92,7 +93,12 @@ def main():
         "annotation_ids": [str(sample["anno_id"]) for sample in samples],
     }
     write_feature_cache(args.output, samples, manifest)
-    print(f"Cached {len(samples)} samples in {args.output}")
+    output_dir = Path(args.output)
+    embeddings_file = output_dir / "embeddings.pt"
+    torch.save(question_encoder.text_encoder.embeddings.state_dict(), embeddings_file)
+    if output_dir.parent.is_dir() and not (output_dir.parent / "embeddings.pt").is_file():
+        torch.save(question_encoder.text_encoder.embeddings.state_dict(), output_dir.parent / "embeddings.pt")
+    print(f"Cached {len(samples)} samples and embeddings in {args.output}")
 
 
 if __name__ == "__main__":

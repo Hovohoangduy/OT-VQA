@@ -52,8 +52,20 @@ def checkpoint_payload(
         "text_model": text_model,
         "image_model": image_model,
         "encoder_revisions": {
-            "text": getattr(model.question_encoder.text_encoder.config, "_commit_hash", None),
-            "image": getattr(model.image_model.model.config, "_commit_hash", None),
+            "text": (
+                getattr(model.question_encoder.text_encoder.config, "_commit_hash", None)
+                if getattr(model, "question_encoder", None) is not None
+                and getattr(model.question_encoder, "text_encoder", None) is not None
+                and hasattr(model.question_encoder.text_encoder, "config")
+                else None
+            ),
+            "image": (
+                getattr(model.image_model.model.config, "_commit_hash", None)
+                if getattr(model, "image_model", None) is not None
+                and getattr(model.image_model, "model", None) is not None
+                and hasattr(model.image_model.model, "config")
+                else None
+            ),
         },
         "preprocessing": {
             "max_question_length": Config.MAX_LEN_QUES,

@@ -117,7 +117,7 @@ class FusionInput:
     transport: Optional[TransportOutput]    # present only for OT variants
 ```
 
-The encoder must remove ViT/DeiT prefix tokens before constructing `FusionInput`. Question
+The encoder must remove the ViT CLS prefix token before constructing `FusionInput`. Question
 boundary/padding policy must match the existing OT path.
 
 ### 4.3 Fusion output
@@ -517,6 +517,13 @@ To run only one or more selected pairs:
 ```bash
 METHODS="san ban" SEEDS="1105" scripts/run_fusion_benchmark.sh
 ```
+
+### Single BERT Loading Architecture
+In the automated benchmark (`scripts/run_fusion_benchmark.sh` and `scripts/run_fusion_benchmark.py`), BERT and ViT backbones are loaded **only once**:
+1. At the start of the benchmark, `ensure_feature_cache` extracts and serializes question/image features for `train` and `dev` splits into `FEATURE_CACHE` (default: `data/gqa_cache`).
+2. The BERT token embeddings state dict is saved to `embeddings.pt`.
+3. Heavy transformer backbones are freed from CPU/GPU/MPS memory.
+4. Each benchmark mode/seed loop runs `train.py` with `--feature_cache` and `skip_encoders=True`. Models initialize lightweight `BertEmbeddings` directly from `embeddings.pt` without reloading Hugging Face `AutoModel` backbones, eliminating repeated 440MB model instantiations across modes.
 
 ## 12. Statistical comparison
 

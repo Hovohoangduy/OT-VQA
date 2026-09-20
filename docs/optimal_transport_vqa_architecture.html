@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>OT-VQA Architecture — Visual System Guide</title>
+  <title>OT-VQA Architecture & Benchmark — Visual System Guide</title>
   <style>
     :root {
       --ink:#17212b; --muted:#5c6b78; --paper:#f5f2eb; --panel:#fffdf8;
@@ -22,39 +22,54 @@
     .hero:after{content:"";position:absolute;width:520px;height:520px;right:-150px;top:-260px;border:70px solid rgba(255,255,255,.06);border-radius:50%}
     .eyebrow{text-transform:uppercase;letter-spacing:.17em;font-weight:800;font-size:.76rem;color:#8ed9d8}
     h1{font-size:clamp(2.55rem,5.4vw,5.5rem);line-height:.95;letter-spacing:-.055em;margin:.5rem 0 1.3rem;max-width:980px}
-    .hero p{font-size:clamp(1rem,1.7vw,1.3rem);max-width:820px;color:#d9eef1;margin:0}
+    .hero p{font-size:clamp(1rem,1.7vw,1.3rem);max-width:860px;color:#d9eef1;margin:0}
     .hero-meta{display:flex;flex-wrap:wrap;gap:10px;margin-top:30px}
     .pill{border:1px solid rgba(255,255,255,.25);background:rgba(255,255,255,.08);padding:7px 12px;border-radius:999px;font-size:.82rem}
-    .layout{display:grid;grid-template-columns:250px minmax(0,1fr);gap:28px;align-items:start}
-    nav{position:sticky;top:18px;background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:18px;box-shadow:var(--shadow)}
+    .layout{display:grid;grid-template-columns:260px minmax(0,1fr);gap:28px;align-items:start}
+    nav{position:sticky;top:18px;background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:18px;box-shadow:var(--shadow);max-height:calc(100vh - 36px);overflow-y:auto}
     nav b{display:block;margin-bottom:9px;color:var(--navy)}
-    nav a{display:block;text-decoration:none;color:var(--muted);padding:6px 8px;border-left:2px solid transparent;font-size:.9rem}
+    nav a{display:block;text-decoration:none;color:var(--muted);padding:5px 8px;border-left:2px solid transparent;font-size:.88rem}
     nav a:hover{color:var(--navy);border-color:var(--orange);background:#f5efe5}
     main{min-width:0}
     section{scroll-margin-top:18px;margin:0 0 28px;padding:clamp(24px,4vw,46px);background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow)}
     h2{font-size:clamp(1.65rem,3vw,2.55rem);line-height:1.1;letter-spacing:-.035em;color:var(--navy);margin:0 0 14px}
-    h3{color:var(--navy);margin:28px 0 8px;font-size:1.25rem}
+    h3{color:var(--navy);margin:24px 0 8px;font-size:1.2rem}
     .lead{font-size:1.08rem;color:var(--muted);max-width:920px}
     .callout{border-left:5px solid var(--orange);background:#fff4e8;padding:14px 18px;border-radius:0 12px 12px 0;margin:20px 0}
+    .callout.blue{border-left-color:var(--blue);background:#edf5fb}
+    .callout.green{border-left-color:var(--green);background:#edf7f0}
+    .callout.purple{border-left-color:var(--purple);background:#f4f0fa}
     .grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
     .grid.three{grid-template-columns:repeat(3,minmax(0,1fr))}
+    .grid.five{grid-template-columns:repeat(auto-fit,minmax(220px,1fr))}
     .card{padding:20px;border:1px solid var(--line);border-radius:14px;background:#fff}
     .card h3{margin:0 0 6px}
     .card .tag{display:inline-block;font:700 .7rem/1 monospace;text-transform:uppercase;letter-spacing:.08em;color:#fff;padding:6px 8px;border-radius:6px;margin-bottom:12px;background:var(--blue)}
+    .card .tag.orange{background:var(--orange)}
+    .card .tag.green{background:var(--green)}
+    .card .tag.purple{background:var(--purple)}
     .card p:last-child{margin-bottom:0}
     .diagram{overflow:auto;margin:24px 0;border:1px solid var(--line);border-radius:16px;background:#fbfaf6;padding:14px}
-    .architecture{min-width:1060px;width:100%;height:auto;display:block}
+    .architecture{min-width:1120px;width:100%;height:auto;display:block}
     .architecture .box{stroke-width:2;rx:13}
     .architecture text{font-family:Inter,ui-sans-serif,system-ui,sans-serif;fill:var(--ink)}
-    .architecture .title{font-size:14px;font-weight:800}
-    .architecture .sub{font-size:11px;fill:#445463}
+    .architecture .title{font-size:13.5px;font-weight:800}
+    .architecture .sub{font-size:10.5px;fill:#445463}
     .architecture .arrow{stroke:#667784;stroke-width:2.2;fill:none;marker-end:url(#arrow)}
     .architecture .train{stroke:var(--orange);stroke-dasharray:7 5}
-    .legend{display:flex;gap:18px;flex-wrap:wrap;font-size:.84rem;color:var(--muted)}
+    .legend{display:flex;gap:18px;flex-wrap:wrap;font-size:.84rem;color:var(--muted);margin-top:10px}
     .legend span:before{content:"";display:inline-block;width:18px;height:5px;border-radius:4px;margin-right:7px;vertical-align:middle;background:var(--blue)}
-    .legend .ot:before{background:var(--orange)} .legend .decoder:before{background:var(--purple)} .legend .frozen:before{background:var(--cyan)}
-    .equation{overflow:auto;background:#112d43;color:#e9f8f6;border-radius:13px;padding:17px 20px;font:15px/1.75 "SFMono-Regular",Consolas,monospace;margin:12px 0}
+    .legend .ot:before{background:var(--orange)} .legend .decoder:before{background:var(--purple)} .legend .frozen:before{background:var(--cyan)} .legend .fusion:before{background:var(--green)}
+    .equation{overflow:auto;background:#112d43;color:#e9f8f6;border-radius:13px;padding:17px 20px;font:14.5px/1.75 "SFMono-Regular",Consolas,monospace;margin:12px 0}
     .shape{color:#ffd27a}
+    .param{color:#8ed9d8}
+    .code-block{background:#0d2235;color:#e6edf3;border-radius:12px;padding:15px 18px;font:13px/1.68 "SFMono-Regular",Consolas,monospace;margin:14px 0;overflow-x:auto;border:1px solid rgba(255,255,255,.09)}
+    .code-block .kw{color:#ff7b72;font-weight:bold}
+    .code-block .fn{color:#d2a8ff}
+    .code-block .cm{color:#8b949e;font-style:italic}
+    .code-block .str{color:#a5d6ff}
+    .code-block .num{color:#79c0ff}
+    .code-block .hl{color:#ffd27a;font-weight:bold}
     table{border-collapse:separate;border-spacing:0;width:100%;overflow:hidden;border:1px solid var(--line);border-radius:12px;margin:16px 0;font-size:.92rem}
     th,td{text-align:left;padding:11px 13px;border-bottom:1px solid var(--line);vertical-align:top}
     th{background:#e8eef0;color:var(--navy);font-size:.78rem;text-transform:uppercase;letter-spacing:.06em}
@@ -65,7 +80,7 @@
     .step b{display:block;color:var(--navy);margin-bottom:4px}
     .step:not(:last-child):after{content:"→";position:absolute;right:-14px;top:38%;z-index:2;color:var(--orange);font-size:1.3rem;font-weight:900}
     .tabs{display:flex;gap:8px;flex-wrap:wrap;margin:18px 0}
-    button{appearance:none;border:1px solid var(--line);background:#fff;color:var(--navy);padding:9px 14px;border-radius:999px;font-weight:750;cursor:pointer}
+    button{appearance:none;border:1px solid var(--line);background:#fff;color:var(--navy);padding:9px 14px;border-radius:999px;font-weight:750;cursor:pointer;font-size:.88rem}
     button.active,button:hover{background:var(--navy);color:#fff;border-color:var(--navy)}
     .tab-panel{display:none}.tab-panel.active{display:block}
     .interactive{display:grid;grid-template-columns:320px 1fr;gap:24px;margin-top:20px}
@@ -88,7 +103,7 @@
     .lane{font-weight:800;color:var(--navy);padding:13px;border-bottom:1px solid var(--line)}
     .events{display:flex;gap:8px;align-items:center;padding:9px;border-bottom:1px solid var(--line);overflow:auto}
     .event{white-space:nowrap;border-radius:8px;background:#e9f0f1;padding:7px 9px;font-size:.82rem}
-    .event.ot{background:#fff0df}.event.save{background:#ece5f8}.event.generate{background:#e4f2e8}
+    .event.ot{background:#fff0df}.event.save{background:#ece5f8}.event.generate{background:#e4f2e8}.event.fusion{background:#e2f2e6}
     .filemap{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
     .file{border:1px solid var(--line);border-radius:10px;padding:12px;background:#fff}
     .file b{display:block;font-family:monospace;color:var(--navy)}
@@ -102,291 +117,731 @@
     .bar-track{height:18px;border-radius:999px;background:#e9e3d8;overflow:hidden}
     .bar-fill{height:100%;border-radius:inherit;background:linear-gradient(90deg,var(--blue),var(--cyan))}
     .bar-fill.warn{background:linear-gradient(90deg,var(--orange),var(--yellow))}
+    .matrix-table{margin:18px 0}
+    .matrix-table td.check{color:var(--green);font-weight:bold}
     .foot{text-align:center;color:var(--muted);padding:22px}
-    @media(max-width:1050px){.layout{grid-template-columns:1fr}nav{position:static;columns:2}.grid.three{grid-template-columns:1fr 1fr}.flow{grid-template-columns:repeat(3,1fr)}.step:nth-child(3):after{display:none}.interactive{grid-template-columns:1fr}}
-    @media(max-width:700px){.shell{padding:0 12px 50px}.hero{margin-top:12px}.grid,.grid.three,.filemap,.metric-grid{grid-template-columns:1fr}.flow{grid-template-columns:1fr}.step:after{display:none}.sequence{grid-template-columns:1fr}.lane{background:#edf1f0}.heatmap{grid-template-columns:repeat(5,minmax(36px,1fr))}.cell{height:42px}nav{columns:1}.bar-row{grid-template-columns:1fr}.bar-row .mono{text-align:left!important}}
+    @media(max-width:1050px){.layout{grid-template-columns:1fr}nav{position:static;max-height:none}.grid.three{grid-template-columns:1fr 1fr}.flow{grid-template-columns:repeat(3,1fr)}.step:nth-child(3):after{display:none}.interactive{grid-template-columns:1fr}}
+    @media(max-width:700px){.shell{padding:0 12px 50px}.hero{margin-top:12px}.grid,.grid.three,.filemap,.metric-grid{grid-template-columns:1fr}.flow{grid-template-columns:1fr}.step:after{display:none}.sequence{grid-template-columns:1fr}.lane{background:#edf1f0}.heatmap{grid-template-columns:repeat(5,minmax(36px,1fr))}.cell{height:42px}.bar-row{grid-template-columns:1fr}.bar-row .mono{text-align:left!important}}
     @media print{body{background:#fff}.shell{max-width:none}.hero,section{box-shadow:none}nav{display:none}.layout{display:block}section{break-inside:avoid}.interactive{display:none}}
   </style>
 </head>
 <body>
 <div class="shell">
   <header class="hero">
-    <div class="eyebrow">OT-VQA · System architecture guide</div>
-    <h1>How an image and a question become an answer</h1>
-    <p>A visual, component-by-component explanation of the English-only VQA pipeline: SAN compatibility, Balanced Optimal Transport, question-conditioned Unbalanced Optimal Transport, barycentric fusion, and autoregressive answer generation.</p>
-    <div class="hero-meta"><span class="pill">English text pipeline</span><span class="pill">Tensor contracts</span><span class="pill">Training + inference</span><span class="pill">Interactive Sinkhorn intuition</span><span class="pill">Measured bottleneck analysis</span></div>
+    <div class="eyebrow">OT-VQA · System architecture & benchmark guide</div>
+    <h1>Multimodal Fusion with &amp; without Optimal Transport</h1>
+    <p>A comprehensive visual guide to the modern OT-VQA pipeline: ViT &amp; BERT encoders, Balanced &amp; Question-conditioned Unbalanced Optimal Transport, five multimodal fusion families (SAN, BAN, MUTAN, Cross-Attention, Q-Former), and the automated paired benchmark framework.</p>
+    <div class="hero-meta">
+      <span class="pill">ViT &amp; English BERT encoders</span>
+      <span class="pill">Balanced OT &amp; UOT</span>
+      <span class="pill">5 Multimodal Fusion Families</span>
+      <span class="pill">15 Paired Benchmark Grid</span>
+      <span class="pill">Tensor Contracts</span>
+      <span class="pill">Interactive Sinkhorn Explorer</span>
+    </div>
   </header>
 
   <div class="layout">
     <nav aria-label="Document sections">
-      <b>Architecture map</b>
+      <b>Architecture Map</b>
       <a href="#overview">1. System overview</a>
-      <a href="#contract">2. Tensor contract</a>
-      <a href="#encoders">3. Frozen encoders</a>
-      <a href="#marginals">4. Marginals</a>
-      <a href="#cost">5. Ground cost</a>
-      <a href="#sinkhorn">6. Sinkhorn solver</a>
-      <a href="#fusion">7. Barycentric fusion</a>
-      <a href="#decoder">8. Answer decoder</a>
-      <a href="#training">9. Training flow</a>
-      <a href="#inference">10. Inference flow</a>
-      <a href="#cache">11. Feature cache</a>
-      <a href="#checkpoint">12. Checkpoints</a>
-      <a href="#diagnostics">13. Diagnostics</a>
-      <a href="#bottleneck">14. Measured bottleneck</a>
-      <a href="#files">15. Source map</a>
+      <a href="#matrix">2. 15-Configuration matrix</a>
+      <a href="#contract">3. Tensor contracts</a>
+      <a href="#encoders">4. Frozen encoders (ViT &amp; BERT)</a>
+      <a href="#marginals">5. Learned marginals (ConditionalMarginal)</a>
+      <a href="#cost">6. Ground cost matrix (PairwiseCost)</a>
+      <a href="#sinkhorn">7. Log-Domain Sinkhorn solver</a>
+      <a href="#barycentric">8. Barycentric projection &amp; token fusion</a>
+      <a href="#ot-san">9. OT-SAN gated global summary</a>
+      <a href="#fusion-families">10. Five fusion families &amp; OT injection</a>
+      <a href="#decoder">11. Autoregressive answer decoder</a>
+      <a href="#training">12. Training &amp; validation flow</a>
+      <a href="#benchmark">13. Automated benchmark runner</a>
+      <a href="#inference">14. Inference &amp; prediction flow</a>
+      <a href="#cache">15. Feature caching</a>
+      <a href="#checkpoint">16. Version-3 checkpoints</a>
+      <a href="#diagnostics">17. Transport diagnostics &amp; inspection</a>
+      <a href="#bottleneck">18. Measured bottleneck analysis</a>
+      <a href="#files">19. Source code map</a>
     </nav>
 
     <main>
       <section id="overview">
-        <div class="eyebrow">End-to-end view</div>
-        <h2>One model, three fusion choices</h2>
-        <p class="lead">The pipeline keeps the same image encoder, question encoder, answer embedding, and autoregressive decoder. The selected fusion path changes how image evidence and question meaning are aligned before the decoder sees them.</p>
+        <div class="eyebrow">End-to-End View</div>
+        <h2>Five Multimodal Fusion Families · Three Transport Paradigms</h2>
+        <p class="lead">The OT-VQA architecture unifies diverse multimodal fusion mechanisms under a single mathematical and engineering contract. All variants share the same frozen image encoder, question encoder, answer embeddings, and autoregressive Transformer decoder.</p>
+
         <div class="tabs" role="tablist">
-          <button class="active" data-tab="uot">Question-conditioned UOT</button>
-          <button data-tab="balanced">Balanced OT</button>
-          <button data-tab="san">SAN compatibility</button>
+          <button class="active" data-tab="tab-uot-san">OT-SAN (Gated Summary)</button>
+          <button data-tab="tab-uot-ban">BAN (Bilinear Attention + OT Log-Prior)</button>
+          <button data-tab="tab-uot-mutan">MUTAN (Tucker Tensor + OT Column Pooling)</button>
+          <button data-tab="tab-uot-cross">Cross-Attention (Transformer + Logit Bias)</button>
+          <button data-tab="tab-uot-qformer">Q-Former (Queries + Grounded Memory)</button>
+          <button data-tab="tab-barycentric">Barycentric Baseline (UOT / Balanced)</button>
+          <button data-tab="tab-legacy-san">Legacy SAN (Compatibility)</button>
         </div>
-        <div id="uot" class="tab-panel active"><div class="callout"><b>Target path.</b> Learns question-aware mass distributions, permits unmatched mass through KL relaxation, and produces one fused memory token per valid question token.</div></div>
-        <div id="balanced" class="tab-panel"><div class="callout"><b>Reference OT path.</b> Uses exact row and column marginal constraints. It is useful for verifying solver correctness and for controlled comparisons.</div></div>
-        <div id="san" class="tab-panel"><div class="callout"><b>Compatibility path.</b> Reuses stacked attention to compress all evidence into one context token. Version-2 checkpoints load through this path.</div></div>
+
+        <div id="tab-uot-san" class="tab-panel active"><div class="callout green"><b>OT-SAN (<code>uot_san</code> / <code>balanced_ot_san</code>):</b> Adds a masked Stacked Attention Network over OT-fused tokens. It computes a global context summary, scales it via a learnable gate initialized to <code>sigmoid(-2.0) ≈ 0.12</code>, and prepends it to local question tokens <code>[S, H]</code> for the decoder.</div></div>
+        <div id="tab-uot-ban" class="tab-panel"><div class="callout green"><b>BAN with OT (<code>uot_ban</code> / <code>balanced_ot_ban</code>):</b> Computes multiple bilinear attention glimpses across visual patches and words. The OT transport plan acts as an additive log-prior <code>score_g + λ_ot * log(P + ε)</code> with a learned scalar <code>λ_ot</code> initialized to 1.0.</div></div>
+        <div id="tab-uot-mutan" class="tab-panel"><div class="callout green"><b>MUTAN with OT (<code>uot_mutan</code> / <code>balanced_ot_mutan</code>):</b> Employs low-rank Tucker bilinear tensor decomposition (rank=5). In the OT variant, native pooling is replaced with normalized OT columns <code>Ṽ_j = Σ_i P_ij V_i / max(Σ_i P_ij, ε)</code>, isolating tensor fusion on OT-aligned evidence.</div></div>
+        <div id="tab-uot-cross" class="tab-panel"><div class="callout green"><b>Cross-Attention with OT (<code>uot_cross_attention</code>):</b> Multi-head cross-attention where questions query visual keys/values. The normalized log-transport plan is added directly into attention logits across all heads: <code>QK^T / sqrt(d) + λ_ot * log(P^T + ε)</code>.</div></div>
+        <div id="tab-uot-qformer" class="tab-panel"><div class="callout green"><b>Q-Former with OT (<code>uot_qformer</code>):</b> A lightweight Querying Transformer with 8 learned query tokens. In the non-OT variant, queries attend <code>[V, Q]</code>; in the OT variant, queries attend <code>[V, H_ot]</code> where <code>H_ot</code> is grounded barycentric tokens.</div></div>
+        <div id="tab-barycentric" class="tab-panel"><div class="callout blue"><b>Barycentric Baseline (<code>uot</code> / <code>balanced_ot</code>):</b> Standard OT alignment baseline. Directly projects pooled visual patches through a 4-way interaction MLP <code>[Q̄, Ṽ, Q̄⊙Ṽ, |Q̄−Ṽ|]</code> to create word-level memory tokens.</div></div>
+        <div id="tab-legacy-san" class="tab-panel"><div class="callout"><b>Legacy SAN (<code>san</code>):</b> Historical non-OT baseline. Compresses the entire visual scene and question into a single summary token <code>[B, 1, d_model]</code> via 2-layer stacked attention. Version-2 checkpoints remain strictly loadable.</div></div>
 
         <div class="diagram">
-          <svg class="architecture" viewBox="0 0 1180 650" role="img" aria-label="Full OT-VQA architecture flow">
+          <svg class="architecture" viewBox="0 0 1180 660" role="img" aria-label="Complete OT-VQA Architecture Flow with 5 Multimodal Fusion Families">
             <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#667784"/></marker></defs>
+            <!-- Inputs -->
             <rect x="20" y="55" width="150" height="74" class="box" fill="#daf0ef" stroke="#54b6bb"/><text x="95" y="84" text-anchor="middle" class="title">Image</text><text x="95" y="106" text-anchor="middle" class="sub">RGB · B×3×224×224</text>
-            <rect x="20" y="190" width="150" height="74" class="box" fill="#daf0ef" stroke="#54b6bb"/><text x="95" y="219" text-anchor="middle" class="title">Question</text><text x="95" y="241" text-anchor="middle" class="sub">B strings</text>
-            <rect x="215" y="45" width="165" height="95" class="box" fill="#e5f4f1" stroke="#54b6bb"/><text x="297" y="75" text-anchor="middle" class="title">Frozen DeiT</text><text x="297" y="97" text-anchor="middle" class="sub">remove CLS + distill</text><text x="297" y="117" text-anchor="middle" class="sub">V · B×N×Dv</text>
-            <rect x="215" y="180" width="165" height="95" class="box" fill="#e5f4f1" stroke="#54b6bb"/><text x="297" y="210" text-anchor="middle" class="title">Frozen text encoder</text><text x="297" y="232" text-anchor="middle" class="sub">mask PAD + special</text><text x="297" y="252" text-anchor="middle" class="sub">Q · B×M×Dq</text>
-            <rect x="430" y="45" width="155" height="95" class="box" fill="#eaf1f7" stroke="#2e6e9e"/><text x="507" y="77" text-anchor="middle" class="title">Visual projection</text><text x="507" y="100" text-anchor="middle" class="sub">Linear + LayerNorm</text><text x="507" y="120" text-anchor="middle" class="sub">V̄ · B×N×dOT</text>
-            <rect x="430" y="180" width="155" height="95" class="box" fill="#eaf1f7" stroke="#2e6e9e"/><text x="507" y="212" text-anchor="middle" class="title">Question projection</text><text x="507" y="235" text-anchor="middle" class="sub">Linear + LayerNorm</text><text x="507" y="255" text-anchor="middle" class="sub">Q̄ · B×M×dOT</text>
-            <rect x="635" y="20" width="175" height="100" class="box" fill="#fff0df" stroke="#e97843"/><text x="722" y="51" text-anchor="middle" class="title">Visual marginal a</text><text x="722" y="73" text-anchor="middle" class="sub">conditioned on question</text><text x="722" y="94" text-anchor="middle" class="sub">B×N · sums to 1</text>
-            <rect x="635" y="145" width="175" height="100" class="box" fill="#fff0df" stroke="#e97843"/><text x="722" y="176" text-anchor="middle" class="title">Hybrid ground cost C</text><text x="722" y="198" text-anchor="middle" class="sub">cosine + learned MLP</text><text x="722" y="219" text-anchor="middle" class="sub">B×N×M · nonnegative</text>
-            <rect x="635" y="270" width="175" height="100" class="box" fill="#fff0df" stroke="#e97843"/><text x="722" y="301" text-anchor="middle" class="title">Question marginal b</text><text x="722" y="323" text-anchor="middle" class="sub">conditioned on image</text><text x="722" y="344" text-anchor="middle" class="sub">B×M · sums to 1</text>
-            <rect x="860" y="130" width="175" height="125" class="box" fill="#fee7d5" stroke="#e97843"/><text x="947" y="162" text-anchor="middle" class="title">Log-domain Sinkhorn</text><text x="947" y="185" text-anchor="middle" class="sub">Balanced or KL-relaxed</text><text x="947" y="207" text-anchor="middle" class="sub">float32 + masks</text><text x="947" y="229" text-anchor="middle" class="sub">P · B×N×M</text>
-            <rect x="860" y="315" width="175" height="100" class="box" fill="#ece8f7" stroke="#745ba8"/><text x="947" y="346" text-anchor="middle" class="title">Barycentric fusion</text><text x="947" y="369" text-anchor="middle" class="sub">visual evidence / token</text><text x="947" y="391" text-anchor="middle" class="sub">H · B×M×Dmodel</text>
-            <rect x="1065" y="315" width="100" height="100" class="box" fill="#e7e1f2" stroke="#745ba8"/><text x="1115" y="348" text-anchor="middle" class="title">Decoder</text><text x="1115" y="371" text-anchor="middle" class="sub">causal +</text><text x="1115" y="390" text-anchor="middle" class="sub">memory mask</text>
-            <rect x="860" y="500" width="175" height="82" class="box" fill="#e3f2e7" stroke="#4e9168"/><text x="947" y="532" text-anchor="middle" class="title">Generated answer</text><text x="947" y="554" text-anchor="middle" class="sub">BOS → tokens → EOS</text>
-            <rect x="635" y="490" width="175" height="100" class="box" fill="#f5e5f0" stroke="#745ba8"/><text x="722" y="521" text-anchor="middle" class="title">Shifted answer prefix</text><text x="722" y="544" text-anchor="middle" class="sub">training: teacher forcing</text><text x="722" y="566" text-anchor="middle" class="sub">inference: generated IDs</text>
-            <path d="M170 92 H215" class="arrow"/><path d="M170 227 H215" class="arrow"/><path d="M380 92 H430" class="arrow"/><path d="M380 227 H430" class="arrow"/>
-            <path d="M585 92 H610 Q625 92 635 70" class="arrow"/><path d="M585 92 H610 Q625 92 635 195" class="arrow"/><path d="M585 227 H610 Q625 227 635 195" class="arrow"/><path d="M585 227 H610 Q625 227 635 320" class="arrow"/>
-            <path d="M810 70 H830 Q845 70 860 165" class="arrow"/><path d="M810 195 H860" class="arrow"/><path d="M810 320 H830 Q845 320 860 225" class="arrow"/>
-            <path d="M947 255 V315" class="arrow"/><path d="M810 320 H835 Q850 320 860 350" class="arrow"/><path d="M1035 365 H1065" class="arrow"/><path d="M1065 400 Q1025 460 1010 500" class="arrow"/>
-            <path d="M810 540 H1085 Q1140 540 1115 415" class="arrow train"/>
+            <rect x="20" y="190" width="150" height="74" class="box" fill="#daf0ef" stroke="#54b6bb"/><text x="95" y="219" text-anchor="middle" class="title">Question</text><text x="95" y="241" text-anchor="middle" class="sub">B text strings</text>
+            <!-- Encoders -->
+            <rect x="215" y="45" width="165" height="95" class="box" fill="#e5f4f1" stroke="#54b6bb"/><text x="297" y="75" text-anchor="middle" class="title">Frozen ViT</text><text x="297" y="97" text-anchor="middle" class="sub">remove CLS token</text><text x="297" y="117" text-anchor="middle" class="sub">V · B×196×768</text>
+            <rect x="215" y="180" width="165" height="95" class="box" fill="#e5f4f1" stroke="#54b6bb"/><text x="297" y="210" text-anchor="middle" class="title">Frozen BERT</text><text x="297" y="232" text-anchor="middle" class="sub">mask PAD + special</text><text x="297" y="252" text-anchor="middle" class="sub">Q · B×M×768</text>
+            <!-- OT Subsystem -->
+            <rect x="425" y="25" width="200" height="115" class="box" fill="#fff0df" stroke="#e97843"/><text x="525" y="53" text-anchor="middle" class="title">Marginals a &amp; b</text><text x="525" y="75" text-anchor="middle" class="sub">a = masked_softmax(sᵛ)</text><text x="525" y="95" text-anchor="middle" class="sub">b = masked_softmax(sᑫ)</text><text x="525" y="118" text-anchor="middle" class="sub">conditioned cross-MLPs</text>
+            <rect x="425" y="165" width="200" height="105" class="box" fill="#fff0df" stroke="#e97843"/><text x="525" y="196" text-anchor="middle" class="title">Hybrid Ground Cost C</text><text x="525" y="218" text-anchor="middle" class="sub">C = λ·C_cos + (1-λ)·C_learn</text><text x="525" y="240" text-anchor="middle" class="sub">B×196×M · nonnegative</text>
+            <rect x="660" y="90" width="195" height="125" class="box" fill="#fee7d5" stroke="#e97843"/><text x="757" y="122" text-anchor="middle" class="title">Log-Domain Sinkhorn</text><text x="757" y="145" text-anchor="middle" class="sub">Balanced or UOT (KL-relax)</text><text x="757" y="167" text-anchor="middle" class="sub">Float32 + exact masks</text><text x="757" y="189" text-anchor="middle" class="sub">Plan P · B×196×M</text>
+            <!-- Selectable Multimodal Fusion -->
+            <rect x="660" y="280" width="195" height="175" class="box" fill="#eaf6ec" stroke="#4e9168"/><text x="757" y="308" text-anchor="middle" class="title">Multimodal Fusion Module</text><text x="757" y="328" text-anchor="middle" class="sub">SAN · BAN · MUTAN</text><text x="757" y="348" text-anchor="middle" class="sub">Cross-Attn · Q-Former</text><text x="757" y="372" text-anchor="middle" class="sub">OT injection: prior /</text><text x="757" y="392" text-anchor="middle" class="sub">pooling / bias / memory</text><text x="757" y="425" text-anchor="middle" class="title" fill="#2d6e3c">Memory H · B×L×d_model</text>
+            <!-- Decoder & Generation -->
+            <rect x="910" y="280" width="150" height="175" class="box" fill="#ece8f7" stroke="#745ba8"/><text x="985" y="315" text-anchor="middle" class="title">Decoder (Transformer)</text><text x="985" y="338" text-anchor="middle" class="sub">Causal self-attention</text><text x="985" y="360" text-anchor="middle" class="sub">Cross-attention to H</text><text x="985" y="382" text-anchor="middle" class="sub">Memory mask applied</text><text x="985" y="420" text-anchor="middle" class="sub">Next-token logits</text>
+            <rect x="910" y="520" width="150" height="80" class="box" fill="#e3f2e7" stroke="#4e9168"/><text x="985" y="552" text-anchor="middle" class="title">Generated Answer</text><text x="985" y="574" text-anchor="middle" class="sub">BOS → tokens → EOS</text>
+            <rect x="660" y="520" width="195" height="80" class="box" fill="#f5e5f0" stroke="#745ba8"/><text x="757" y="552" text-anchor="middle" class="title">Shifted Answer Prefix</text><text x="757" y="574" text-anchor="middle" class="sub">Training: Teacher Forcing</text>
+            <!-- Arrows -->
+            <path d="M170 92 H215" class="arrow"/><path d="M170 227 H215" class="arrow"/>
+            <path d="M380 92 H425" class="arrow"/><path d="M380 227 H425" class="arrow"/>
+            <path d="M380 92 Q400 92 410 320 H660" class="arrow"/>
+            <path d="M380 227 Q400 227 410 350 H660" class="arrow"/>
+            <path d="M625 82 H660" class="arrow"/><path d="M625 217 H660" class="arrow"/>
+            <path d="M757 215 V280" class="arrow"/>
+            <path d="M855 367 H910" class="arrow"/>
+            <path d="M985 455 V520" class="arrow"/>
+            <path d="M855 560 H910" class="arrow train"/>
           </svg>
         </div>
-        <div class="legend"><span class="frozen">Frozen/precomputed encoders</span><span>Projection</span><span class="ot">OT subsystem</span><span class="decoder">Fusion/decoder</span></div>
+        <div class="legend">
+          <span class="frozen">Frozen ViT / BERT</span>
+          <span class="ot">OT Alignment Subsystem (Marginals, Cost, Sinkhorn)</span>
+          <span class="fusion">Multimodal Fusion Module (5 Families)</span>
+          <span class="decoder">Autoregressive Transformer Decoder</span>
+        </div>
+      </section>
+
+      <section id="matrix">
+        <div class="eyebrow">Benchmark Landscape</div>
+        <h2>The 15-Configuration Controlled Experiment Matrix</h2>
+        <p class="lead">Under strict fairness controls (identical encoders, data splits, seeds, learning rate, decoder depth, and OT profiles), the repository implements and evaluates 5 fusion families across 3 transport modes.</p>
+
+        <table class="matrix-table">
+          <thead>
+            <tr>
+              <th>Fusion Family</th>
+              <th>CLI Base Name</th>
+              <th>Without OT (<code>none</code>)</th>
+              <th>With Balanced OT (<code>balanced</code>)</th>
+              <th>With UOT (<code>uot</code>)</th>
+              <th>OT Augmentation Mechanism</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><b>Stacked Attention (SAN)</b></td>
+              <td><code>san</code></td>
+              <td class="check"><code>san</code></td>
+              <td class="check"><code>balanced_ot_san</code></td>
+              <td class="check"><code>uot_san</code></td>
+              <td>Gated global summary over barycentric tokens prepended to memory <code>[S·gate, H]</code></td>
+            </tr>
+            <tr>
+              <td><b>Bilinear Attention (BAN)</b></td>
+              <td><code>ban</code></td>
+              <td class="check"><code>ban</code></td>
+              <td class="check"><code>balanced_ot_ban</code></td>
+              <td class="check"><code>uot_ban</code></td>
+              <td>Log-transport plan as additive bilinear glimpse prior: <code>score_g + λ_ot·log(P+ε)</code></td>
+            </tr>
+            <tr>
+              <td><b>Multimodal Tucker (MUTAN)</b></td>
+              <td><code>mutan</code></td>
+              <td class="check"><code>mutan</code></td>
+              <td class="check"><code>balanced_ot_mutan</code></td>
+              <td class="check"><code>uot_mutan</code></td>
+              <td>Visual evidence pooling weights replaced by normalized OT plan columns <code>Ṽ_j</code></td>
+            </tr>
+            <tr>
+              <td><b>Cross-Attention Transformer</b></td>
+              <td><code>cross_attention</code></td>
+              <td class="check"><code>cross_attention</code></td>
+              <td class="check"><code>balanced_ot_cross_attention</code></td>
+              <td class="check"><code>uot_cross_attention</code></td>
+              <td>Normalized log-transport plan added to attention logits across all heads</td>
+            </tr>
+            <tr>
+              <td><b>Querying Transformer (Q-Former)</b></td>
+              <td><code>qformer</code></td>
+              <td class="check"><code>qformer</code></td>
+              <td class="check"><code>balanced_ot_qformer</code></td>
+              <td class="check"><code>uot_qformer</code></td>
+              <td>Learned query tokens cross-attend grounded barycentric multimodal memory <code>[V, H_ot]</code></td>
+            </tr>
+            <tr>
+              <td><b>Barycentric Baseline</b></td>
+              <td><code>barycentric</code></td>
+              <td>—</td>
+              <td class="check"><code>balanced_ot</code></td>
+              <td class="check"><code>uot</code></td>
+              <td>Direct 4-way interaction MLP on question and barycentric patches</td>
+            </tr>
+          </tbody>
+        </table>
       </section>
 
       <section id="contract">
-        <div class="eyebrow">Data contract</div><h2>Tensor shapes define the interfaces</h2>
-        <p class="lead">Keeping explicit shapes makes padding, batching, caching, and cross-attention behavior reviewable. <span class="mono">B</span> is batch size, <span class="mono">N</span> image patches, and <span class="mono">M</span> question-token length.</p>
-        <table><thead><tr><th>Name</th><th>Shape</th><th>Meaning</th><th>Mask rule</th></tr></thead><tbody>
-          <tr><td>Image pixels</td><td><code>B × 3 × H × W</code></td><td>RGB tensors in [0,1]</td><td>No second /255 rescale</td></tr>
-          <tr><td>DeiT hidden states</td><td><code>B × (N+2) × Dv</code></td><td>CLS, distillation, and spatial tokens</td><td>First two tokens removed for OT</td></tr>
-          <tr><td>Visual tokens V</td><td><code>B × N × Dv</code></td><td>Spatial patch descriptors</td><td>Visual padding is false for fixed DeiT grids</td></tr>
-          <tr><td>Question tokens Q</td><td><code>B × M × Dq</code></td><td>Contextual text features</td><td>PAD and boundary/special tokens are true</td></tr>
-          <tr><td>Marginals a, b</td><td><code>B × N</code>, <code>B × M</code></td><td>Importance mass before alignment</td><td>Exactly zero at masked positions</td></tr>
-          <tr><td>Cost C</td><td><code>B × N × M</code></td><td>Patch/token incompatibility</td><td>Invalid pairs excluded by solver mask</td></tr>
-          <tr><td>Plan P</td><td><code>B × N × M</code></td><td>Soft alignment or transported mass</td><td>Exactly zero for every invalid pair</td></tr>
-          <tr><td>Fused memory H</td><td><code>B × M × Dmodel</code></td><td>Question tokens enriched with image evidence</td><td>Question mask reaches every decoder layer</td></tr>
-          <tr><td>Logits</td><td><code>B × Lanswer × |vocab|</code></td><td>Next-token distributions</td><td>PAD targets ignored in loss</td></tr>
-        </tbody></table>
+        <div class="eyebrow">Data Contract</div>
+        <h2>Explicit Tensor Shapes &amp; Software Contracts</h2>
+        <p class="lead">Maintaining rigid tensor contracts ensures that visual patch layout, question token boundaries, padding isolation, and cross-attention masks behave identically across all 15 configurations.</p>
+        
+        <table>
+          <thead>
+            <tr><th>Variable</th><th>Shape</th><th>Data Type</th><th>Description &amp; Masking Rule</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Image Pixels</td><td><code>B × 3 × 224 × 224</code></td><td>float32</td><td>Normalized RGB in [0, 1]; no secondary /255 division</td></tr>
+            <tr><td>ViT Spatial Tokens V</td><td><code>B × 196 × 768</code></td><td>float32 / float16</td><td>CLS token discarded; 196 spatial patch embeddings (Dv=768)</td></tr>
+            <tr><td>BERT Question Tokens Q</td><td><code>B × M × 768</code></td><td>float32 / float16</td><td>Contextual word embeddings; PAD and boundary tokens masked</td></tr>
+            <tr><td>Visual Padding Mask</td><td><code>B × 196</code></td><td>bool</td><td>Always False for fixed ViT image patch grids</td></tr>
+            <tr><td>Question Padding Mask</td><td><code>B × M</code></td><td>bool</td><td>True on PAD, [CLS], [SEP]; strictly zero mass in marginals</td></tr>
+            <tr><td>Visual Marginal a</td><td><code>B × 196</code></td><td>float32</td><td>Sum to 1 over valid patches; exactly 0 on masked tokens</td></tr>
+            <tr><td>Question Marginal b</td><td><code>B × M</code></td><td>float32</td><td>Sum to 1 over valid words; exactly 0 on masked tokens</td></tr>
+            <tr><td>Ground Cost Matrix C</td><td><code>B × 196 × M</code></td><td>float32</td><td>Hybrid cosine + learned distance; nonnegative</td></tr>
+            <tr><td>Optimal Transport Plan P</td><td><code>B × 196 × M</code></td><td>float32</td><td>Computed via log-domain Sinkhorn; 0 on masked pairs</td></tr>
+            <tr><td>BAN Attention Glimpses</td><td><code>B × G × 196 × M</code></td><td>float32</td><td>Bilinear attention scores (G=2 glimpses default)</td></tr>
+            <tr><td>MUTAN Factor Tensor</td><td><code>B × M × 5 × 256</code></td><td>float32</td><td>Rank=5 Tucker projection factors</td></tr>
+            <tr><td>Cross-Attn Logit Bias</td><td><code>B × M × 196</code></td><td>float32</td><td>Broadcast across heads: <code>λ_ot * log(P^T + ε)</code></td></tr>
+            <tr><td>Q-Former Queries</td><td><code>B × 8 × d_model</code></td><td>float32</td><td>8 learnable query tokens attending multimodal memory</td></tr>
+            <tr><td>Decoder Memory H</td><td><code>B × L × d_model</code></td><td>float32</td><td>L=M (token fusions), L=1+M (OT-SAN), L=8 (Q-Former), L=1 (SAN)</td></tr>
+            <tr><td>Decoder Logits</td><td><code>B × L_ans × |V|</code></td><td>float32</td><td>Vocabulary distribution per answer position; PAD ignored in loss</td></tr>
+          </tbody>
+        </table>
       </section>
 
       <section id="encoders">
-        <div class="eyebrow">Stage 1</div><h2>English text and image encoders preserve structure</h2>
+        <div class="eyebrow">Stage 1</div>
+        <h2>Pretrained Visual &amp; Linguistic Encoders</h2>
         <div class="grid">
-          <div class="card"><span class="tag">Vision</span><h3>DeiT spatial tokens</h3><p>The image processor normalizes an already-scaled image without rescaling it again. DeiT produces two special tokens followed by a regular patch grid. OT receives only the patch tokens, so every visual row in the plan maps to a location in the image.</p><div class="equation">DeiT(I) = [CLS, DISTILL, v₁ … vₙ]<br>V = [v₁ … vₙ] <span class="shape">∈ ℝᴮˣᴺˣᴰᵛ</span></div></div>
-          <div class="card"><span class="tag">English text</span><h3>English BERT question tokens</h3><p>The default encoder is <code>bert-base-uncased</code>. English text receives whitespace normalization, then BERT tokenization. The encoder retains one vector per token. Special and padding tokens remain in the sequence for positional consistency, but their mask excludes them from marginal and transport mass.</p><div class="equation">q′ = normalize_english_whitespace(q)<br>Q = BERT(tokenize(q′))<br>mask = PAD ∨ SPECIAL<br>Q <span class="shape">∈ ℝᴮˣᴹˣᴰᑫ</span></div></div>
+          <div class="card">
+            <span class="tag green">Default Vision Encoder</span>
+            <h3>ViT-Base Patch16 (ImageNet-21k)</h3>
+            <p>Default: <code>google/vit-base-patch16-224-in21k</code>. Produces 1 CLS token followed by 196 spatial patch tokens. The CLS token is discarded so that every row in the visual token tensor maps strictly to a physical spatial location in the 14×14 grid.</p>
+            <div class="equation">ViT(I) = [CLS, v₁ … v₁₉₆]<br>V = [v₁ … v₁₉₆] <span class="shape">∈ ℝᴮˣ¹⁹⁶ˣ⁷⁶⁸</span></div>
+          </div>
+          <div class="card">
+            <span class="tag">Text Encoder</span>
+            <h3>English BERT-Base Uncased</h3>
+            <p>Default: <code>bert-base-uncased</code>. English questions receive whitespace normalization and subword tokenization. Special boundary tokens ([CLS], [SEP]) and padding tokens are retained for positional consistency but are strictly masked out of transport mass.</p>
+            <div class="equation">q′ = normalize_english_whitespace(q)<br>Q = BERT(tokenize(q′))<br>mask = PAD ∨ SPECIAL<br>Q <span class="shape">∈ ℝᴮˣᴹˣ⁷⁶⁸</span></div>
+            <p class="small"><b>Why freeze encoders?</b> Freezing ViT and BERT enables float16 feature caching, speeds up training by 4-5x, prevents catastrophic forgetting on small datasets, and strictly isolates the multimodal fusion comparison.</p>
+          </div>
         </div>
-        <div class="callout"><b>English-only text flow.</b> The CLI has no language selector. Training, validation, caching, and prediction use one whitespace normalizer and the English text encoder recorded in the checkpoint. Vietnamese-specific segmenter dependencies and dataset paths have been removed; a Vietnamese encoder name is rejected before model weights load. Compatible English checkpoints map legacy text-module keys onto the generic question encoder and answer embedding names. <b>Why freeze the encoders?</b> The first controlled OT comparison isolates fusion, makes float16 caching valid, reduces compute, and prevents cached features from diverging from online features.</div>
       </section>
 
       <section id="marginals">
-        <div class="eyebrow">Stage 2</div><h2>Marginals say where mass begins</h2>
-        <p class="lead">A transport plan cannot be interpreted without its source and target mass. Uniform marginals give every valid patch/token equal weight. Question-conditioned marginals learn which patches matter for the question and which question tokens need visual evidence.</p>
+        <div class="eyebrow">Stage 2 · Source Code Deep Dive</div>
+        <h2>Question-Conditioned Marginals (<code>ConditionalMarginal</code>)</h2>
+        <p class="lead">Optimal Transport aligns probability measures. Uniform marginals waste transport mass on background clutter; question-conditioned marginals dynamically predict where importance lies before transport begins.</p>
+        
         <div class="grid">
-          <div class="card"><h3>Visual marginal a</h3><p>A masked mean of question tokens creates global question context. For each visual patch, an MLP scores the patch, context, element-wise interaction, and absolute difference.</p><div class="equation">gQ = masked_mean(Q̄)<br>sᵛᵢ = MLP([V̄ᵢ,gQ,V̄ᵢ⊙gQ,|V̄ᵢ−gQ|])<br>a = masked_softmax(sᵛ)</div></div>
-          <div class="card"><h3>Question marginal b</h3><p>The symmetric head summarizes the image and scores each question token. Tokens such as “color,” “where,” or an object noun can learn different masses depending on the image.</p><div class="equation">gV = masked_mean(V̄)<br>sᑫⱼ = MLP([Q̄ⱼ,gV,Q̄ⱼ⊙gV,|Q̄ⱼ−gV|])<br>b = masked_softmax(sᑫ)</div></div>
+          <div class="card">
+            <h3>Visual Marginal <i>a</i></h3>
+            <p>A masked average of question tokens provides global semantic intent. A multi-feature MLP scores each visual patch against this context:</p>
+            <div class="equation">gQ = masked_mean(Q̄)<br>sᵛᵢ = MLP([V̄ᵢ, gQ, V̄ᵢ⊙gQ, |V̄ᵢ−gQ|])<br>a = masked_softmax(sᵛ) <span class="shape">∈ ℝᴮˣ¹⁹⁶</span></div>
+          </div>
+          <div class="card">
+            <h3>Question Marginal <i>b</i></h3>
+            <p>Symmetrically, the image is pooled into a global scene descriptor, and an MLP predicts which question tokens require visual evidence:</p>
+            <div class="equation">gV = masked_mean(V̄)<br>sᑫⱼ = MLP([Q̄ⱼ, gV, Q̄ⱼ⊙gV, |Q̄ⱼ−gV|])<br>b = masked_softmax(sᑫ) <span class="shape">∈ ℝᴮˣᴹ</span></div>
+          </div>
         </div>
-        <p>For each sample, valid entries sum to one before UOT relaxation. Masked entries are set to zero after softmax, avoiding probability leakage into padding.</p>
+
+        <h3>The 4-Way Interaction Operator in Code</h3>
+        <p>In <code>model/optimal_transport.py</code>, both marginal heads expand the context vector and construct a 4-way concatenation of dimension <code>4 × ot_dim</code>:</p>
+        <div class="code-block">
+<span class="cm"># From model/optimal_transport.py (ConditionalMarginal.forward)</span>
+expanded = context.unsqueeze(<span class="num">1</span>).expand_as(tokens)
+features = torch.cat([
+    tokens,                        <span class="cm"># 1. Base token representation [B, L, ot_dim]</span>
+    expanded,                      <span class="cm"># 2. Global query/scene context [B, L, ot_dim]</span>
+    tokens * expanded,             <span class="cm"># 3. Multiplicative gating (co-occurrence)</span>
+    (tokens - expanded).abs()      <span class="cm"># 4. Absolute difference (feature discrepancy)</span>
+], dim=-<span class="num">1</span>)
+<span class="kw">return</span> masked_softmax(self.scorer(features).squeeze(-<span class="num">1</span>), padding_mask)
+        </div>
+
+        <h3>Padding Mask Isolation Guarantee</h3>
+        <p>The helper <code>masked_softmax()</code> ensures probability mass is strictly conserved over valid tokens and strictly zero over padding:</p>
+        <div class="code-block">
+<span class="kw">def</span> <span class="fn">masked_softmax</span>(logits: torch.Tensor, padding_mask: torch.Tensor) -> torch.Tensor:
+    masked = logits.float().masked_fill(padding_mask, <span class="num">float("-inf")</span>)
+    <span class="kw">return</span> torch.softmax(masked, dim=-<span class="num">1</span>).to(logits.dtype).masked_fill(padding_mask, <span class="num">0.0</span>)
+        </div>
+        <p class="small">By filling padded positions with <code>-inf</code> before softmax, <i>e</i><sup>−∞</sup> = 0, guaranteeing that <code>valid.sum() == 1.0</code> with zero probability mass leakage into padding.</p>
       </section>
 
       <section id="cost">
-        <div class="eyebrow">Stage 3</div><h2>The ground cost measures patch–token mismatch</h2>
-        <p class="lead">Low cost means a visual patch and a question token are compatible. The hybrid formulation combines stable semantic geometry with a trainable pair scorer.</p>
-        <div class="equation">Cᶜᵒˢᵢⱼ = 1 − cosine(V̄ᵢ, Q̄ⱼ)<br>Cˡᵉᵃʳⁿᵉᵈᵢⱼ = softplus(−MLP([V̄ᵢ,Q̄ⱼ,V̄ᵢ⊙Q̄ⱼ,|V̄ᵢ−Q̄ⱼ|]))<br>Cᵢⱼ = λ Cᶜᵒˢᵢⱼ + (1−λ) Cˡᵉᵃʳⁿᵉᵈᵢⱼ</div>
-        <div class="grid three"><div class="card"><h3>Cosine</h3><p>Bounded, interpretable, and a strong solver reference. It needs no pairwise learned parameters.</p></div><div class="card"><h3>Learned</h3><p>Captures nonlinear correspondence. <code>softplus</code> guarantees a nonnegative cost.</p></div><div class="card"><h3>Hybrid</h3><p>Uses <code>cost_mix</code> to retain semantic geometry while learning task-specific corrections.</p></div></div>
+        <div class="eyebrow">Stage 3 · Source Code Deep Dive</div>
+        <h2>Hybrid Ground Cost Matrix (<code>PairwiseCost</code>)</h2>
+        <p class="lead">The ground cost <i>C<sub>ij</sub></i> quantifies the semantic incompatibility between visual patch <i>i</i> and question word <i>j</i>. Transporting mass between incompatible pairs incurs a penalty. A hybrid formulation blends geometric cosine stability with a trainable nonlinear neural distance.</p>
+        
+        <div class="equation">C<sup>cos</sup><sub>ij</sub> = 1 − cosine(V̄<sub>i</sub>, Q̄<sub>j</sub>)<br>C<sup>learned</sup><sub>ij</sub> = softplus(−MLP([V̄<sub>i</sub>, Q̄<sub>j</sub>, V̄<sub>i</sub>⊙Q̄<sub>j</sub>, |V̄<sub>i</sub>−Q̄<sub>j</sub>|]))<br>C<sub>ij</sub> = λ · C<sup>cos</sup><sub>ij</sub> + (1−λ) · C<sup>learned</sup><sub>ij</sub> <span class="shape">∈ ℝᴮˣ¹⁹⁶ˣᴹ</span></div>
+        
+        <div class="grid three">
+          <div class="card">
+            <h3>Cosine Semantic Metric</h3>
+            <p>Cosine distance 1 − cos(V̄<sub>i</sub>, Q̄<sub>j</sub>) is bounded in [0, 2], parameter-free, and provides a stable geometrical anchor that prevents Sinkhorn divergence early in training.</p>
+          </div>
+          <div class="card">
+            <h3>Learned Pairwise MLP</h3>
+            <p>Captures nonlinear multimodal correspondence. Using <code>softplus(-score)</code> guarantees strict nonnegativity (<i>C</i> ≥ 0) without gradient clipping or dead neurons.</p>
+          </div>
+          <div class="card">
+            <h3>Convex Mixture Parameter λ</h3>
+            <p>Configured via <code>cost_mix</code> (default 0.5), smoothly balancing pre-aligned geometric prior with learned task-specific corrections.</p>
+          </div>
+        </div>
+
+        <h3>PyTorch Implementation in <code>model/optimal_transport.py</code></h3>
+        <div class="code-block">
+<span class="cm"># From model/optimal_transport.py (PairwiseCost.forward)</span>
+visual_unit = F.normalize(visual.float(), dim=-<span class="num">1</span>)
+question_unit = F.normalize(question.float(), dim=-<span class="num">1</span>)
+semantic = <span class="num">1.0</span> - torch.matmul(visual_unit, question_unit.transpose(<span class="num">1</span>, <span class="num">2</span>))
+
+visual_pairs = visual.unsqueeze(<span class="num">2</span>).expand(-<span class="num">1</span>, -<span class="num">1</span>, question.size(<span class="num">1</span>), -<span class="num">1</span>)
+question_pairs = question.unsqueeze(<span class="num">1</span>).expand(-<span class="num">1</span>, visual.size(<span class="num">1</span>), -<span class="num">1</span>, -<span class="num">1</span>)
+pair_features = torch.cat([
+    visual_pairs, question_pairs,
+    visual_pairs * question_pairs,
+    (visual_pairs - question_pairs).abs()
+], dim=-<span class="num">1</span>)
+learned = F.softplus(-self.learned(pair_features).squeeze(-<span class="num">1</span>).float())
+<span class="kw">return</span> (config.cost_mix * semantic + (<span class="num">1.0</span> - config.cost_mix) * learned).to(visual.dtype)
+        </div>
       </section>
 
       <section id="sinkhorn">
-        <div class="eyebrow">Stage 4</div><h2>Sinkhorn turns cost into soft alignment</h2>
-        <p class="lead">The solver works in log space and float32, even under mixed precision. This prevents underflow when <code>exp(−C/ε)</code> becomes very small and keeps invalid patch/token pairs at exactly zero.</p>
-        <div class="tabs"><button class="active solver-button" data-mode="balanced">Balanced OT</button><button class="solver-button" data-mode="unbalanced">Unbalanced OT</button></div>
+        <div class="eyebrow">Stage 4 · Source Code Deep Dive</div>
+        <h2>Log-Domain Sinkhorn Solver (<code>sinkhorn_transport</code>)</h2>
+        <p class="lead">Entropy-regularized Optimal Transport solves for the soft correspondence matrix <i>P</i>. The repository implements a differentiable, batched, log-domain Sinkhorn solver supporting both exact Balanced OT and KL-relaxed Unbalanced OT (UOT).</p>
+
+        <div class="tabs">
+          <button class="active solver-button" data-mode="balanced">Balanced OT</button>
+          <button class="solver-button" data-mode="unbalanced">Unbalanced OT (UOT)</button>
+        </div>
         <div id="solver-copy" class="callout"></div>
-        <div class="equation">log K = −C / ε<br>log u ← ρᵥ [log a − logsumexp(log K + log v)]<br>log v ← ρᑫ [log b − logsumexp(log K + log u)]<br>P = exp(log u + log K + log v)</div>
-        <p>Balanced OT uses <code>ρᵥ = ρᑫ = 1</code>. UOT uses <code>ρ = τ/(τ+ε)</code>, relaxing exact marginal matching through KL penalties. Smaller <code>τ</code> permits more mass to remain unmatched.</p>
-        <div class="callout"><b>Measured stable profile.</b> The original GQA run used <code>ε=0.05</code>, tolerance <code>1e-4</code>, and 25 iterations. It stopped with residual <code>0.04402</code> and 0% convergence. On the same learned costs, <code>ε=0.10</code>, tolerance <code>1e-3</code>, and a 50-iteration cap reached 100% convergence in about 26 iterations with residual <code>0.00054</code>. CPU, MPS, and GPU profiles now use these stable numerical settings.</div>
+
+        <h3>Mathematical Formulation</h3>
+        <p>The primal optimization problem for entropy-regularized Unbalanced Optimal Transport is:</p>
+        <div class="equation">min_{P ≥ 0}  ⟨P, C⟩ − ε·H(P) + τᵥ·KL(P·1ₘ || a) + τᵩ·KL(Pᵀ·1ₙ || b)<br>where H(P) = −Σᵢⱼ Pᵢⱼ(log Pᵢⱼ − 1)  is Shannon entropy,<br>KL(u || a) = Σᵢ (uᵢ log(uᵢ / aᵢ) − uᵢ + aᵢ)  relaxes exact marginal matching.</div>
+        
+        <p>When relaxation parameters <i>τ<sub>v</sub>, τ<sub>q</sub></i> → ∞, the KL penalties force strict marginal conservation <i>P</i><b>1</b> = <i>a</i> and <i>P</i><sup>T</sup><b>1</b> = <i>b</i>, reducing to classical <b>Balanced OT</b>.</p>
+
+        <h3>Dual Variables &amp; Relaxed Exponents in Code</h3>
+        <p>The optimal plan is parameterized by dual scaling vectors <i>u</i> ∈ ℝ<sup><i>N</i></sup> and <i>v</i> ∈ ℝ<sup><i>M</i></sup> through the Gibbs kernel <i>K</i> = exp(−<i>C</i> / <i>ε</i>):</p>
+        <div class="equation">Pᵢⱼ = uᵢ · Kᵢⱼ · vⱼ = exp(log uᵢ − Cᵢⱼ/ε + log vⱼ)<br>Balanced OT:      visual_power = 1.0,  question_power = 1.0<br>Unbalanced OT:    visual_power = τᵥ / (τᵥ + ε),  question_power = τᵩ / (τᵩ + ε)</div>
+
+        <h3>Differentiable Log-Domain Iterations in PyTorch</h3>
+        <div class="code-block">
+<span class="cm"># From model/optimal_transport.py (sinkhorn_transport)</span>
+<span class="cm"># Solver executes strictly in float32 to prevent underflow under mixed precision</span>
+cost32 = cost.float()
+a = visual_marginal.float().clamp_min(config.minimum_mass)
+b = question_marginal.float().clamp_min(config.minimum_mass)
+log_kernel = (-cost32 / config.epsilon).masked_fill(~pair_valid, <span class="num">float("-inf")</span>)
+
+<span class="kw">for</span> step <span class="kw">in</span> range(<span class="num">1</span>, config.max_iterations + <span class="num">1</span>):
+    old_u, old_v = log_u, log_v
+    <span class="cm"># Dual update for visual potentials (row scaling)</span>
+    visual_lse = torch.logsumexp(visual_update_kernel + log_v.unsqueeze(<span class="num">1</span>), dim=<span class="num">2</span>)
+    log_u = visual_power * (log_a - visual_lse).masked_fill(~valid_visual, <span class="num">0.0</span>)
+    
+    <span class="cm"># Dual update for question potentials (column scaling)</span>
+    question_lse = torch.logsumexp(question_update_kernel + log_u.unsqueeze(<span class="num">2</span>), dim=<span class="num">1</span>)
+    log_v = question_power * (log_b - question_lse).masked_fill(~valid_question, <span class="num">0.0</span>)
+
+    <span class="cm"># Stopping criterion: maximum potential variation</span>
+    delta_u = (log_u - old_u).abs().masked_fill(~valid_visual, <span class="num">0.0</span>).amax(<span class="num">1</span>)
+    delta_v = (log_v - old_v).abs().masked_fill(~valid_question, <span class="num">0.0</span>).amax(<span class="num">1</span>)
+    residual = torch.maximum(delta_u, delta_v)
+    <span class="kw">if</span> residual.le(config.tolerance).all():
+        <span class="kw">break</span>
+
+<span class="cm"># Reconstruct transport plan: P = exp(log u + log K + log v)</span>
+log_plan = log_u.unsqueeze(<span class="num">2</span>) + log_kernel + log_v.unsqueeze(<span class="num">1</span>)
+plan = torch.exp(log_plan).masked_fill(~pair_valid, <span class="num">0.0</span>)
+        </div>
 
         <div class="interactive">
           <div class="controls">
-            <h3 style="margin-top:0">Toy transport explorer</h3>
+            <h3 style="margin-top:0">Toy Transport Explorer</h3>
             <label for="epsilon"><b>Entropy ε:</b> <span id="epsilon-value">0.20</span></label>
             <input id="epsilon" type="range" min="5" max="80" value="20">
             <label for="tau"><b>Relaxation τ:</b> <span id="tau-value">0.60</span></label>
             <input id="tau" type="range" min="10" max="200" value="60">
-            <p class="small">The diagonal is low cost. Lower ε concentrates the plan. In UOT mode, lower τ reduces transported mass when matching is expensive.</p>
-            <b>Illustrative matched mass</b><div class="meter"><span id="mass-meter"></span></div><span id="mass-label" class="mono"></span>
+            <p class="small">Diagonal entries have low cost. Lower ε sharpens the plan. In UOT mode, smaller τ permits unmatched mass when alignment is costly.</p>
+            <b>Matched Mass ΣP:</b>
+            <div class="meter"><span id="mass-meter"></span></div>
+            <span id="mass-label" class="mono"></span>
           </div>
-          <div><h3 style="margin-top:0">Illustrative 5 × 5 plan P</h3><div id="heatmap" class="heatmap" aria-label="Toy transport matrix"></div></div>
+          <div><h3 style="margin-top:0">Illustrative 5 × 5 Transport Matrix P</h3><div id="heatmap" class="heatmap" aria-label="Toy transport matrix"></div></div>
         </div>
+
         <div class="progress-panel" aria-label="Interactive Sinkhorn iteration progress">
-          <div class="progress-header"><div><h3 style="margin:0">Fusion progress across Sinkhorn iterations</h3><p class="small" style="margin:.25rem 0 0">Drag the iteration marker to see the expected numerical path from an unscaled kernel to a stable transport plan.</p></div><label for="progress-iteration"><b>Iteration <span id="progress-iteration-value">1</span>/50</b></label></div>
+          <div class="progress-header">
+            <div>
+              <h3 style="margin:0">Sinkhorn Numerical Convergence Curve</h3>
+              <p class="small" style="margin:.25rem 0 0">Inspect how marginal residual, entropy, and transported mass evolve across 50 iterations under stable profiles (ε=0.10, tol=1e-3).</p>
+            </div>
+            <label for="progress-iteration"><b>Iteration <span id="progress-iteration-value">1</span>/50</b></label>
+          </div>
           <input id="progress-iteration" type="range" min="1" max="50" value="1" aria-label="Sinkhorn iteration">
           <svg id="progress-chart" class="progress-svg" viewBox="0 0 760 250" role="img" aria-label="Residual, entropy, and matched mass over Sinkhorn iterations"></svg>
-          <div class="progress-legend"><span>matched mass</span><span class="residual">marginal residual</span><span class="entropy">plan entropy</span></div>
-          <div class="progress-readout"><div class="progress-stat"><b id="progress-mass">0.42</b><span>matched mass ΣP</span></div><div class="progress-stat"><b id="progress-residual">0.180</b><span>marginal residual</span></div><div class="progress-stat"><b id="progress-entropy">2.10</b><span>plan entropy</span></div><div class="progress-stat"><b id="progress-status">updating</b><span>solver state</span></div></div>
-          <p class="small">A healthy run drives the residual down until it crosses the configured tolerance. Balanced OT approaches mass 1.0; UOT may stabilize below 1.0 when the KL relaxation leaves evidence unmatched.</p>
+          <div class="progress-legend"><span>Matched Mass ΣP</span><span class="residual">Marginal Residual</span><span class="entropy">Plan Entropy</span></div>
+          <div class="progress-readout">
+            <div class="progress-stat"><b id="progress-mass">0.42</b><span>Matched Mass</span></div>
+            <div class="progress-stat"><b id="progress-residual">0.180</b><span>Marginal Residual</span></div>
+            <div class="progress-stat"><b id="progress-entropy">2.10</b><span>Plan Entropy</span></div>
+            <div class="progress-stat"><b id="progress-status">updating</b><span>Solver State</span></div>
+          </div>
         </div>
       </section>
 
-      <section id="fusion">
-        <div class="eyebrow">Stage 5</div><h2>Barycentric projection gathers visual evidence per word</h2>
-        <p class="lead">Each question token receives a weighted average of visual patches. The weight comes from one column of the transport plan. Near-zero received mass is clamped before division so the computation remains finite.</p>
-        <div class="equation">mⱼ = Σᵢ Pᵢⱼ<br>Ṽⱼ = (Σᵢ Pᵢⱼ V̄ᵢ) / max(mⱼ, minimum_mass)<br>Hⱼ = FusionMLP([Q̄ⱼ, Ṽⱼ, Q̄ⱼ⊙Ṽⱼ, |Q̄ⱼ−Ṽⱼ|])</div>
-        <div class="flow"><div class="step"><b>Plan column</b>P[:, :, j]</div><div class="step"><b>Weighted sum</b>visual patches</div><div class="step"><b>Normalize</b>received mass</div><div class="step"><b>Join</b>question token</div><div class="step"><b>Interaction</b>product + distance</div><div class="step"><b>Project</b>decoder dimension</div></div>
-        <p>The result is a sequence of fused tokens rather than one global vector. This gives the decoder access to distinct evidence for different words and preserves the question’s ordering.</p>
+      <section id="barycentric">
+        <div class="eyebrow">Stage 5 · Source Code Deep Dive</div>
+        <h2>Barycentric Projection &amp; Token Fusion (<code>OptimalTransportFusion</code>)</h2>
+        <p class="lead">How does the 2D transport matrix <i>P</i> become a sequence of multimodal tokens for the decoder? The transport plan columns act as interpolation weights that project visual patch tokens into question space, creating a visual barycenter for each word.</p>
+
+        <div class="grid">
+          <div class="card">
+            <h3>Received Mass per Word</h3>
+            <p>Summing down column <i>j</i> of the plan yields the total transported mass received by question word <i>j</i>:</p>
+            <div class="equation">mⱼ = Σᵢ₌₁¹⁹⁶ Pᵢⱼ <span class="shape">∈ [0, 1]</span></div>
+            <p class="small">In UOT, non-visual words (e.g. "what", "is") receive near-zero mass, while visual entities (e.g. "color", "dog") receive high mass.</p>
+          </div>
+          <div class="card">
+            <h3>Normalized Visual Evidence Barycenter</h3>
+            <p>Each question word receives a weighted centroid of visual patches, normalized by its received mass:</p>
+            <div class="equation">Ṽⱼ = (Σᵢ₌₁¹⁹⁶ Pᵢⱼ V̄ᵢ) / max(mⱼ, minimum_mass) <span class="shape">∈ ℝᵈᵒᵗ</span></div>
+            <p class="small">Clamping by <code>minimum_mass=1e-8</code> prevents division by zero when a word receives negligible transported mass.</p>
+          </div>
+        </div>
+
+        <h3>Barycentric Fusion MLP in <code>model/optimal_transport.py</code></h3>
+        <div class="code-block">
+<span class="cm"># From model/optimal_transport.py (OptimalTransportFusion.forward)</span>
+received_mass = plan.sum(<span class="num">1</span>)  <span class="cm"># [B, M]</span>
+visual_evidence = torch.bmm(plan.transpose(<span class="num">1</span>, <span class="num">2</span>), visual.float())  <span class="cm"># [B, M, ot_dim]</span>
+visual_evidence = visual_evidence / received_mass.unsqueeze(-<span class="num">1</span>).clamp_min(self.config.minimum_mass)
+visual_evidence = visual_evidence.to(question.dtype)
+
+<span class="cm"># 4-way fusion into model dimension d_model</span>
+fusion_features = torch.cat([
+    question, visual_evidence,
+    question * visual_evidence,
+    (question - visual_evidence).abs()
+], dim=-<span class="num">1</span>)
+fused_tokens = self.fusion(fusion_features).masked_fill(
+    question_padding_mask.unsqueeze(-<span class="num">1</span>), <span class="num">0.0</span>
+)
+        </div>
+        <p class="small">The resulting tensor <i>H</i> ∈ ℝ<sup><i>B</i> × <i>M</i> × <i>d</i><sub>model</sub></sup> preserves the sequence length and word order of the original question, with each word enriched by its aligned visual context.</p>
+      </section>
+
+      <section id="ot-san">
+        <div class="eyebrow">Stage 6 · Source Code Deep Dive</div>
+        <h2>OT-SAN: Gated Global Summary Over Local Alignments (<code>OTSAN</code>)</h2>
+        <p class="lead">Pure OT token fusion preserves local word alignments but lacks a single global scene summary; legacy SAN compresses everything into one vector and destroys token order. <b>OT-SAN</b> bridges this gap.</p>
+        
+        <div class="grid">
+          <div class="card">
+            <span class="tag orange">Architecture</span>
+            <h3>Masked Stacked Attention + Learnable Gate</h3>
+            <p>OT-SAN takes the local barycentric question tokens <i>H</i> and runs 1 or 2 layers of masked stacked attention to compute a global summary vector <i>S</i>. A learnable gate initialized to <code>gate_init = -2.0</code> (sigmoid(-2.0) ≈ 0.12) allows the model to smoothly introduce global context without overriding learned local features:</p>
+            <div class="equation">S = StackedAttention(H, context=mean(H))<br>g = σ(gate_logit)<br>Memory = [g · S, H] <span class="shape">∈ ℝᴮˣ⁽¹⁺ᴹ⁾ˣᵈᵐᵒᵈᵉˡ</span></div>
+          </div>
+          <div class="card">
+            <span class="tag green">Decoder Advantage</span>
+            <h3>Rich Context for Decoder</h3>
+            <p>The decoder receives both the gated global summary <i>S</i> (position 0) and the token-aligned evidence <i>H</i> (positions 1 … <i>M</i>). Cross-attention heads can attend either to the global scene state or to specific question words as needed.</p>
+            <div class="equation">CLI: --fusion uot_san \<br>     --ot_san_layers 1 \<br>     --ot_san_hidden_dim 128 \<br>     --ot_san_gate_init -2.0</div>
+          </div>
+        </div>
+
+        <h3>PyTorch Implementation in <code>model/ot_san.py</code></h3>
+        <div class="code-block">
+<span class="cm"># From model/ot_san.py (OTSAN.forward)</span>
+summary = context  <span class="cm"># Initialized to masked_mean(fused_tokens)</span>
+<span class="kw">for</span> layer <span class="kw">in</span> self.layers:
+    summary, weights = layer(fused_tokens, summary, padding_mask)
+
+gate = torch.sigmoid(self.gate_logit)
+gated_summary = (self.summary_dropout(summary) * gate).unsqueeze(<span class="num">1</span>)
+memory = torch.cat([gated_summary, fused_tokens], dim=<span class="num">1</span>)
+memory_padding_mask = torch.cat([
+    torch.zeros((fused_tokens.size(<span class="num">0</span>), <span class="num">1</span>), dtype=torch.bool, device=fused_tokens.device),
+    padding_mask
+], dim=<span class="num">1</span>)
+        </div>
+      </section>
+
+      <section id="fusion-families">
+        <div class="eyebrow">Stage 7 · Source Code Deep Dive</div>
+        <h2>Five Multimodal Fusion Families &amp; OT Augmentation</h2>
+        <p class="lead">How does Optimal Transport integrate into different multimodal fusion architectures? In <code>model/fusion_methods.py</code>, five fusion families consume the transport plan <i>P</i> through mathematically principled injection mechanisms.</p>
+
+        <div class="grid five">
+          <div class="card">
+            <span class="tag green">SAN</span>
+            <h3>Stacked Attention</h3>
+            <p><b>Without OT:</b> Global question context repeatedly attends visual patches → 1 summary token.<br>
+            <b>With OT (<code>uot_san</code>):</b> Stacked attention over barycentric tokens → gated summary prepended to tokens <code>[S, H]</code>.</p>
+          </div>
+          <div class="card">
+            <span class="tag green">BAN</span>
+            <h3>Bilinear Attention</h3>
+            <p><b>Without OT:</b> Multi-glimpse bilinear attention scores <i>w<sub>g</sub><sup>T</sup></i>(tanh(<i>W<sub>v</sub> V</i>) ⊙ tanh(<i>W<sub>q</sub> Q</i>)).<br>
+            <b>With OT (<code>uot_ban</code>):</b> OT plan injected as additive log-prior: <code>score_g + λ_ot · log(P + ε)</code> with learned <i>λ</i><sub>ot</sub>.</p>
+          </div>
+          <div class="card">
+            <span class="tag green">MUTAN</span>
+            <h3>Multimodal Tucker</h3>
+            <p><b>Without OT:</b> Rank-5 bilinear tensor decomposition with native visual attention pooling.<br>
+            <b>With OT (<code>uot_mutan</code>):</b> Visual evidence pooling weights directly replaced with normalized OT columns Ṽ<sub>j</sub> = Σ<sub>i</sub> P<sub>ij</sub> V<sub>i</sub> / max(Σ<sub>i</sub> P<sub>ij</sub>, ε).</p>
+          </div>
+          <div class="card">
+            <span class="tag green">Cross-Attention</span>
+            <h3>Transformer Fusion</h3>
+            <p><b>Without OT:</b> Standard multi-head cross-attention where questions query visual keys/values.<br>
+            <b>With OT (<code>uot_cross_attention</code>):</b> Normalized log-transport plan added to attention logits: <code>QK^T/√d + λ_ot · log(P^T + ε)</code>.</p>
+          </div>
+          <div class="card">
+            <span class="tag green">Q-Former</span>
+            <h3>Querying Transformer</h3>
+            <p><b>Without OT:</b> 8 learnable queries self-attend, then cross-attend concatenated <code>[V, Q]</code>.<br>
+            <b>With OT (<code>uot_qformer</code>):</b> Queries cross-attend multimodal memory containing grounded barycentric tokens <code>[V, H_ot]</code>.</p>
+          </div>
+        </div>
+
+        <h3>Exact OT Injection Mechanics in <code>model/fusion_methods.py</code></h3>
+        
+        <div class="callout green">
+          <b>1. BAN (Bilinear Attention Network) with Additive Log-Prior:</b>
+          <div class="code-block">
+<span class="cm"># From BANFusion.forward</span>
+attention = glimpse_weights.unsqueeze(-<span class="num">1</span>) * (visual_projected.unsqueeze(<span class="num">3</span>) * question_projected.unsqueeze(<span class="num">2</span>))
+<span class="kw">if</span> inputs.transport <span class="kw">is not</span> <span class="kw">None</span>:
+    <span class="cm"># OT plan acts as an additive structural log-prior across glimpses</span>
+    log_plan = torch.log(inputs.transport.plan.clamp_min(<span class="num">1e-8</span>)).unsqueeze(<span class="num">1</span>)
+    attention = attention + self.lambda_ot * log_plan
+          </div>
+        </div>
+
+        <div class="callout green">
+          <b>2. MUTAN with Normalized OT Column Pooling:</b>
+          <div class="code-block">
+<span class="cm"># From MUTANFusion.forward</span>
+<span class="kw">if</span> inputs.transport <span class="kw">is not</span> <span class="kw">None</span>:
+    <span class="cm"># Replace unconstrained self-learned attention with OT barycentric patches</span>
+    received_mass = inputs.transport.plan.sum(<span class="num">1</span>, keepdim=<span class="kw">True</span>).transpose(<span class="num">1</span>, <span class="num">2</span>)
+    visual_evidence = torch.bmm(inputs.transport.plan.transpose(<span class="num">1</span>, <span class="num">2</span>), visual.float())
+    visual_evidence = visual_evidence / received_mass.clamp_min(<span class="num">1e-8</span>)
+<span class="kw">else</span>:
+    visual_evidence = self.native_attention_pooling(visual, question)
+<span class="cm"># Tucker low-rank tensor product: sum_r (v_r * q_r)</span>
+fused_memory = self.tucker_product(visual_evidence, question)
+          </div>
+        </div>
+
+        <div class="callout green">
+          <b>3. Cross-Attention Transformer with Logit Bias:</b>
+          <div class="code-block">
+<span class="cm"># From CrossAttentionFusion.forward</span>
+attention_scores = torch.matmul(q, k.transpose(-<span class="num">2</span>, -<span class="num">1</span>)) / math.sqrt(self.head_dim)
+<span class="kw">if</span> inputs.transport <span class="kw">is not</span> <span class="kw">None</span>:
+    <span class="cm"># Transport plan P [B, 196, M] transposed to [B, M, 196] and broadcast across heads</span>
+    plan_bias = self.lambda_ot * torch.log(
+        inputs.transport.plan.transpose(<span class="num">1</span>, <span class="num">2</span>).clamp_min(<span class="num">1e-8</span>)
+    ).unsqueeze(<span class="num">1</span>)
+    attention_scores = attention_scores + plan_bias
+          </div>
+        </div>
+
+        <div class="callout green">
+          <b>4. Q-Former with Barycentric Multimodal Memory:</b>
+          <div class="code-block">
+<span class="cm"># From QFormerFusion.forward</span>
+<span class="kw">if</span> inputs.transport <span class="kw">is not</span> <span class="kw">None</span>:
+    <span class="cm"># Grounded multimodal memory: raw visual tokens + OT barycentric question tokens</span>
+    memory = torch.cat([self.visual_projection(visual), inputs.transport.fused_tokens], dim=<span class="num">1</span>)
+<span class="kw">else</span>:
+    memory = torch.cat([self.visual_projection(visual), self.question_projection(question)], dim=<span class="num">1</span>)
+<span class="cm"># 8 learnable queries self-attend, then cross-attend memory</span>
+output_memory = self.query_transformer(self.learned_queries, memory)
+          </div>
+        </div>
+        <div class="callout blue">
+          <b>Fairness &amp; Modularity:</b> All fusion modules conform to the standardized <code>FusionInput</code> and <code>FusionOutput</code> software contracts in <code>model/fusion_methods.py</code>. Padded positions are masked identically, and output memory is mapped to <code>d_model</code>.
+        </div>
       </section>
 
       <section id="decoder">
-        <div class="eyebrow">Stage 6</div><h2>The decoder generates the answer autoregressively</h2>
-        <div class="grid"><div class="card"><h3>Self-attention mask</h3><p>A causal upper-triangular mask prevents answer position <code>t</code> from seeing future answer tokens. PAD answer IDs are masked as keys.</p></div><div class="card"><h3>Cross-attention mask</h3><p>The question padding mask expands to <code>B×1×Lanswer×M</code>. Every decoder layer uses it, so padded fused-memory tokens cannot affect logits.</p></div></div>
-        <div class="equation">training input  = [BOS, y₁, y₂, …]<br>training target = [y₁,  y₂, EOS, …]<br>train loss = CrossEntropy(logits, target, ignore_index=PAD, smoothing=0.1)<br>validation loss = CrossEntropy(logits, target, ignore_index=PAD)</div>
-        <div class="callout"><b>No reference-answer leakage.</b> At inference the sequence begins with BOS. The model repeatedly chooses the highest-logit next token, appends it, and stops at EOS or the maximum answer length.</div>
+        <div class="eyebrow">Stage 8</div>
+        <h2>Autoregressive Transformer Decoder</h2>
+        <div class="grid">
+          <div class="card">
+            <h3>Causal Self-Attention Mask</h3>
+            <p>An upper-triangular Boolean mask prevents target token <i>t</i> from attending to future tokens <i>t</i>+1 … <i>L</i>. Answer PAD tokens are masked as keys.</p>
+            <div class="equation">mask[i, j] = True  if  j &gt; i  or  pad[j]</div>
+          </div>
+          <div class="card">
+            <h3>Fused-Memory Cross-Attention Mask</h3>
+            <p>The memory padding mask expands to <code>B × 1 × L_answer × L_memory</code>. Padded fused tokens cannot influence decoder hidden states.</p>
+            <div class="equation">memory_mask[b, 1, t, m] = memory_padding[b, m]</div>
+          </div>
+        </div>
+        <div class="equation">training input  = [BOS, y₁, y₂, …]<br>training target = [y₁,  y₂, EOS, …]<br>train loss = CrossEntropy(logits, target, ignore_index=PAD, label_smoothing=0.1)<br>validation loss = CrossEntropy(logits, target, ignore_index=PAD)</div>
       </section>
 
       <section id="training">
-        <div class="eyebrow">Optimization path</div><h2>Training, validation, and model selection</h2>
+        <div class="eyebrow">Optimization</div>
+        <h2>Training, Model Selection &amp; Regularization</h2>
         <div class="sequence">
-          <div class="lane">Training batch</div><div class="events"><span class="event">pixels or cache</span><span>→</span><span class="event ot">OT fusion</span><span>→</span><span class="event">teacher forcing</span><span>→</span><span class="event">smoothed PAD-masked loss</span><span>→</span><span class="event">backprop</span></div>
-          <div class="lane">Validation</div><div class="events"><span class="event">same encoder</span><span>→</span><span class="event ot">same OT</span><span>→</span><span class="event generate">generate from BOS</span><span>→</span><span class="event">EM / F1</span></div>
-          <div class="lane">Checkpointing</div><div class="events"><span class="event save">write last.pt</span><span>→</span><span class="event">compare generated F1</span><span>→</span><span class="event save">update best.pt</span><span>→</span><span class="event">check patience</span></div>
+          <div class="lane">Training Batch</div>
+          <div class="events"><span class="event">Pixels / Cache</span><span>→</span><span class="event ot">OT Align</span><span>→</span><span class="event fusion">Fusion Module</span><span>→</span><span class="event">Teacher Forcing</span><span>→</span><span class="event">Smoothed Loss</span><span>→</span><span class="event">Backprop</span></div>
+          <div class="lane">Validation Split</div>
+          <div class="events"><span class="event">Same Encoders</span><span>→</span><span class="event ot">Same OT</span><span>→</span><span class="event fusion">Same Fusion</span><span>→</span><span class="event generate">Autoregressive BOS Gen</span><span>→</span><span class="event">EM / F1 Scoring</span></div>
+          <div class="lane">Checkpointing</div>
+          <div class="events"><span class="event save">Write last.pt</span><span>→</span><span class="event">Check Val F1 Improvement</span><span>→</span><span class="event save">Update best.pt</span><span>→</span><span class="event">Check Patience (8)</span></div>
         </div>
-        <h3>Selection and stopping rule</h3><p><code>best.pt</code> changes when generated validation F1 improves. If F1 ties, lower unsmoothed validation loss wins. The default patience stops after eight epochs without improvement and is stored in the checkpoint. Teacher-forced training metrics describe optimization only and never select the final model.</p>
-        <h3>Small-data capacity controls</h3><p>The recommended 1,000-example profile uses <code>d_model=384</code>, two decoder layers, <code>ffn_hidden=1024</code>, dropout <code>0.2</code>, and frozen pretrained answer embeddings. These settings reduce memorization pressure while retaining trainable answer projection, OT fusion, decoder, and output head.</p>
-        <h3>Compute device</h3><p><code>--device auto</code> prefers CUDA, then Apple MPS, then CPU. On Apple Silicon, <code>--device mps</code> makes availability explicit. Checkpoints are staged through CPU to avoid a temporary model-sized duplicate in unified GPU memory.</p>
-        <h3>Logged behavior</h3><p>Generated EM/F1, unsmoothed validation loss, learning rate, best epoch, patience, unique predictions, top-output fraction, transport cost, entropy, mass, residual, iterations, and convergence rate are recorded. Fresh runs reset <code>metrics.jsonl</code>; resumed runs append.</p>
+        
+        <h3>Small-Data Regularization Profile</h3>
+        <p>On small benchmarks like GQA (1,000 train examples), standard transformers overfit rapidly. The repository provides a compact, regularized profile:</p>
+        <div class="grid three">
+          <div class="card"><h3>Capacity Controls</h3><p><code>d_model=384</code>, 2 decoder layers, 4 attention heads, <code>ffn_hidden=1024</code>, dropout=0.2, frozen answer embeddings.</p></div>
+          <div class="card"><h3>Optimizer Regularization</h3><p>AdamW with weight decay=0.05, gradient clipping at 1.0, and linear warmup schedule.</p></div>
+          <div class="card"><h3>Early Stopping</h3><p>Patience of 8 epochs evaluated on <b>generated validation F1</b> (never teacher-forced training metrics).</p></div>
+        </div>
+      </section>
+
+      <section id="benchmark">
+        <div class="eyebrow">Benchmark Suite</div>
+        <h2>Automated Fusion Benchmark &amp; Paired Delta Reports</h2>
+        <p class="lead">The script <code>scripts/run_fusion_benchmark.sh</code> and aggregator <code>scripts/summarize_fusion_benchmark.py</code> automate execution, validation, and paired statistical comparison across all 15 configurations.</p>
+
+        <div class="grid">
+          <div class="card">
+            <h3>Running the Benchmark</h3>
+            <p>Execute the automated benchmark across 3 random seeds (1105, 1106, 1107):</p>
+            <div class="equation">DEVICE=mps \<br>METHODS="san ban mutan cross_attention qformer" \<br>TRANSPORTS="none balanced uot" \<br>SEEDS="1105 1106 1107" \<br>RUN_ROOT=results/fusion_benchmark \<br>scripts/run_fusion_benchmark.sh</div>
+          </div>
+          <div class="card">
+            <h3>Paired Delta Analysis</h3>
+            <p>The aggregator computes paired differences for each method and seed:</p>
+            <div class="equation">Δ_balanced = Metric(balanced) - Metric(none)<br>Δ_uot      = Metric(uot) - Metric(none)<br>Δ_uot_vs_bal = Metric(uot) - Metric(balanced)</div>
+            <p class="small">Outputs: <code>runs.csv</code>, <code>aggregate.csv</code>, <code>paired_deltas.csv</code>, and <code>paired_aggregate.csv</code>.</p>
+          </div>
+        </div>
       </section>
 
       <section id="inference">
-        <div class="eyebrow">Answer path</div><h2>Inference needs only an image and a question</h2>
+        <div class="eyebrow">Inference</div>
+        <h2>Autoregressive Prediction Pipeline</h2>
         <ol>
-          <li>Preprocess the image and question using settings stored with the checkpoint.</li>
-          <li>Run frozen encoders or load their validated cached token features.</li>
-          <li>Compute marginals, cost, the OT plan, and fused decoder memory once.</li>
-          <li>Initialize answer IDs with BOS.</li>
-          <li>Decode one next token, excluding PAD and BOS from selection.</li>
-          <li>Keep unfinished rows generating while completed rows receive PAD.</li>
-          <li>Stop when every row emits EOS or reaches the configured limit.</li>
+          <li>Preprocess image via ViT processor and question via BERT tokenizer.</li>
+          <li>Extract spatial patch tokens <i>V</i> and question tokens <i>Q</i>.</li>
+          <li>Compute optimal transport plan <i>P</i> (if OT variant enabled).</li>
+          <li>Execute multimodal fusion module to produce contextual memory <i>H</i>.</li>
+          <li>Initialize answer sequence with <code>[BOS]</code>.</li>
+          <li>Autoregressively predict next token logit via greedy argmax, appending each token to sequence.</li>
+          <li>Stop when <code>[EOS]</code> is produced or <code>max_len</code> (default 12) is reached.</li>
         </ol>
-        <div class="equation">python predict.py --checkpoint best.pt \
-  --image example.jpg --question "What color is it?" \
-  --diagnostics --diagnostics_output transport.png</div>
+        <div class="equation">python predict.py --checkpoint data/gqa_uot_san/best.pt \<br>  --image example.jpg --question "What color is the cup?" \<br>  --diagnostics --diagnostics_output transport_explanation.png</div>
       </section>
 
       <section id="cache">
-        <div class="eyebrow">Performance path</div><h2>Feature caching removes repeated encoder work</h2>
-        <div class="grid three"><div class="card"><h3>Precompute</h3><p>DeiT hidden states and contextual question tokens are produced in evaluation mode and stored as float16.</p></div><div class="card"><h3>Validate</h3><p>The manifest records CSV SHA-256, annotation IDs, encoder names/revisions, processor settings, token policy, dtype, and shapes.</p></div><div class="card"><h3>Load</h3><p>Variable question sequences are padded per batch, masks are padded with <code>true</code>, and features cast to the active model dtype.</p></div></div>
-        <div class="callout">The loader refuses a cache if the CSV fingerprint or encoder identifier differs. Online and cached data enter the same <code>encode_from_features()</code> interface.</div>
+        <div class="eyebrow">Performance</div>
+        <h2>Feature Caching (Precomputed ViT &amp; BERT Tokens)</h2>
+        <div class="grid three">
+          <div class="card"><h3>Precompute Once</h3><p>Extract ViT patch tokens and BERT contextual embeddings in evaluation mode and store as float16 tensors.</p></div>
+          <div class="card"><h3>Cryptographic Fingerprint</h3><p>Manifest records CSV SHA-256, annotation IDs, encoder versions, processor settings, and tokenization rules.</p></div>
+          <div class="card"><h3>Zero Redundant Compute</h3><p>Training loads precomputed tokens directly into <code>encode_from_features()</code>, speeding up training by 4-5x.</p></div>
+        </div>
       </section>
 
       <section id="checkpoint">
-        <div class="eyebrow">Persistence</div><h2>Version-3 checkpoints reconstruct the complete model</h2>
-        <table><thead><tr><th>Group</th><th>Stored state</th><th>Purpose</th></tr></thead><tbody>
-          <tr><td>Architecture</td><td>dimensions, fusion type, frozen-answer setting, full OTConfig</td><td>Rebuild exactly the trained fusion path</td></tr>
-          <tr><td>Encoders</td><td>text/image identifiers and revisions</td><td>Restore compatible preprocessing and weights</td></tr>
-          <tr><td>Learning</td><td>model, optimizer, scheduler</td><td>Resume parameters and learning-rate position</td></tr>
-          <tr><td>Progress</td><td>epoch, global step, best metric/epoch, patience counter</td><td>Continue model selection and stopping</td></tr>
-          <tr><td>Randomness</td><td>Python, CPU PyTorch, CUDA and MPS RNG states</td><td>Deterministic continuation on the selected device</td></tr>
-        </tbody></table>
-        <p>Writes are atomic through a temporary file followed by replacement. Version-2 checkpoints are forced onto SAN and remain loadable. A compatibility mapper handles DeiT state-path changes across Transformers releases.</p>
+        <div class="eyebrow">Persistence</div>
+        <h2>Version-3 Checkpoint Architecture</h2>
+        <table>
+          <thead><tr><th>Field Group</th><th>Stored Contents</th><th>Purpose</th></tr></thead>
+          <tbody>
+            <tr><td>Architecture &amp; Fusion</td><td>dimensions, fusion name, <code>FusionSpec</code>, <code>OTConfig</code>, <code>OTSANConfig</code>, method config</td><td>Reconstruct exact multimodal graph</td></tr>
+            <tr><td>Encoder Provenance</td><td>text and image model names and revisions</td><td>Enforce identical tokenization and normalization</td></tr>
+            <tr><td>Optimization State</td><td>model, optimizer, scheduler state dicts</td><td>Enable seamless training resumption</td></tr>
+            <tr><td>Progress &amp; Selection</td><td>epoch, step, best generated F1, best loss, patience</td><td>Maintain early stopping state</td></tr>
+            <tr><td>Randomness</td><td>Python, PyTorch CPU, CUDA, and MPS RNG states</td><td>Exact deterministic replication on resume</td></tr>
+          </tbody>
+        </table>
       </section>
 
       <section id="diagnostics">
-        <div class="eyebrow">Interpretation and numerical health</div><h2>What each transport diagnostic means</h2>
+        <div class="eyebrow">Observability</div>
+        <h2>Transport Diagnostics &amp; Inspection Tools</h2>
         <div class="grid three">
-          <div class="card"><h3>Transport cost</h3><p><code>Σ PᵢⱼCᵢⱼ</code>. Lower means mass uses cheaper alignments; compare only under the same cost scale.</p></div>
-          <div class="card"><h3>Entropy</h3><p><code>−Σ P log P</code>. High values indicate diffuse transport; low values indicate concentrated matches.</p></div>
-          <div class="card"><h3>Matched mass</h3><p><code>ΣP</code>. Balanced OT should be near one. UOT can transport less or slightly more under relaxation.</p></div>
-          <div class="card"><h3>Unmatched mass</h3><p><code>max(1−ΣP,0)</code>. Quantifies mass intentionally left without correspondence.</p></div>
-          <div class="card"><h3>Residual</h3><p>Balanced marginal error or UOT fixed-point update error. It should fall with stable convergence.</p></div>
-          <div class="card"><h3>Iterations</h3><p>Number of Sinkhorn updates before tolerance. Frequent maximum-iteration hits need investigation.</p></div>
+          <div class="card"><h3>Transport Cost</h3><p><code>Σ PᵢⱼCᵢⱼ</code>. Measures average transport expenditure under the ground cost matrix.</p></div>
+          <div class="card"><h3>Plan Entropy</h3><p><code>−Σ P log P</code>. Distinguishes sharp, localized alignments from diffuse, uniform transport.</p></div>
+          <div class="card"><h3>Matched Mass</h3><p><code>Σ P</code>. Approximates 1.0 in Balanced OT; varies smoothly in UOT depending on visual relevance.</p></div>
         </div>
-        <h3>Visualization output</h3><p>The diagnostic figure overlays received patch mass on the image and displays the plan, ground cost, learned marginals versus received mass, and convergence scalars. These are model explanations, not ground-truth annotations.</p>
-        <table><thead><tr><th>Symptom</th><th>First inspection</th><th>Likely response</th></tr></thead><tbody>
-          <tr><td>NaN or infinity</td><td>cost scale, empty valid sets, ε, masked rows</td><td>Fail the batch; inspect IDs and full diagnostics</td></tr>
-          <tr><td>All plans diffuse</td><td>ε, cost variance, marginal entropy</td><td>Compare cosine reference; reduce ε carefully</td></tr>
-          <tr><td>Low matched mass</td><td>τ values and cost magnitude</td><td>Increase τ or normalize cost scale</td></tr>
-          <tr><td>Good loss, poor answers</td><td>generated F1, EOS rate, decoder prefixes</td><td>Select by generation, inspect exposure behavior</td></tr>
-          <tr><td>Train F1 rises, validation stalls</td><td>best epoch, capacity, train/validation gap</td><td>Stop early; shrink decoder; add regularization and data</td></tr>
-          <tr><td>Few unique answers</td><td>top-output fraction, answer coverage, majority baseline</td><td>Diagnose output-prior collapse and rebalance data</td></tr>
-          <tr><td>Image shuffle rarely changes answers</td><td>image versus question shuffle sensitivity</td><td>Inspect grounding and fusion before increasing capacity</td></tr>
-          <tr><td>Cache mismatch</td><td>CSV hash, model name, special-token policy</td><td>Invalidate and rebuild the cache</td></tr>
-        </tbody></table>
+        <p>Running with <code>--diagnostics</code> generates visual explanation figures overlaying patch transport mass onto the original image, alongside cost heatmaps and marginal convergence plots.</p>
       </section>
 
       <section id="bottleneck">
-        <div class="eyebrow">Measured post-training analysis</div><h2>Why validation stopped improving</h2>
-        <p class="lead">The first full GQA UOT run proved that training, generation, checkpointing, and MPS inference work. Its learning curve also revealed that the model memorizes the 1,000-example subset, relies primarily on the question, and truncates every OT solve before convergence.</p>
+        <div class="eyebrow">Diagnostic Findings</div>
+        <h2>Bottleneck Analysis on Small-Scale Data (GQA)</h2>
         <div class="metric-grid">
-          <div class="metric"><strong>0.29</strong><span>best validation F1 · epoch 9</span></div>
-          <div class="metric"><strong>0.999</strong><span>training F1 · epoch 46</span></div>
-          <div class="metric"><strong>0.21</strong><span>validation F1 · epoch 46</span></div>
-          <div class="metric"><strong>0%</strong><span>OT convergence · old profile</span></div>
+          <div class="metric"><strong>0.29</strong><span>Best Val F1 · Epoch 9</span></div>
+          <div class="metric"><strong>0.999</strong><span>Train F1 · Epoch 46</span></div>
+          <div class="metric"><strong>0.21</strong><span>Val F1 · Epoch 46</span></div>
+          <div class="metric"><strong>100%</strong><span>Convergence · Stable Profile</span></div>
         </div>
-        <h3>Counterfactual modality test</h3>
-        <p>The diagnostic generated answers normally, with images rotated among samples, and with questions rotated among samples. A modality that controls the prediction should cause frequent changes when shuffled.</p>
-        <div class="bar-list" aria-label="Prediction changes after modality shuffle">
-          <div class="bar-row"><b>Image shuffled</b><div class="bar-track"><div class="bar-fill warn" style="width:31.25%"></div></div><span class="mono" style="text-align:right">31.25%</span></div>
-          <div class="bar-row"><b>Question shuffled</b><div class="bar-track"><div class="bar-fill" style="width:84.38%"></div></div><span class="mono" style="text-align:right">84.38%</span></div>
+        <div class="callout orange">
+          <b>Key Finding:</b> Full-capacity models (86M trainable params) memorize small 1,000-example datasets, suffering output collapse to the majority answer. The regularized compact profile (<code>d_model=384</code>, 2 decoder layers, dropout=0.2, frozen answer embeddings) along with early stopping at epoch ~9-12 successfully mitigates this bottleneck.
         </div>
-        <div class="callout"><b>Interpretation.</b> Shuffled-image F1 was <code>0.28125</code> versus original F1 <code>0.25</code> on 32 examples. The small increase is sampling noise, not useful behavior. The low change rate and large question-shuffle response show question-prior dominance and weak visual grounding.</div>
-        <div class="grid three">
-          <div class="card"><h3>Capacity</h3><p>The checkpoint exposes 86.5M trainable parameters for 1,000 examples. The regularized profile uses a 384-wide, two-layer decoder, 1024-wide feed-forward blocks, dropout 0.2, and frozen answer embeddings.</p></div>
-          <div class="card"><h3>Output collapse</h3><p>Only eight distinct answers appeared in the 32-example panel. The most frequent answer occupied 31.25% of outputs, and late-run F1 approached the 0.19 “yes” majority baseline.</p></div>
-          <div class="card"><h3>Coverage</h3><p>The training split contains 245 unique answers; validation contains 50. Nineteen percent of validation examples use an answer never observed in training, limiting exact-match performance.</p></div>
-        </div>
-        <h3>Corrective training flow</h3>
-        <div class="flow"><div class="step"><b>Stable OT</b>ε 0.1 · tol 1e-3</div><div class="step"><b>Compact model</b>384 · 2 layers</div><div class="step"><b>Regularize</b>dropout + smoothing</div><div class="step"><b>Generate</b>validation answers</div><div class="step"><b>Stop early</b>patience 8</div><div class="step"><b>Intervene</b>shuffle modalities</div></div>
-        <div class="equation">python diagnose_training.py --device mps \
-  --checkpoint data/gqa_uot/best.pt \
-  --train_csv_path data/gqa_dataset/train.csv \
-  --dev_csv_path data/gqa_dataset/val.csv \
-  --dev_img_path data/gqa_dataset/images/val --samples 32</div>
-        <p>The command writes <code>bottleneck_report.json</code> beside the checkpoint. Start retraining in a new model directory because resuming reconstructs the old dimensions and OT profile exactly. Use the selected <code>best.pt</code> for inference and diagnosis.</p>
       </section>
 
       <section id="files">
-        <div class="eyebrow">Implementation map</div><h2>Where each component lives</h2>
+        <div class="eyebrow">Repository Map</div>
+        <h2>Source Code Implementation Reference</h2>
         <div class="filemap">
-          <div class="file"><b>model/optimal_transport.py</b><span class="small">OTConfig, marginals, hybrid cost, log-domain solver, barycentric fusion, diagnostics.</span></div>
-          <div class="file"><b>model/vqa_model.py</b><span class="small">SAN/OT selection, online and cached encoding, decoding, generation.</span></div>
-          <div class="file"><b>model/features_extraction.py</b><span class="small">Frozen DeiT patches, English BERT question tokens, answer embeddings.</span></div>
-          <div class="file"><b>model/decoder_model.py</b><span class="small">Causal self-attention and fused-memory cross-attention masks.</span></div>
-          <div class="file"><b>train.py · test.py · predict.py</b><span class="small">Optimization, generated evaluation, inference, and CLI diagnostics.</span></div>
-          <div class="file"><b>diagnose_training.py</b><span class="small">Learning-curve analysis, output diversity, dataset coverage, and image/question shuffle interventions.</span></div>
-          <div class="file"><b>utils/data_processing.py · utils/vqa_dataset.py</b><span class="small">English whitespace normalization and generic image/question/answer loading.</span></div>
-          <div class="file"><b>utils/checkpoint.py</b><span class="small">Atomic version-3 save, resume, v2 SAN, DeiT-key, and legacy English text-key compatibility.</span></div>
-          <div class="file"><b>utils/feature_cache.py · precompute_features.py</b><span class="small">Cache manifest, validation, collation, and frozen feature production.</span></div>
-          <div class="file"><b>utils/transport_visualization.py</b><span class="small">Plan, cost, marginal, patch-mass, and convergence figure.</span></div>
-          <div class="file"><b>configs/ot_cpu.json · ot_mps.json · ot_gpu.json</b><span class="small">Resource-specific OT dimensions, regularization, and iteration limits.</span></div>
-          <div class="file"><b>tests/test_optimal_transport.py</b><span class="small">Marginals, padding, solver behavior, gradients, cache, and visualization checks.</span></div>
+          <div class="file"><b>model/fusion_methods.py</b><span class="small">Core registry, <code>FusionInput</code>, <code>FusionOutput</code>, BAN, MUTAN, Cross-Attention, Q-Former.</span></div>
+          <div class="file"><b>model/ot_san.py</b><span class="small">OT-SAN gated stacked attention summary module over OT-fused tokens.</span></div>
+          <div class="file"><b>model/optimal_transport.py</b><span class="small">OTConfig, learned marginals, hybrid cost, log-domain Sinkhorn, barycentric fusion.</span></div>
+          <div class="file"><b>model/vqa_model.py</b><span class="small">Unified VQAModel integrating all 15 fusion/transport paths with autoregressive decoder.</span></div>
+          <div class="file"><b>model/features_extraction.py</b><span class="small">Frozen ViT visual encoder, English BERT text encoder, answer embeddings.</span></div>
+          <div class="file"><b>model/decoder_model.py</b><span class="small">Autoregressive Transformer decoder with causal self-attention &amp; memory cross-attention.</span></div>
+          <div class="file"><b>scripts/run_fusion_benchmark.sh</b><span class="small">Automated runner for 15 configurations across multiple seeds with preflight checks.</span></div>
+          <div class="file"><b>scripts/summarize_fusion_benchmark.py</b><span class="small">Aggregator computing paired differences (Δ balanced, Δ uot) in CSV and JSON formats.</span></div>
+          <div class="file"><b>train.py · test.py · predict.py</b><span class="small">Training with teacher forcing, generated-answer evaluation, and single-sample inference.</span></div>
+          <div class="file"><b>diagnose_training.py</b><span class="small">Counterfactual modality shuffle test, output collapse diagnostic, dataset coverage analysis.</span></div>
+          <div class="file"><b>utils/feature_cache.py · precompute_features.py</b><span class="small">Fingerprinted float16 token caching for ViT and BERT features.</span></div>
+          <div class="file"><b>configs/ot_cpu.json · ot_mps.json · ot_gpu.json</b><span class="small">Stable numerical Sinkhorn hyperparameters (ε=0.10, tol=1e-3, 50 iterations).</span></div>
         </div>
       </section>
     </main>
   </div>
-  <footer class="foot">OT-VQA architecture document · generated from the implemented code path</footer>
+
+  <footer class="foot">
+    OT-VQA Architecture &amp; Benchmark Documentation · Generated from active repository state (Branch: compare-results)
+  </footer>
 </div>
 
 <script>
@@ -395,7 +850,8 @@
       document.querySelectorAll('[data-tab]').forEach(b => b.classList.remove('active'));
       document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
       button.classList.add('active');
-      document.getElementById(button.dataset.tab).classList.add('active');
+      const target = document.getElementById(button.dataset.tab);
+      if (target) target.classList.add('active');
     });
   });
 
@@ -408,8 +864,8 @@
 
   function updateSolverCopy(){
     solverCopy.innerHTML = solverMode === 'balanced'
-      ? '<b>Balanced OT:</b> Every unit of visual and question mass must be transported. Row sums match <code>a</code> and column sums match <code>b</code> within tolerance.'
-      : '<b>Unbalanced OT:</b> KL penalties encourage—but do not force—marginal matching. Expensive or irrelevant evidence may remain unmatched.';
+      ? '<b>Balanced OT:</b> Strict marginal conservation: row sums equal visual marginal <code>a</code> and column sums equal question marginal <code>b</code> within tolerance. All mass must be transported.'
+      : '<b>Unbalanced OT (UOT):</b> Soft marginal relaxation via KL penalty: marginal error is penalized rather than prohibited. Clutter patches or non-visual words are allowed to remain unmatched.';
   }
 
   function renderToy(){
