@@ -12,11 +12,13 @@ from model.ot_alignment import (
     OTContrastiveAligner,
     ot_attention_distillation_loss,
 )
+from utils.distributed import DistributedContext, reduce_totals, unwrap_model
 from utils.metrics import compute_em_and_f1
 
 
 def extract_alignment_features(model, batch, device):
     """Return frozen spatial/image and content/question tokens for either data path."""
+    model = unwrap_model(model)
     with torch.no_grad():
         if isinstance(batch, dict):
             image_embeddings = batch["image_features"].to(device)
@@ -74,6 +76,7 @@ def train_alignment_epoch(
     device,
     gradient_clip: float | None = None,
     contrastive_weight: float = 1.0,
+    distributed: DistributedContext | None = None,
 ) -> dict[str, float]:
     """Warm up only the OT teacher with symmetric hard-negative InfoNCE."""
     model.eval()
@@ -102,10 +105,21 @@ def train_alignment_epoch(
         scheduler.step()
         rows.append((visual.size(0), _diagnostic_values(output)))
         queue.enqueue(visual, question, visual_mask, question_mask)
-    metrics = _mean_metrics(rows)
-    metrics["ot_skipped_examples"] = float(skipped)
     if not rows:
         raise ValueError("Alignment warm-up needs at least two examples")
+    metrics = _mean_metrics(rows)
+    if distributed is not None:
+        local_examples = sum(count for count, _ in rows)
+        keys = list(metrics)
+        totals = [metrics[key] * local_examples for key in keys]
+        reduced = reduce_totals([*totals, local_examples, skipped], distributed)
+        global_examples = reduced[-2]
+        metrics = {
+            key: reduced[index] / max(global_examples, 1)
+            for index, key in enumerate(keys)
+        }
+        skipped = reduced[-1]
+    metrics["ot_skipped_examples"] = float(skipped)
     return metrics
 
 
@@ -113,6 +127,7 @@ def train_alignment_epoch(
 def evaluate_alignment(model, teacher, loader, device) -> dict[str, float]:
     """Evaluate teacher retrieval and transport validity without updating its queue."""
     model.eval()
+    teacher = unwrap_model(teacher)
     teacher.eval()
     validation_queue = AlignmentNegativeQueue(
         capacity=max(8, teacher.config.negative_count)
@@ -188,9 +203,12 @@ def train_distillation_epoch(
     device,
     distill_weight: float,
     gradient_clip: float | None = None,
+    distributed: DistributedContext | None = None,
 ) -> tuple[list[float], float, float, dict[str, float]]:
     """Train native Cross-Attention from VQA loss plus detached OT supervision."""
     model.train()
+    base_model = unwrap_model(model)
+    teacher = unwrap_model(teacher)
     teacher.eval()
     losses = []
     total_em = total_f1 = 0.0
@@ -201,24 +219,16 @@ def train_distillation_epoch(
         visual, question, visual_mask, question_mask, answers = (
             extract_alignment_features(model, batch, device)
         )
-        # encode_from_features expects encoder outputs including ViT prefix tokens.
-        # The student fusion consumes spatial tokens, so call the fusion and decoder
-        # directly to avoid re-attaching synthetic prefix tokens.
-        fusion_output = model.fusion_module(
-            model._fusion_input_from_spatial_features(
-                visual, question, visual_mask, question_mask
-            ),
-            return_diagnostics=True,
+        logits, targets, attention_weights = model(
+            visual_features=visual,
+            visual_padding_mask=visual_mask,
+            question_features=question,
+            question_padding_mask=question_mask,
+            answers=answers,
+            return_attention_weights=True,
         )
-        if fusion_output.attention_weights is None:
+        if attention_weights is None:
             raise RuntimeError("Cross-Attention did not expose training attention weights")
-        ids = model.answer_embedding.tokenize(answers)
-        logits = model.decode(
-            ids[:, :-1],
-            fusion_output.memory,
-            memory_padding_mask=fusion_output.memory_padding_mask,
-        )
-        targets = ids[:, 1:]
         with torch.no_grad():
             transport = teacher.positive_transport(
                 visual, question, visual_mask, question_mask
@@ -226,7 +236,7 @@ def train_distillation_epoch(
         vqa_loss = criterion(logits.transpose(1, 2), targets)
         distill_loss = ot_attention_distillation_loss(
             transport.plan,
-            fusion_output.attention_weights,
+            attention_weights,
             question_mask,
             visual_mask,
             minimum_mass=teacher.config.minimum_mass,
@@ -244,7 +254,7 @@ def train_distillation_epoch(
         optimizer.step()
         scheduler.step()
 
-        count_tokens = targets.ne(model.pad_token_id).sum().item()
+        count_tokens = targets.ne(base_model.pad_token_id).sum().item()
         count = len(answers)
         total_vqa += vqa_loss.item() * count_tokens
         total_distill += distill_loss.item() * count
@@ -253,12 +263,28 @@ def train_distillation_epoch(
         tokens += count_tokens
         examples += count
         losses.append(loss.item())
-        hypotheses = model.answers_from_ids(logits.detach().argmax(-1))
+        hypotheses = base_model.answers_from_ids(logits.detach().argmax(-1))
         em, f1 = compute_em_and_f1(answers, hypotheses)
         total_em += em * count
         total_f1 += f1 * count
     if not examples:
         raise ValueError("Distillation training dataset is empty")
+    loss_sum = sum(losses)
+    loss_count = len(losses)
+    if distributed is not None:
+        (
+            total_vqa, total_distill, total_transport_mass,
+            total_transport_convergence, total_em, total_f1,
+            examples, tokens, loss_sum, loss_count,
+        ) = reduce_totals(
+            [
+                total_vqa, total_distill, total_transport_mass,
+                total_transport_convergence, total_em, total_f1,
+                examples, tokens, loss_sum, loss_count,
+            ],
+            distributed,
+        )
+        losses = [loss_sum / max(loss_count, 1)]
     diagnostics = {
         "vqa_loss": total_vqa / max(tokens, 1),
         "ot_distill_loss": total_distill / examples,

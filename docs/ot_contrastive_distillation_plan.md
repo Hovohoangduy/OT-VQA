@@ -314,6 +314,7 @@ Initial values:
 | Contrastive temperature | 0.07 |
 | `lambda_nce` | 0.05 |
 | `lambda_distill` | 0.02 |
+| Alignment-adapter learning rate | 0.0001 |
 | OT dimension | 128 |
 | Sinkhorn iterations | 20 |
 | UOT visual/question `tau` | 0.5 / 0.5 |
@@ -340,7 +341,7 @@ For five epochs:
 
 - freeze ViT, BERT, Cross-Attention, decoder, and answer head;
 - train only the visual/text adapters;
-- optimize only `L_OT-NCE`;
+- optimize the unscaled `L_OT-NCE` with the dedicated alignment-adapter learning rate;
 - evaluate positive/negative score margin and bidirectional retrieval accuracy.
 
 Proceed to distillation only when:

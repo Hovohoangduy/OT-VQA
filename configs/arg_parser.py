@@ -58,6 +58,10 @@ def get_args(argv=None):
         ),
     )
     parser.add_argument("--alignment_warmup_epochs", type=int, default=5)
+    parser.add_argument(
+        "--ot_alignment_lr", type=float, default=1e-4,
+        help="Learning rate for the randomly initialized OT alignment adapters",
+    )
     parser.add_argument("--ot_alignment_dim", type=int, default=128)
     parser.add_argument("--ot_alignment_epsilon", type=float, default=0.1)
     parser.add_argument("--ot_alignment_tau_visual", type=float, default=0.5)

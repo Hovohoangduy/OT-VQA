@@ -8,7 +8,8 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import torch
 from torch import nn, optim
-from torch.utils.data import DataLoader
+from torch.nn.parallel import DistributedDataParallel
+from torch.utils.data import DataLoader, DistributedSampler
 from transformers import get_linear_schedule_with_warmup
 
 from configs.arg_parser import get_args
@@ -25,7 +26,11 @@ from utils.checkpoint import (
     restore_training_state, save_checkpoint,
 )
 from utils.data_processing import load_dataframe
-from utils.device import resolve_device, seed_everything
+from utils.device import seed_everything
+from utils.distributed import (
+    broadcast_object, cleanup_distributed, initialize_distributed,
+    reduce_totals, unwrap_model,
+)
 from utils.feature_cache import FeatureCacheDataset, collate_feature_cache
 from utils.metrics import compute_em_and_f1
 from utils.ot_alignment_training import (
@@ -38,11 +43,12 @@ from utils.vqa_dataset import VQADataset, resolve_image_root
 def _forward_batch(model, batch, device, diagnostics=False):
     if isinstance(batch, dict):
         answers = batch["answers"]
-        result = model.forward_from_features(
-            batch["image_features"].to(device),
-            batch["question_features"].to(device),
-            batch["question_padding_mask"].to(device),
-            answers, return_diagnostics=diagnostics,
+        result = model(
+            image_features=batch["image_features"].to(device),
+            question_features=batch["question_features"].to(device),
+            question_padding_mask=batch["question_padding_mask"].to(device),
+            answers=answers,
+            return_diagnostics=diagnostics,
         )
     else:
         anno_ids, images, questions, answers = batch
@@ -53,9 +59,10 @@ def _forward_batch(model, batch, device, diagnostics=False):
 
 def train(model, train_loader, num_epochs, optimizer, scheduler, criterion,
           vocab_swap=None, device=None, diagnostics=False, epoch_offset=0,
-          total_epochs=None, gradient_clip=None):
+          total_epochs=None, gradient_clip=None, distributed=None):
     """Run teacher-forced optimization; generation is reserved for validation."""
     device = device or next(model.parameters()).device
+    base_model = unwrap_model(model)
     losses, em_scores, f1_scores = [], [], []
     if len(train_loader) == 0:
         raise ValueError("Training dataset is empty")
@@ -103,18 +110,26 @@ def train(model, train_loader, num_epochs, optimizer, scheduler, criterion,
                 )
             optimizer.step()
             scheduler.step()
-            batch_tokens = targets.ne(model.pad_token_id).sum().item()
+            batch_tokens = targets.ne(base_model.pad_token_id).sum().item()
             total_loss += loss.item() * batch_tokens
             tokens += batch_tokens
             losses.append(loss.item())
-            hypotheses = model.answers_from_ids(logits.detach().argmax(-1))
+            hypotheses = base_model.answers_from_ids(logits.detach().argmax(-1))
             em, f1 = compute_em_and_f1(answers, hypotheses)
             count = len(answers)
             total_em += em * count
             total_f1 += f1 * count
             examples += count
-            if (batch_idx + 1) % 2000 == 0:
+            if (batch_idx + 1) % 2000 == 0 and (
+                distributed is None or distributed.is_main
+            ):
                 print(f"Epoch {displayed_epoch}, batch {batch_idx + 1}: loss={loss.item():.4f}")
+        if distributed is not None:
+            total_loss, total_em, total_f1, examples, tokens = reduce_totals(
+                [total_loss, total_em, total_f1, examples, tokens], distributed
+            )
+            if distributed.enabled:
+                losses = [total_loss / max(tokens, 1)]
         em_scores.append(total_em / examples)
         f1_scores.append(total_f1 / examples)
         message = (f"Epoch {displayed_epoch}/{displayed_total}: "
@@ -124,27 +139,49 @@ def train(model, train_loader, num_epochs, optimizer, scheduler, criterion,
             means = {key: sum(row[key] for row in diagnostic_rows) / len(diagnostic_rows)
                      for key in diagnostic_rows[0]}
             message += ", OT " + ", ".join(f"{key}={value:.4g}" for key, value in means.items())
-        print(message)
+        if distributed is None or distributed.is_main:
+            print(message)
     return losses, em_scores, f1_scores
 
 
-def _make_loader(args, split, shuffle, text_model, image_model):
+def _make_loader(args, split, shuffle, text_model, image_model, distributed=None):
     csv_path = getattr(args, f"{split}_csv_path")
     if args.feature_cache:
         candidate = Path(args.feature_cache) / split
         cache_path = candidate if (candidate / "manifest.json").is_file() else Path(args.feature_cache)
-        cache = FeatureCacheDataset(cache_path, csv_path, text_model, image_model)
-        return DataLoader(cache, batch_size=args.batch_size, shuffle=shuffle,
-                          collate_fn=collate_feature_cache)
-    frame = load_dataframe(csv_path)
-    image_path = resolve_image_root(
-        frame,
-        args.img_path,
-        split,
-        override=getattr(args, f"{split}_img_path"),
+        dataset = FeatureCacheDataset(cache_path, csv_path, text_model, image_model)
+        collate_fn = collate_feature_cache
+    else:
+        frame = load_dataframe(csv_path)
+        image_path = resolve_image_root(
+            frame,
+            args.img_path,
+            split,
+            override=getattr(args, f"{split}_img_path"),
+        )
+        dataset = VQADataset(frame, transform=Config.transforms, img_path=image_path)
+        collate_fn = None
+    sampler = None
+    if distributed is not None and distributed.enabled and split == "train":
+        sampler = DistributedSampler(
+            dataset,
+            num_replicas=distributed.world_size,
+            rank=distributed.rank,
+            shuffle=shuffle,
+            seed=args.seed,
+        )
+    return DataLoader(
+        dataset,
+        batch_size=args.batch_size,
+        shuffle=shuffle and sampler is None,
+        sampler=sampler,
+        collate_fn=collate_fn,
     )
-    dataset = VQADataset(frame, transform=Config.transforms, img_path=image_path)
-    return DataLoader(dataset, batch_size=args.batch_size, shuffle=shuffle)
+
+
+def _set_loader_epoch(loader, epoch):
+    if isinstance(loader.sampler, DistributedSampler):
+        loader.sampler.set_epoch(epoch)
 
 
 def _fusion_config_from_args(args):
@@ -217,9 +254,11 @@ def _run_ot_alignment_training(
     image_model,
     device,
     resume,
+    distributed,
 ):
     """Run Stage 1 teacher warm-up and Stage 2 student distillation."""
-    if model.fusion_type != "cross_attention":
+    base_model = unwrap_model(model)
+    if base_model.fusion_type != "cross_attention":
         raise ValueError(
             "ot_contrastive_distill requires --fusion cross_attention; "
             "runtime OT fusion must remain disabled"
@@ -233,6 +272,7 @@ def _run_ot_alignment_training(
         distill_warmup_epochs = int(saved_alignment["ot_distill_warmup_epochs"])
         distill_target_weight = float(saved_alignment["ot_distill_weight"])
         contrastive_weight = float(saved_alignment["ot_contrastive_weight"])
+        alignment_lr = float(saved_alignment.get("ot_alignment_lr", 1e-4))
         queue_size = int(saved_alignment["ot_negative_queue_size"])
         training_seed = int(saved_alignment.get("seed", args.seed))
     else:
@@ -241,12 +281,14 @@ def _run_ot_alignment_training(
         distill_warmup_epochs = args.ot_distill_warmup_epochs
         distill_target_weight = args.ot_distill_weight
         contrastive_weight = args.ot_contrastive_weight
+        alignment_lr = args.ot_alignment_lr
         queue_size = args.ot_negative_queue_size
         training_seed = args.seed
     alignment_config = {
         "alignment_mode": "ot_contrastive_distill",
         "alignment_warmup_epochs": warmup_epochs,
         "ot_contrastive_weight": contrastive_weight,
+        "ot_alignment_lr": alignment_lr,
         "ot_distill_weight": distill_target_weight,
         "ot_distill_warmup_epochs": distill_warmup_epochs,
         "ot_negative_queue_size": queue_size,
@@ -259,22 +301,36 @@ def _run_ot_alignment_training(
         raise ValueError("Alignment warm-up and negative queue must be enabled")
     if distill_target_weight < 0:
         raise ValueError("OT distillation weight cannot be negative")
+    if alignment_lr <= 0:
+        raise ValueError("OT alignment learning rate must be positive")
 
-    teacher = OTContrastiveAligner(
-        model.image_model.hidden_size,
-        model.question_encoder.hidden_size,
+    teacher_base = OTContrastiveAligner(
+        base_model.image_model.hidden_size,
+        base_model.question_encoder.hidden_size,
         teacher_config,
     ).to(device)
+    teacher = (
+        DistributedDataParallel(
+            teacher_base,
+            device_ids=[distributed.local_rank],
+            output_device=distributed.local_rank,
+            broadcast_buffers=False,
+        )
+        if distributed.enabled else teacher_base
+    )
     queue = AlignmentNegativeQueue(queue_size)
     student_trainability = {
-        name: parameter.requires_grad for name, parameter in model.named_parameters()
+        name: parameter.requires_grad for name, parameter in base_model.named_parameters()
     }
-    optimizer_parameters = [
+    student_parameters = [
         parameter for parameter in model.parameters() if parameter.requires_grad
-    ] + list(teacher.parameters())
+    ]
+    student_lr = args.lr if args.lr is not None else Config.lr
     optimizer = optim.AdamW(
-        optimizer_parameters,
-        lr=args.lr if args.lr is not None else Config.lr,
+        [
+            {"params": student_parameters, "lr": student_lr},
+            {"params": list(teacher.parameters()), "lr": alignment_lr},
+        ],
         weight_decay=args.weight_decay,
     )
     total_epochs = warmup_epochs + args.epochs
@@ -296,9 +352,9 @@ def _run_ot_alignment_training(
     restored_stage = None
     if resume is not None:
         start_epoch, global_step, best_metric = restore_training_state(
-            resume, model, optimizer, scheduler
+            resume, base_model, optimizer, scheduler
         )
-        restored_stage = restore_alignment_state(resume, teacher, queue)
+        restored_stage = restore_alignment_state(resume, teacher_base, queue)
         epochs_without_improvement = int(resume.get("epochs_without_improvement", 0))
         if (
             start_epoch >= warmup_epochs
@@ -312,18 +368,21 @@ def _run_ot_alignment_training(
         raise ValueError("Resume checkpoint already reached the requested staged epoch count")
 
     destination = Path(args.model_path)
-    destination.mkdir(parents=True, exist_ok=True)
+    if distributed.is_main:
+        destination.mkdir(parents=True, exist_ok=True)
+    distributed.barrier()
     metrics_path = destination / "metrics.jsonl"
-    if resume is None:
+    if resume is None and distributed.is_main:
         metrics_path.write_text("", encoding="utf-8")
     history = []
     from test import evaluation
 
     for epoch in range(start_epoch, total_epochs):
+        _set_loader_epoch(train_loader, epoch)
         in_warmup = epoch < warmup_epochs
         if in_warmup:
-            _set_requires_grad(model, {})
-            teacher.requires_grad_(True)
+            _set_requires_grad(base_model, {})
+            teacher_base.requires_grad_(True)
             train_metrics = train_alignment_epoch(
                 model,
                 teacher,
@@ -333,10 +392,18 @@ def _run_ot_alignment_training(
                 queue,
                 device,
                 gradient_clip=args.gradient_clip or None,
-                contrastive_weight=contrastive_weight,
+                # Stage 1 optimizes the complete OT-NCE objective. The
+                # contrastive weight is reserved for optional joint refinement.
+                contrastive_weight=1.0,
+                distributed=distributed,
             )
             global_step += len(train_loader)
-            val_metrics = evaluate_alignment(model, teacher, dev_loader, device)
+            distributed.barrier()
+            val_metrics = (
+                evaluate_alignment(base_model, teacher_base, dev_loader, device)
+                if distributed.is_main else None
+            )
+            val_metrics = broadcast_object(val_metrics, distributed)
             gate_passed = None
             gate_reason = ""
             if epoch + 1 == warmup_epochs:
@@ -346,58 +413,62 @@ def _run_ot_alignment_training(
             row = {
                 "epoch": epoch + 1,
                 "stage": "alignment_warmup",
-                "learning_rate": scheduler.get_last_lr()[0],
+                "learning_rate": scheduler.get_last_lr()[1],
+                "student_learning_rate": scheduler.get_last_lr()[0],
             }
             row.update({f"train_{key}": value for key, value in train_metrics.items()})
             row.update({f"val_{key}": value for key, value in val_metrics.items()})
-            history.append(row)
-            with metrics_path.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(row) + "\n")
-            save_checkpoint(
-                destination / "last_training.pt",
-                model=model,
-                text_model=text_model,
-                image_model=image_model,
-                optimizer=optimizer,
-                scheduler=scheduler,
-                epoch=epoch + 1,
-                global_step=global_step,
-                best_metric=best_metric,
-                epochs_without_improvement=epochs_without_improvement,
-                format_version=4,
-                alignment_teacher=teacher,
-                alignment_config=alignment_config,
-                negative_queue=queue,
-                training_stage={
-                    "phase": "alignment_warmup",
-                    "warmup_complete": epoch + 1 >= warmup_epochs,
-                    "gate_passed": gate_passed,
-                    "gate_reason": gate_reason,
-                },
-            )
-            print(
-                f"Alignment epoch {epoch + 1}/{warmup_epochs}: "
-                f"loss={train_metrics['ot_nce_loss']:.4f}, "
-                f"val margin={val_metrics['ot_score_margin']:.4f}, "
-                f"I2Q={val_metrics['ot_i2q_accuracy']:.3f}, "
-                f"Q2I={val_metrics['ot_q2i_accuracy']:.3f}"
-            )
+            if distributed.is_main:
+                history.append(row)
+                with metrics_path.open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(row) + "\n")
+                save_checkpoint(
+                    destination / "last_training.pt",
+                    model=base_model,
+                    text_model=text_model,
+                    image_model=image_model,
+                    optimizer=optimizer,
+                    scheduler=scheduler,
+                    epoch=epoch + 1,
+                    global_step=global_step,
+                    best_metric=best_metric,
+                    epochs_without_improvement=epochs_without_improvement,
+                    format_version=4,
+                    alignment_teacher=teacher_base,
+                    alignment_config=alignment_config,
+                    negative_queue=queue,
+                    training_stage={
+                        "phase": "alignment_warmup",
+                        "warmup_complete": epoch + 1 >= warmup_epochs,
+                        "gate_passed": gate_passed,
+                        "gate_reason": gate_reason,
+                    },
+                )
+                print(
+                    f"Alignment epoch {epoch + 1}/{warmup_epochs}: "
+                    f"loss={train_metrics['ot_nce_loss']:.4f}, "
+                    f"val margin={val_metrics['ot_score_margin']:.4f}, "
+                    f"I2Q={val_metrics['ot_i2q_accuracy']:.3f}, "
+                    f"Q2I={val_metrics['ot_q2i_accuracy']:.3f}"
+                )
+            distributed.barrier()
             if epoch + 1 == warmup_epochs:
                 if not gate_passed:
                     raise RuntimeError(
                         "OT teacher failed the pre-distillation decision gate: "
                         + gate_reason
                     )
-                print("OT teacher passed the alignment gate; starting student distillation.")
+                if distributed.is_main:
+                    print("OT teacher passed the alignment gate; starting student distillation.")
             continue
 
-        _set_requires_grad(model, student_trainability)
-        teacher.requires_grad_(False)
+        _set_requires_grad(base_model, student_trainability)
+        teacher_base.requires_grad_(False)
         student_epoch = epoch - warmup_epochs
         if student_epoch == 0:
             # Make paired student training independent of random numbers consumed
             # while constructing and warming the training-only OT teacher.
-            seed_everything(training_seed)
+            seed_everything(training_seed + distributed.rank)
         if distill_warmup_epochs:
             distill_weight = distill_target_weight * min(
                 1.0, (student_epoch + 1) / distill_warmup_epochs
@@ -414,15 +485,21 @@ def _run_ot_alignment_training(
             device,
             distill_weight,
             gradient_clip=args.gradient_clip or None,
+            distributed=distributed,
         )
         global_step += len(train_loader)
-        validation = evaluation(
-            model,
-            dev_loader,
-            validation_criterion,
-            device=device,
-            diagnostics=args.diagnostics,
+        distributed.barrier()
+        validation = (
+            evaluation(
+                base_model,
+                dev_loader,
+                validation_criterion,
+                device=device,
+                diagnostics=args.diagnostics,
+            )
+            if distributed.is_main else None
         )
+        validation = broadcast_object(validation, distributed)
         val_loss, val_em, val_f1 = validation[:3]
         val_diagnostics = validation[3] if len(validation) > 3 else {}
         current = {"f1": val_f1, "loss": val_loss, "epoch": epoch + 1}
@@ -436,38 +513,39 @@ def _run_ot_alignment_training(
             epochs_without_improvement = 0
         else:
             epochs_without_improvement += 1
-        save_checkpoint(
-            destination / "last_training.pt",
-            model=model,
-            text_model=text_model,
-            image_model=image_model,
-            optimizer=optimizer,
-            scheduler=scheduler,
-            epoch=epoch + 1,
-            global_step=global_step,
-            best_metric=best_metric,
-            epochs_without_improvement=epochs_without_improvement,
-            format_version=4,
-            alignment_teacher=teacher,
-            alignment_config=alignment_config,
-            negative_queue=queue,
-            training_stage={
-                "phase": "distillation",
-                "warmup_complete": True,
-                "gate_passed": True,
-            },
-        )
-        if improved:
-            # Deployment artifact: student only, standard v3, and no OT teacher.
+        if distributed.is_main:
             save_checkpoint(
-                destination / "best.pt",
-                model=model,
+                destination / "last_training.pt",
+                model=base_model,
                 text_model=text_model,
                 image_model=image_model,
+                optimizer=optimizer,
+                scheduler=scheduler,
                 epoch=epoch + 1,
                 global_step=global_step,
                 best_metric=best_metric,
+                epochs_without_improvement=epochs_without_improvement,
+                format_version=4,
+                alignment_teacher=teacher_base,
+                alignment_config=alignment_config,
+                negative_queue=queue,
+                training_stage={
+                    "phase": "distillation",
+                    "warmup_complete": True,
+                    "gate_passed": True,
+                },
             )
+            if improved:
+                # Deployment artifact: student only, standard v3, and no OT teacher.
+                save_checkpoint(
+                    destination / "best.pt",
+                    model=base_model,
+                    text_model=text_model,
+                    image_model=image_model,
+                    epoch=epoch + 1,
+                    global_step=global_step,
+                    best_metric=best_metric,
+                )
         row = {
             "epoch": epoch + 1,
             "stage": "distillation",
@@ -483,26 +561,29 @@ def _run_ot_alignment_training(
         }
         row.update({f"train_{key}": value for key, value in train_diagnostics.items()})
         row.update({f"val_{key}": value for key, value in val_diagnostics.items()})
-        history.append(row)
-        with metrics_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(row) + "\n")
-        print(
-            f"Distillation epoch {student_epoch + 1}/{args.epochs}: "
-            f"loss={row['train_loss']:.4f}, KL={train_diagnostics['ot_distill_loss']:.4f}, "
-            f"generated val F1={val_f1:.4f}, weight={distill_weight:.4f}"
-        )
+        if distributed.is_main:
+            history.append(row)
+            with metrics_path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(row) + "\n")
+            print(
+                f"Distillation epoch {student_epoch + 1}/{args.epochs}: "
+                f"loss={row['train_loss']:.4f}, KL={train_diagnostics['ot_distill_loss']:.4f}, "
+                f"generated val F1={val_f1:.4f}, weight={distill_weight:.4f}"
+            )
+        distributed.barrier()
         if (
             args.early_stopping_patience
             and epochs_without_improvement >= args.early_stopping_patience
         ):
-            print(
-                f"Early stopping at staged epoch {epoch + 1}; best generated "
-                f"F1={best_metric['f1']:.4f}."
-            )
+            if distributed.is_main:
+                print(
+                    f"Early stopping at staged epoch {epoch + 1}; best generated "
+                    f"F1={best_metric['f1']:.4f}."
+                )
             break
 
     distillation_rows = [row for row in history if row["stage"] == "distillation"]
-    if distillation_rows:
+    if distillation_rows and distributed.is_main:
         plt.figure(figsize=(10, 6))
         plt.plot(
             [row["epoch"] for row in distillation_rows],
@@ -566,6 +647,7 @@ def main():
             args.ot_alignment_tau_question,
             args.ot_alignment_tolerance,
             args.ot_contrastive_temperature,
+            args.ot_alignment_lr,
         ) <= 0:
             raise ValueError("OT alignment regularization values must be positive")
         if min(args.ot_contrastive_weight, args.ot_distill_weight) < 0:
@@ -579,8 +661,14 @@ def main():
         gate_init=args.ot_san_gate_init,
     )
     seed_everything(args.seed)
-    device = resolve_device(args.device)
-    print(f"Training on device: {device}")
+    distributed = initialize_distributed(args.device)
+    device = distributed.device
+    if distributed.is_main:
+        suffix = (
+            f" with DistributedDataParallel ({distributed.world_size} GPUs)"
+            if distributed.enabled else ""
+        )
+        print(f"Training on device: {device}{suffix}")
 
     embeddings_file = None
     if args.feature_cache:
@@ -626,26 +714,44 @@ def main():
             # Common weights and common RNG state make paired baseline/OT runs
             # comparable even though their auxiliary modules differ.
             seed_everything(args.seed)
-    if args.feature_cache:
+    if args.feature_cache and distributed.is_main:
         print("[Model] Feature cache active: ViT and BERT backbones skipped (0 ViT / 0 BERT weights loaded).")
     if args.save_student_initialization:
-        save_checkpoint(
-            args.save_student_initialization,
-            model=model,
-            text_model=text_model,
-            image_model=image_model,
-        )
-        print(f"Saved common student initialization: {args.save_student_initialization}")
+        if distributed.is_main:
+            save_checkpoint(
+                args.save_student_initialization,
+                model=model,
+                text_model=text_model,
+                image_model=image_model,
+            )
+            print(f"Saved common student initialization: {args.save_student_initialization}")
+        distributed.barrier()
+        cleanup_distributed(distributed)
         return
 
-    train_loader = _make_loader(args, "train", True, text_model, image_model)
-    dev_loader = _make_loader(args, "dev", False, text_model, image_model)
+    train_loader = _make_loader(
+        args, "train", True, text_model, image_model, distributed
+    )
+    dev_loader = _make_loader(
+        args, "dev", False, text_model, image_model, distributed
+    )
     if not len(train_loader) or not len(dev_loader):
         raise ValueError("Training and development datasets must be non-empty")
+    base_model = model
+    if distributed.enabled:
+        model = DistributedDataParallel(
+            base_model,
+            device_ids=[distributed.local_rank],
+            output_device=distributed.local_rank,
+            broadcast_buffers=False,
+        )
+        # Give different workers independent dropout streams after DDP has
+        # synchronized the initial parameters.
+        seed_everything(args.seed + distributed.rank)
     train_criterion = nn.CrossEntropyLoss(
-        ignore_index=model.pad_token_id, label_smoothing=args.label_smoothing
+        ignore_index=base_model.pad_token_id, label_smoothing=args.label_smoothing
     )
-    validation_criterion = nn.CrossEntropyLoss(ignore_index=model.pad_token_id)
+    validation_criterion = nn.CrossEntropyLoss(ignore_index=base_model.pad_token_id)
     if args.alignment_mode == "ot_contrastive_distill":
         _run_ot_alignment_training(
             args,
@@ -658,7 +764,9 @@ def main():
             image_model,
             device,
             resume,
+            distributed,
         )
+        cleanup_distributed(distributed)
         return
     trainable_parameters = [parameter for parameter in model.parameters()
                             if parameter.requires_grad]
@@ -671,10 +779,11 @@ def main():
         lr=args.lr if args.lr is not None else Config.lr,
         weight_decay=args.weight_decay,
     )
-    print(
-        f"Parameters: total={total_parameter_count:,}, "
-        f"trainable={trainable_parameter_count:,}"
-    )
+    if distributed.is_main:
+        print(
+            f"Parameters: total={total_parameter_count:,}, "
+            f"trainable={trainable_parameter_count:,}"
+        )
     scheduler = get_linear_schedule_with_warmup(
         optimizer, num_warmup_steps=0, num_training_steps=len(train_loader) * args.epochs
     )
@@ -683,14 +792,16 @@ def main():
     epochs_without_improvement = 0
     if resume is not None:
         start_epoch, global_step, best_metric = restore_training_state(
-            resume, model, optimizer, scheduler
+            resume, base_model, optimizer, scheduler
         )
         epochs_without_improvement = int(resume.get("epochs_without_improvement", 0))
     if start_epoch >= args.epochs:
         raise ValueError("Resume checkpoint has already reached the requested epoch count")
 
     destination = Path(args.model_path)
-    destination.mkdir(parents=True, exist_ok=True)
+    if distributed.is_main:
+        destination.mkdir(parents=True, exist_ok=True)
+    distributed.barrier()
     metrics_path = destination / "metrics.jsonl"
     if best_metric is not None and "epoch" not in best_metric:
         # Version-3 checkpoints written before early stopping tracked the best
@@ -706,22 +817,29 @@ def main():
                 if (old_row.get("val_f1") == best_metric.get("f1") and
                         old_row.get("val_loss") == best_metric.get("loss")):
                     best_metric["epoch"] = old_row.get("epoch", "unknown")
-    if resume is None:
+    if resume is None and distributed.is_main:
         metrics_path.write_text("", encoding="utf-8")
     history = []
     from test import evaluation
     for epoch in range(start_epoch, args.epochs):
+        _set_loader_epoch(train_loader, epoch)
         losses, train_em, train_f1 = train(
             model, train_loader, 1, optimizer, scheduler, train_criterion,
             device=device, diagnostics=args.diagnostics,
             epoch_offset=epoch, total_epochs=args.epochs,
             gradient_clip=args.gradient_clip or None,
+            distributed=distributed,
         )
         global_step += len(train_loader)
-        validation = evaluation(
-            model, dev_loader, validation_criterion, device=device,
-            diagnostics=args.diagnostics,
+        distributed.barrier()
+        validation = (
+            evaluation(
+                base_model, dev_loader, validation_criterion, device=device,
+                diagnostics=args.diagnostics,
+            )
+            if distributed.is_main else None
         )
+        validation = broadcast_object(validation, distributed)
         val_loss, val_em, val_f1 = validation[:3]
         val_diagnostics = validation[3] if len(validation) > 3 else {}
         current = {"f1": val_f1, "loss": val_loss, "epoch": epoch + 1}
@@ -738,9 +856,11 @@ def main():
             epoch=epoch + 1, global_step=global_step, best_metric=best_metric,
             epochs_without_improvement=epochs_without_improvement,
         )
-        save_checkpoint(destination / "last.pt", **checkpoint_args)
-        if improved:
-            save_checkpoint(destination / "best.pt", **checkpoint_args)
+        if distributed.is_main:
+            checkpoint_args["model"] = base_model
+            save_checkpoint(destination / "last.pt", **checkpoint_args)
+            if improved:
+                save_checkpoint(destination / "best.pt", **checkpoint_args)
         row = {"epoch": epoch + 1, "train_loss": sum(losses) / len(losses),
                "train_em": train_em[-1], "train_f1": train_f1[-1],
                "val_loss": val_loss, "val_em": val_em, "val_f1": val_f1,
@@ -750,35 +870,40 @@ def main():
                "improved": improved,
                "epochs_without_improvement": epochs_without_improvement}
         row.update({f"val_{key}": value for key, value in val_diagnostics.items()})
-        history.append(row)
-        with metrics_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(row) + "\n")
-        print(f"Validation: loss={val_loss:.4f}, generated EM={val_em:.4f}, "
-              f"F1={val_f1:.4f}, best epoch={best_metric['epoch']}, "
-              f"patience={epochs_without_improvement}/{args.early_stopping_patience or 'off'}")
-        if val_diagnostics:
-            print(
-                "Validation diagnostics: "
-                f"unique predictions={val_diagnostics.get('unique_predictions', 0):g}, "
-                f"top prediction fraction={val_diagnostics.get('top_prediction_fraction', 0):.3f}, "
-                f"OT convergence={val_diagnostics.get('ot_convergence_rate', 0):.3f}, "
-                f"residual={val_diagnostics.get('ot_residual', 0):.5f}"
-            )
+        if distributed.is_main:
+            history.append(row)
+            with metrics_path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(row) + "\n")
+            print(f"Validation: loss={val_loss:.4f}, generated EM={val_em:.4f}, "
+                  f"F1={val_f1:.4f}, best epoch={best_metric['epoch']}, "
+                  f"patience={epochs_without_improvement}/{args.early_stopping_patience or 'off'}")
+            if val_diagnostics:
+                print(
+                    "Validation diagnostics: "
+                    f"unique predictions={val_diagnostics.get('unique_predictions', 0):g}, "
+                    f"top prediction fraction={val_diagnostics.get('top_prediction_fraction', 0):.3f}, "
+                    f"OT convergence={val_diagnostics.get('ot_convergence_rate', 0):.3f}, "
+                    f"residual={val_diagnostics.get('ot_residual', 0):.5f}"
+                )
+        distributed.barrier()
         if (args.early_stopping_patience and
                 epochs_without_improvement >= args.early_stopping_patience):
-            print(f"Early stopping at epoch {epoch + 1}; best checkpoint is epoch "
-                  f"{best_metric['epoch']} with generated F1={best_metric['f1']:.4f}.")
+            if distributed.is_main:
+                print(f"Early stopping at epoch {epoch + 1}; best checkpoint is epoch "
+                      f"{best_metric['epoch']} with generated F1={best_metric['f1']:.4f}.")
             break
 
-    plt.figure(figsize=(10, 6))
-    plt.plot([row["epoch"] for row in history], [row["val_em"] for row in history], label="Generated EM")
-    plt.plot([row["epoch"] for row in history], [row["val_f1"] for row in history], label="Generated F1")
-    plt.xlabel("Epoch")
-    plt.ylabel("Score")
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(destination / "evaluation_metrics_plot.png")
-    plt.close()
+    if distributed.is_main:
+        plt.figure(figsize=(10, 6))
+        plt.plot([row["epoch"] for row in history], [row["val_em"] for row in history], label="Generated EM")
+        plt.plot([row["epoch"] for row in history], [row["val_f1"] for row in history], label="Generated F1")
+        plt.xlabel("Epoch")
+        plt.ylabel("Score")
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(destination / "evaluation_metrics_plot.png")
+        plt.close()
+    cleanup_distributed(distributed)
 
 
 if __name__ == "__main__":

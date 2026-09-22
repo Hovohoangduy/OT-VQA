@@ -336,9 +336,68 @@ class VQAModel(nn.Module):
         return self.mlp(self.decoder(memory, target, blocked, cross_mask))
 
     def forward(
-        self, images, questions, answers=None, anno_ids=None, mask=True, mode='train',
-        max_len=Config.MAX_LEN_ANS, return_diagnostics=False,
+        self, images=None, questions=None, answers=None, anno_ids=None, mask=True,
+        mode='train', max_len=Config.MAX_LEN_ANS, return_diagnostics=False,
+        image_features=None, question_features=None, question_padding_mask=None,
+        visual_features=None, visual_padding_mask=None,
+        return_attention_weights=False,
     ):
+        if visual_features is not None:
+            if question_features is None or question_padding_mask is None:
+                raise ValueError(
+                    'Spatial visual features require question features and their padding mask'
+                )
+            if visual_padding_mask is None:
+                visual_padding_mask = torch.zeros(
+                    visual_features.shape[:2], dtype=torch.bool,
+                    device=visual_features.device,
+                )
+            fusion_output = self.fusion_module(
+                self._fusion_input_from_spatial_features(
+                    visual_features,
+                    question_features,
+                    visual_padding_mask,
+                    question_padding_mask,
+                ),
+                return_diagnostics=return_diagnostics or return_attention_weights,
+            )
+            ids = self.answer_embedding.tokenize(answers, max_len)
+            logits = self.decode(
+                ids[:, :-1],
+                fusion_output.memory,
+                causal=mask,
+                memory_padding_mask=fusion_output.memory_padding_mask,
+            )
+            if return_attention_weights:
+                return logits, ids[:, 1:], fusion_output.attention_weights
+            return logits, ids[:, 1:]
+        if image_features is not None:
+            if question_features is None or question_padding_mask is None:
+                raise ValueError(
+                    'Cached image features require question features and their padding mask'
+                )
+            encoded = self.encode_from_features(
+                image_features, question_features, question_padding_mask,
+                return_diagnostics or return_attention_weights,
+            )
+            memory, memory_mask, transport = self._unpack_encoder_output(encoded)
+            if answers is None:
+                generated = self._generate_from_memory(memory, memory_mask, max_len)
+                return generated
+            ids = self.answer_embedding.tokenize(answers, max_len)
+            logits = self.decode(
+                ids[:, :-1], memory, causal=mask,
+                memory_padding_mask=memory_mask,
+            )
+            if return_attention_weights:
+                attention = (
+                    encoded.fusion_output.attention_weights
+                    if encoded.fusion_output is not None else None
+                )
+                return logits, ids[:, 1:], attention
+            if return_diagnostics:
+                return logits, ids[:, 1:], transport
+            return logits, ids[:, 1:]
         if mode not in {'train', 'eval', 'test', 'infer', 'generate'}:
             raise ValueError(f'Unknown mode: {mode}')
         if mode in {'test', 'infer', 'generate'} or answers is None:

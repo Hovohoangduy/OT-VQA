@@ -191,6 +191,28 @@ Cross-Attention layer. `best.pt` contains only the non-OT student, so `test.py` 
 resumable artifact containing the teacher, queue, optimizer, scheduler, RNG state, and
 current training stage.
 
+For one model trained across two CUDA GPUs, launch `train.py` with `torchrun`. The
+`--batch_size` value is per GPU, so `--batch_size 4` gives an effective batch of eight:
+
+```bash
+torchrun --standalone --nproc_per_node=2 train.py \
+  --device cuda \
+  --fusion cross_attention \
+  --alignment_mode ot_contrastive_distill \
+  --epochs 100 \
+  --batch_size 4 \
+  --ot_alignment_lr 0.0001 \
+  --train_csv_path data/gqa_dataset/train.csv \
+  --dev_csv_path data/gqa_dataset/val.csv \
+  --img_path data/gqa_dataset/images \
+  --model_path data/ot_distilled_cross_attention_ddp \
+  --seed 42
+```
+
+`torchrun` is detected automatically. Training batches are sharded between GPUs,
+gradients and training metrics are synchronized, and only rank zero runs full validation
+and writes checkpoints.
+
 First create one common student initialization per seed for a fair paired baseline:
 
 ```bash
@@ -219,6 +241,7 @@ python train.py \
   --student_init_checkpoint data/shared_init/cross_attention_seed1105.pt \
   --feature_cache data/gqa_cache \
   --alignment_warmup_epochs 5 \
+  --ot_alignment_lr 0.0001 \
   --ot_alignment_dim 128 \
   --ot_alignment_iterations 20 \
   --ot_negative_count 3 \
