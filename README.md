@@ -178,6 +178,80 @@ RUN_ROOT=results/aligned_cross_attention \
 scripts/run_fusion_benchmark.sh
 ```
 
+### Training-only OT alignment and attention distillation
+
+The accuracy-oriented OT design in
+[`docs/ot_contrastive_distillation_plan.md`](docs/ot_contrastive_distillation_plan.md)
+keeps native Cross-Attention as the deployed model. During Stage 1, a cosine-cost UOT
+teacher learns matched image/question retrieval with hard-negative InfoNCE. The teacher
+must pass the validation retrieval and collapse checks before Stage 2 begins. Stage 2
+freezes the teacher and softly distills its positive transport plan into the final native
+Cross-Attention layer. `best.pt` contains only the non-OT student, so `test.py` and
+`predict.py` have no Sinkhorn inference cost. `last_training.pt` is the version-4
+resumable artifact containing the teacher, queue, optimizer, scheduler, RNG state, and
+current training stage.
+
+First create one common student initialization per seed for a fair paired baseline:
+
+```bash
+python train.py \
+  --fusion cross_attention \
+  --feature_cache data/gqa_cache \
+  --seed 1105 \
+  --save_student_initialization data/shared_init/cross_attention_seed1105.pt
+```
+
+Train the native baseline from that initialization, then train the OT-distilled model
+from the same weights:
+
+```bash
+python train.py \
+  --fusion cross_attention \
+  --student_init_checkpoint data/shared_init/cross_attention_seed1105.pt \
+  --feature_cache data/gqa_cache \
+  --epochs 50 \
+  --seed 1105 \
+  --model_path data/cross_attention_seed1105
+
+python train.py \
+  --fusion cross_attention \
+  --alignment_mode ot_contrastive_distill \
+  --student_init_checkpoint data/shared_init/cross_attention_seed1105.pt \
+  --feature_cache data/gqa_cache \
+  --alignment_warmup_epochs 5 \
+  --ot_alignment_dim 128 \
+  --ot_alignment_iterations 20 \
+  --ot_negative_count 3 \
+  --ot_negative_queue_size 32 \
+  --ot_contrastive_temperature 0.07 \
+  --ot_distill_weight 0.02 \
+  --ot_distill_warmup_epochs 5 \
+  --epochs 50 \
+  --seed 1105 \
+  --model_path data/ot_distilled_cross_attention_seed1105
+```
+
+`--epochs` counts student-distillation epochs; the alignment warm-up runs before them.
+Resume the full staged state and evaluate the student-only checkpoint with:
+
+```bash
+python train.py \
+  --alignment_mode ot_contrastive_distill \
+  --resume data/ot_distilled_cross_attention_seed1105/last_training.pt \
+  --feature_cache data/gqa_cache \
+  --epochs 50 \
+  --model_path data/ot_distilled_cross_attention_seed1105
+
+python test.py \
+  --checkpoint data/ot_distilled_cross_attention_seed1105/best.pt \
+  --feature_cache data/gqa_cache/dev \
+  --split dev --diagnostics
+```
+
+Repeat the paired commands with seeds `1105`, `1106`, and `1107`. Do not report an OT
+accuracy improvement unless the three-seed mean and untouched test split satisfy the
+acceptance criteria in the plan.
+
 Run the script from the repository root. Make it executable once, then check that every
 requested fusion name is available without starting training:
 

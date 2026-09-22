@@ -14,14 +14,24 @@ from transformers import get_linear_schedule_with_warmup
 from configs.arg_parser import get_args
 from configs.config import Config
 from model.fusion_methods import parse_fusion_spec
+from model.ot_alignment import (
+    AlignmentNegativeQueue, OTAlignmentConfig, OTContrastiveAligner,
+)
 from model.optimal_transport import OTConfig
 from model.ot_san import OTSANConfig
 from model.vqa_model import VQAModel
-from utils.checkpoint import read_checkpoint, restore_training_state, save_checkpoint
+from utils.checkpoint import (
+    load_student_initialization, read_checkpoint, restore_alignment_state,
+    restore_training_state, save_checkpoint,
+)
 from utils.data_processing import load_dataframe
 from utils.device import resolve_device, seed_everything
 from utils.feature_cache import FeatureCacheDataset, collate_feature_cache
 from utils.metrics import compute_em_and_f1
+from utils.ot_alignment_training import (
+    evaluate_alignment, teacher_passes_gate, train_alignment_epoch,
+    train_distillation_epoch,
+)
 from utils.vqa_dataset import VQADataset, resolve_image_root
 
 
@@ -178,6 +188,340 @@ def _fusion_config_from_args(args):
     return None
 
 
+def _alignment_config_from_args(args):
+    return OTAlignmentConfig(
+        ot_dim=args.ot_alignment_dim,
+        epsilon=args.ot_alignment_epsilon,
+        tau_visual=args.ot_alignment_tau_visual,
+        tau_question=args.ot_alignment_tau_question,
+        max_iterations=args.ot_alignment_iterations,
+        tolerance=args.ot_alignment_tolerance,
+        negative_count=args.ot_negative_count,
+        contrastive_temperature=args.ot_contrastive_temperature,
+    )
+
+
+def _set_requires_grad(module, enabled_by_name):
+    for name, parameter in module.named_parameters():
+        parameter.requires_grad_(bool(enabled_by_name.get(name, False)))
+
+
+def _run_ot_alignment_training(
+    args,
+    model,
+    train_loader,
+    dev_loader,
+    train_criterion,
+    validation_criterion,
+    text_model,
+    image_model,
+    device,
+    resume,
+):
+    """Run Stage 1 teacher warm-up and Stage 2 student distillation."""
+    if model.fusion_type != "cross_attention":
+        raise ValueError(
+            "ot_contrastive_distill requires --fusion cross_attention; "
+            "runtime OT fusion must remain disabled"
+        )
+    if resume is not None and resume.get("format_version") != 4:
+        raise ValueError("OT alignment training can resume only from version-4 last_training.pt")
+    saved_alignment = resume.get("alignment_config") if resume is not None else None
+    if saved_alignment:
+        teacher_config = OTAlignmentConfig.from_dict(saved_alignment["teacher"])
+        warmup_epochs = int(saved_alignment["alignment_warmup_epochs"])
+        distill_warmup_epochs = int(saved_alignment["ot_distill_warmup_epochs"])
+        distill_target_weight = float(saved_alignment["ot_distill_weight"])
+        contrastive_weight = float(saved_alignment["ot_contrastive_weight"])
+        queue_size = int(saved_alignment["ot_negative_queue_size"])
+        training_seed = int(saved_alignment.get("seed", args.seed))
+    else:
+        teacher_config = _alignment_config_from_args(args)
+        warmup_epochs = args.alignment_warmup_epochs
+        distill_warmup_epochs = args.ot_distill_warmup_epochs
+        distill_target_weight = args.ot_distill_weight
+        contrastive_weight = args.ot_contrastive_weight
+        queue_size = args.ot_negative_queue_size
+        training_seed = args.seed
+    alignment_config = {
+        "alignment_mode": "ot_contrastive_distill",
+        "alignment_warmup_epochs": warmup_epochs,
+        "ot_contrastive_weight": contrastive_weight,
+        "ot_distill_weight": distill_target_weight,
+        "ot_distill_warmup_epochs": distill_warmup_epochs,
+        "ot_negative_queue_size": queue_size,
+        "seed": training_seed,
+        "teacher": teacher_config.to_dict(),
+    }
+    if min(warmup_epochs, distill_warmup_epochs, queue_size) < 0:
+        raise ValueError("Alignment epoch counts and queue size cannot be negative")
+    if warmup_epochs < 1 or queue_size < 1:
+        raise ValueError("Alignment warm-up and negative queue must be enabled")
+    if distill_target_weight < 0:
+        raise ValueError("OT distillation weight cannot be negative")
+
+    teacher = OTContrastiveAligner(
+        model.image_model.hidden_size,
+        model.question_encoder.hidden_size,
+        teacher_config,
+    ).to(device)
+    queue = AlignmentNegativeQueue(queue_size)
+    student_trainability = {
+        name: parameter.requires_grad for name, parameter in model.named_parameters()
+    }
+    optimizer_parameters = [
+        parameter for parameter in model.parameters() if parameter.requires_grad
+    ] + list(teacher.parameters())
+    optimizer = optim.AdamW(
+        optimizer_parameters,
+        lr=args.lr if args.lr is not None else Config.lr,
+        weight_decay=args.weight_decay,
+    )
+    total_epochs = warmup_epochs + args.epochs
+    alignment_steps = len(train_loader) * warmup_epochs
+    student_steps = len(train_loader) * args.epochs
+    # Keep the student's base learning rate intact while only the teacher is
+    # active, then apply the same full linear schedule used by its baseline.
+    scheduler = torch.optim.lr_scheduler.LambdaLR(
+        optimizer,
+        lambda step: (
+            1.0
+            if step <= alignment_steps
+            else max(0.0, (alignment_steps + student_steps - step) / student_steps)
+        ),
+    )
+    start_epoch = global_step = 0
+    best_metric = None
+    epochs_without_improvement = 0
+    restored_stage = None
+    if resume is not None:
+        start_epoch, global_step, best_metric = restore_training_state(
+            resume, model, optimizer, scheduler
+        )
+        restored_stage = restore_alignment_state(resume, teacher, queue)
+        epochs_without_improvement = int(resume.get("epochs_without_improvement", 0))
+        if (
+            start_epoch >= warmup_epochs
+            and not (restored_stage or {}).get("gate_passed", False)
+        ):
+            raise RuntimeError(
+                "Cannot resume distillation: the saved OT teacher did not pass "
+                "the alignment decision gate"
+            )
+    if start_epoch >= total_epochs:
+        raise ValueError("Resume checkpoint already reached the requested staged epoch count")
+
+    destination = Path(args.model_path)
+    destination.mkdir(parents=True, exist_ok=True)
+    metrics_path = destination / "metrics.jsonl"
+    if resume is None:
+        metrics_path.write_text("", encoding="utf-8")
+    history = []
+    from test import evaluation
+
+    for epoch in range(start_epoch, total_epochs):
+        in_warmup = epoch < warmup_epochs
+        if in_warmup:
+            _set_requires_grad(model, {})
+            teacher.requires_grad_(True)
+            train_metrics = train_alignment_epoch(
+                model,
+                teacher,
+                train_loader,
+                optimizer,
+                scheduler,
+                queue,
+                device,
+                gradient_clip=args.gradient_clip or None,
+                contrastive_weight=contrastive_weight,
+            )
+            global_step += len(train_loader)
+            val_metrics = evaluate_alignment(model, teacher, dev_loader, device)
+            gate_passed = None
+            gate_reason = ""
+            if epoch + 1 == warmup_epochs:
+                gate_passed, gate_reason = teacher_passes_gate(
+                    val_metrics, teacher_config.negative_count
+                )
+            row = {
+                "epoch": epoch + 1,
+                "stage": "alignment_warmup",
+                "learning_rate": scheduler.get_last_lr()[0],
+            }
+            row.update({f"train_{key}": value for key, value in train_metrics.items()})
+            row.update({f"val_{key}": value for key, value in val_metrics.items()})
+            history.append(row)
+            with metrics_path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(row) + "\n")
+            save_checkpoint(
+                destination / "last_training.pt",
+                model=model,
+                text_model=text_model,
+                image_model=image_model,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                epoch=epoch + 1,
+                global_step=global_step,
+                best_metric=best_metric,
+                epochs_without_improvement=epochs_without_improvement,
+                format_version=4,
+                alignment_teacher=teacher,
+                alignment_config=alignment_config,
+                negative_queue=queue,
+                training_stage={
+                    "phase": "alignment_warmup",
+                    "warmup_complete": epoch + 1 >= warmup_epochs,
+                    "gate_passed": gate_passed,
+                    "gate_reason": gate_reason,
+                },
+            )
+            print(
+                f"Alignment epoch {epoch + 1}/{warmup_epochs}: "
+                f"loss={train_metrics['ot_nce_loss']:.4f}, "
+                f"val margin={val_metrics['ot_score_margin']:.4f}, "
+                f"I2Q={val_metrics['ot_i2q_accuracy']:.3f}, "
+                f"Q2I={val_metrics['ot_q2i_accuracy']:.3f}"
+            )
+            if epoch + 1 == warmup_epochs:
+                if not gate_passed:
+                    raise RuntimeError(
+                        "OT teacher failed the pre-distillation decision gate: "
+                        + gate_reason
+                    )
+                print("OT teacher passed the alignment gate; starting student distillation.")
+            continue
+
+        _set_requires_grad(model, student_trainability)
+        teacher.requires_grad_(False)
+        student_epoch = epoch - warmup_epochs
+        if student_epoch == 0:
+            # Make paired student training independent of random numbers consumed
+            # while constructing and warming the training-only OT teacher.
+            seed_everything(training_seed)
+        if distill_warmup_epochs:
+            distill_weight = distill_target_weight * min(
+                1.0, (student_epoch + 1) / distill_warmup_epochs
+            )
+        else:
+            distill_weight = distill_target_weight
+        losses, train_em, train_f1, train_diagnostics = train_distillation_epoch(
+            model,
+            teacher,
+            train_loader,
+            optimizer,
+            scheduler,
+            train_criterion,
+            device,
+            distill_weight,
+            gradient_clip=args.gradient_clip or None,
+        )
+        global_step += len(train_loader)
+        validation = evaluation(
+            model,
+            dev_loader,
+            validation_criterion,
+            device=device,
+            diagnostics=args.diagnostics,
+        )
+        val_loss, val_em, val_f1 = validation[:3]
+        val_diagnostics = validation[3] if len(validation) > 3 else {}
+        current = {"f1": val_f1, "loss": val_loss, "epoch": epoch + 1}
+        improved = (
+            best_metric is None
+            or val_f1 > best_metric["f1"]
+            or (val_f1 == best_metric["f1"] and val_loss < best_metric["loss"])
+        )
+        if improved:
+            best_metric = current
+            epochs_without_improvement = 0
+        else:
+            epochs_without_improvement += 1
+        save_checkpoint(
+            destination / "last_training.pt",
+            model=model,
+            text_model=text_model,
+            image_model=image_model,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            epoch=epoch + 1,
+            global_step=global_step,
+            best_metric=best_metric,
+            epochs_without_improvement=epochs_without_improvement,
+            format_version=4,
+            alignment_teacher=teacher,
+            alignment_config=alignment_config,
+            negative_queue=queue,
+            training_stage={
+                "phase": "distillation",
+                "warmup_complete": True,
+                "gate_passed": True,
+            },
+        )
+        if improved:
+            # Deployment artifact: student only, standard v3, and no OT teacher.
+            save_checkpoint(
+                destination / "best.pt",
+                model=model,
+                text_model=text_model,
+                image_model=image_model,
+                epoch=epoch + 1,
+                global_step=global_step,
+                best_metric=best_metric,
+            )
+        row = {
+            "epoch": epoch + 1,
+            "stage": "distillation",
+            "train_loss": sum(losses) / len(losses),
+            "train_em": train_em,
+            "train_f1": train_f1,
+            "val_loss": val_loss,
+            "val_em": val_em,
+            "val_f1": val_f1,
+            "learning_rate": scheduler.get_last_lr()[0],
+            "improved": improved,
+            "epochs_without_improvement": epochs_without_improvement,
+        }
+        row.update({f"train_{key}": value for key, value in train_diagnostics.items()})
+        row.update({f"val_{key}": value for key, value in val_diagnostics.items()})
+        history.append(row)
+        with metrics_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(row) + "\n")
+        print(
+            f"Distillation epoch {student_epoch + 1}/{args.epochs}: "
+            f"loss={row['train_loss']:.4f}, KL={train_diagnostics['ot_distill_loss']:.4f}, "
+            f"generated val F1={val_f1:.4f}, weight={distill_weight:.4f}"
+        )
+        if (
+            args.early_stopping_patience
+            and epochs_without_improvement >= args.early_stopping_patience
+        ):
+            print(
+                f"Early stopping at staged epoch {epoch + 1}; best generated "
+                f"F1={best_metric['f1']:.4f}."
+            )
+            break
+
+    distillation_rows = [row for row in history if row["stage"] == "distillation"]
+    if distillation_rows:
+        plt.figure(figsize=(10, 6))
+        plt.plot(
+            [row["epoch"] for row in distillation_rows],
+            [row["val_em"] for row in distillation_rows],
+            label="Generated EM",
+        )
+        plt.plot(
+            [row["epoch"] for row in distillation_rows],
+            [row["val_f1"] for row in distillation_rows],
+            label="Generated F1",
+        )
+        plt.xlabel("Staged epoch")
+        plt.ylabel("Score")
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(destination / "evaluation_metrics_plot.png")
+        plt.close()
+
+
 def main():
     args = get_args()
     if args.batch_size < 1 or args.epochs < 1:
@@ -196,6 +540,38 @@ def main():
         raise ValueError("weight_decay cannot be negative")
     if args.gradient_clip < 0:
         raise ValueError("gradient_clip cannot be negative")
+    if args.student_init_checkpoint and args.resume:
+        raise ValueError("Use either --student_init_checkpoint or --resume, not both")
+    if args.save_student_initialization and (args.resume or args.student_init_checkpoint):
+        raise ValueError(
+            "--save_student_initialization creates a fresh checkpoint and cannot be combined "
+            "with --resume or --student_init_checkpoint"
+        )
+    if args.alignment_mode == "ot_contrastive_distill":
+        if args.fusion != "cross_attention" and not args.resume:
+            raise ValueError(
+                "OT contrastive distillation requires --fusion cross_attention"
+            )
+        if min(
+            args.alignment_warmup_epochs,
+            args.ot_alignment_dim,
+            args.ot_alignment_iterations,
+            args.ot_negative_count,
+            args.ot_negative_queue_size,
+        ) < 1:
+            raise ValueError("OT alignment dimensions, counts, queue, and warm-up must be positive")
+        if min(
+            args.ot_alignment_epsilon,
+            args.ot_alignment_tau_visual,
+            args.ot_alignment_tau_question,
+            args.ot_alignment_tolerance,
+            args.ot_contrastive_temperature,
+        ) <= 0:
+            raise ValueError("OT alignment regularization values must be positive")
+        if min(args.ot_contrastive_weight, args.ot_distill_weight) < 0:
+            raise ValueError("OT auxiliary-loss weights cannot be negative")
+        if args.ot_distill_warmup_epochs < 0:
+            raise ValueError("OT distillation warm-up cannot be negative")
     ot_san_config = OTSANConfig(
         hidden_dim=args.ot_san_hidden_dim,
         num_layers=args.ot_san_layers,
@@ -222,8 +598,11 @@ def main():
 
     resume = read_checkpoint(args.resume, device) if args.resume else None
     if resume is not None:
-        if resume["format_version"] != 3:
-            raise ValueError("Training can resume only from a version-3 checkpoint")
+        expected_version = 4 if args.alignment_mode == "ot_contrastive_distill" else 3
+        if resume["format_version"] != expected_version:
+            raise ValueError(
+                f"This training mode can resume only from a version-{expected_version} checkpoint"
+            )
         text_model, image_model = resume["text_model"], resume["image_model"]
         model = VQAModel(text_model=text_model, image_model=image_model,
                          skip_encoders=bool(args.feature_cache),
@@ -242,8 +621,22 @@ def main():
                          fusion_config=_fusion_config_from_args(args),
                          skip_encoders=bool(args.feature_cache),
                          embeddings_path=embeddings_file).to(device)
+        if args.student_init_checkpoint:
+            load_student_initialization(args.student_init_checkpoint, model)
+            # Common weights and common RNG state make paired baseline/OT runs
+            # comparable even though their auxiliary modules differ.
+            seed_everything(args.seed)
     if args.feature_cache:
         print("[Model] Feature cache active: ViT and BERT backbones skipped (0 ViT / 0 BERT weights loaded).")
+    if args.save_student_initialization:
+        save_checkpoint(
+            args.save_student_initialization,
+            model=model,
+            text_model=text_model,
+            image_model=image_model,
+        )
+        print(f"Saved common student initialization: {args.save_student_initialization}")
+        return
 
     train_loader = _make_loader(args, "train", True, text_model, image_model)
     dev_loader = _make_loader(args, "dev", False, text_model, image_model)
@@ -253,6 +646,20 @@ def main():
         ignore_index=model.pad_token_id, label_smoothing=args.label_smoothing
     )
     validation_criterion = nn.CrossEntropyLoss(ignore_index=model.pad_token_id)
+    if args.alignment_mode == "ot_contrastive_distill":
+        _run_ot_alignment_training(
+            args,
+            model,
+            train_loader,
+            dev_loader,
+            train_criterion,
+            validation_criterion,
+            text_model,
+            image_model,
+            device,
+            resume,
+        )
+        return
     trainable_parameters = [parameter for parameter in model.parameters()
                             if parameter.requires_grad]
     total_parameter_count = sum(parameter.numel() for parameter in model.parameters())

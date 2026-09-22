@@ -44,13 +44,25 @@ def _adapt_deit_state_dict(state_dict, target_keys):
 def checkpoint_payload(
     model, text_model, image_model, optimizer=None, scheduler=None,
     epoch=0, global_step=0, best_metric=None, epochs_without_improvement=0,
+    format_version=3, alignment_teacher=None, alignment_config=None,
+    negative_queue=None, training_stage=None,
 ):
-    return {
-        "format_version": 3,
+    if format_version not in {3, 4}:
+        raise ValueError("Checkpoint format_version must be 3 or 4")
+    if format_version == 3 and any(
+        value is not None
+        for value in (alignment_teacher, alignment_config, negative_queue, training_stage)
+    ):
+        raise ValueError("Training-only alignment state requires checkpoint version 4")
+    payload = {
+        "format_version": format_version,
         "model_state_dict": model.state_dict(),
         "model_config": model.model_config,
         "text_model": text_model,
         "image_model": image_model,
+        # Cached-feature training intentionally does not instantiate frozen
+        # backbones. Deployment reloads those weights from their pretrained IDs.
+        "encoders_omitted": bool(getattr(model, "skip_encoders", False)),
         "encoder_revisions": {
             "text": (
                 getattr(model.question_encoder.text_encoder.config, "_commit_hash", None)
@@ -83,6 +95,18 @@ def checkpoint_payload(
                           if torch.backends.mps.is_available() else None),
         "python_rng_state": random.getstate(),
     }
+    if format_version == 4:
+        payload.update({
+            "alignment_teacher_state_dict": (
+                alignment_teacher.state_dict() if alignment_teacher is not None else None
+            ),
+            "alignment_config": alignment_config,
+            "negative_queue_state": (
+                negative_queue.state_dict() if negative_queue is not None else None
+            ),
+            "training_stage": training_stage,
+        })
+    return payload
 
 
 def save_checkpoint(path, **kwargs):
@@ -100,7 +124,7 @@ def read_checkpoint(checkpoint_path, device):
     if not isinstance(checkpoint, dict):
         raise ValueError("Checkpoint must be a dictionary")
     version = checkpoint.get("format_version")
-    if version not in {2, 3}:
+    if version not in {2, 3, 4}:
         raise ValueError(
             "Legacy checkpoint was trained with the incorrect decoder/objective. "
             "Retrain with the corrected train.py before generating answers."
@@ -121,7 +145,24 @@ def load_model(checkpoint_path, device):
     )
     state = _adapt_deit_state_dict(checkpoint["model_state_dict"], model.state_dict())
     state = _adapt_legacy_text_keys(state)
-    model.load_state_dict(state, strict=True)
+    if checkpoint.get("encoders_omitted", False):
+        incompatible = model.load_state_dict(state, strict=False)
+        allowed_missing = (
+            "image_model.model.",
+            "question_encoder.text_encoder.",
+        )
+        unexpected = list(incompatible.unexpected_keys)
+        disallowed_missing = [
+            key for key in incompatible.missing_keys
+            if not key.startswith(allowed_missing)
+        ]
+        if unexpected or disallowed_missing:
+            raise RuntimeError(
+                "Cached-feature checkpoint has incompatible student weights: "
+                f"missing={disallowed_missing}, unexpected={unexpected}"
+            )
+    else:
+        model.load_state_dict(state, strict=True)
     model = model.to(device)
     model.eval()
     return model
@@ -147,8 +188,8 @@ def _adapt_legacy_text_keys(state_dict):
 
 
 def restore_training_state(checkpoint, model, optimizer, scheduler):
-    if checkpoint.get("format_version") != 3:
-        raise ValueError("Only version-3 checkpoints contain resumable training state")
+    if checkpoint.get("format_version") not in {3, 4}:
+        raise ValueError("Only version-3/4 checkpoints contain resumable training state")
     state = _adapt_deit_state_dict(checkpoint["model_state_dict"], model.state_dict())
     state = _adapt_legacy_text_keys(state)
     model.load_state_dict(state, strict=True)
@@ -168,3 +209,27 @@ def restore_training_state(checkpoint, model, optimizer, scheduler):
         random.setstate(checkpoint["python_rng_state"])
     return (int(checkpoint.get("epoch", 0)), int(checkpoint.get("global_step", 0)),
             checkpoint.get("best_metric"))
+
+
+def restore_alignment_state(checkpoint, teacher, negative_queue=None):
+    """Restore the training-only teacher and queue from a version-4 checkpoint."""
+    if checkpoint.get("format_version") != 4:
+        raise ValueError("OT alignment training can resume only from version 4")
+    state = checkpoint.get("alignment_teacher_state_dict")
+    if state is None:
+        raise ValueError("Version-4 checkpoint does not contain an alignment teacher")
+    teacher.load_state_dict(state, strict=True)
+    if negative_queue is not None:
+        negative_queue.load_state_dict(checkpoint.get("negative_queue_state"))
+    return checkpoint.get("training_stage")
+
+
+def load_student_initialization(checkpoint_path, model):
+    """Strictly copy only student weights for paired common-initialization runs."""
+    checkpoint = read_checkpoint(checkpoint_path, torch.device("cpu"))
+    source_config = checkpoint.get("model_config", {})
+    if source_config != model.model_config:
+        raise ValueError("Student initialization checkpoint model_config does not match")
+    state = _adapt_deit_state_dict(checkpoint["model_state_dict"], model.state_dict())
+    state = _adapt_legacy_text_keys(state)
+    model.load_state_dict(state, strict=True)

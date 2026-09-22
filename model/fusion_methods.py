@@ -154,6 +154,9 @@ class FusionOutput:
     memory: torch.Tensor
     memory_padding_mask: torch.Tensor
     diagnostics: Optional[dict[str, torch.Tensor]] = None
+    # Training-only contract used by OT attention distillation. Ordinary
+    # inference leaves this unset, so deployment output and latency are unchanged.
+    attention_weights: Optional[torch.Tensor] = None
 
 
 def _validate_inputs(inputs: FusionInput) -> None:
@@ -356,14 +359,23 @@ class CrossAttentionFusion(nn.Module):
             if return_diagnostics:
                 weights_by_layer.append(weights)
         diagnostics = None
+        attention_weights = None
         if return_diagnostics:
             stacked = torch.stack(weights_by_layer, dim=1)
+            # [B, layers, heads, question, visual]; distillation uses the final
+            # fusion layer while diagnostics continue to aggregate all layers.
+            attention_weights = stacked[:, -1]
             diagnostics = {
                 "attention_entropy": _attention_entropy(stacked).mean((1, 2, 3)),
             }
             if inputs.transport is not None:
                 diagnostics["ot_prior_scale"] = self.ot_prior_scale.detach()
-        return FusionOutput(question, inputs.question_padding_mask, diagnostics)
+        return FusionOutput(
+            question,
+            inputs.question_padding_mask,
+            diagnostics,
+            attention_weights=attention_weights,
+        )
 
 
 class AlignedCrossAttentionFusion(nn.Module):

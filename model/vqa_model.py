@@ -178,6 +178,32 @@ class VQAModel(nn.Module):
             nn.Linear(d_model, actual_vocab),
         )
 
+    def _fusion_input_from_spatial_features(
+        self,
+        visual_tokens,
+        question_embeddings,
+        visual_padding_mask,
+        question_padding_mask,
+    ):
+        """Build a dtype/device-safe token-fusion input for training helpers."""
+        if self.fusion_module is None:
+            raise ValueError("Token fusion input requires a fusion module")
+        reference = next(self.fusion_module.parameters())
+        return FusionInput(
+            visual_tokens=visual_tokens.to(
+                device=reference.device, dtype=reference.dtype
+            ),
+            question_tokens=question_embeddings.to(
+                device=reference.device, dtype=reference.dtype
+            ),
+            visual_padding_mask=visual_padding_mask.to(
+                reference.device, dtype=torch.bool
+            ),
+            question_padding_mask=question_padding_mask.to(
+                reference.device, dtype=torch.bool
+            ),
+        )
+
     def encode_from_features(
         self, image_embeddings, question_embeddings, question_padding_mask,
         return_diagnostics=False,

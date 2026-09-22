@@ -48,11 +48,46 @@ def get_args(argv=None):
     parser.add_argument("--mutan_dim", type=int, default=256)
     parser.add_argument("--cross_fusion_layers", type=int, default=1)
     parser.add_argument("--aligned_ot_gate_init", type=float, default=-2.0)
+    parser.add_argument(
+        "--alignment_mode",
+        choices=["none", "ot_contrastive_distill"],
+        default="none",
+        help=(
+            "Train a contrastive UOT alignment teacher and distill it into native "
+            "Cross-Attention; OT is omitted from the exported inference model"
+        ),
+    )
+    parser.add_argument("--alignment_warmup_epochs", type=int, default=5)
+    parser.add_argument("--ot_alignment_dim", type=int, default=128)
+    parser.add_argument("--ot_alignment_epsilon", type=float, default=0.1)
+    parser.add_argument("--ot_alignment_tau_visual", type=float, default=0.5)
+    parser.add_argument("--ot_alignment_tau_question", type=float, default=0.5)
+    parser.add_argument("--ot_alignment_iterations", type=int, default=20)
+    parser.add_argument("--ot_alignment_tolerance", type=float, default=0.001)
+    parser.add_argument("--ot_negative_count", type=int, default=3)
+    parser.add_argument("--ot_negative_queue_size", type=int, default=32)
+    parser.add_argument("--ot_contrastive_temperature", type=float, default=0.07)
+    parser.add_argument("--ot_contrastive_weight", type=float, default=0.05)
+    parser.add_argument("--ot_distill_weight", type=float, default=0.02)
+    parser.add_argument("--ot_distill_warmup_epochs", type=int, default=5)
+    parser.add_argument(
+        "--student_init_checkpoint",
+        default=None,
+        help="Optional student-only checkpoint used as identical initialization across paired runs",
+    )
+    parser.add_argument(
+        "--save_student_initialization",
+        default=None,
+        help="Write the freshly initialized student checkpoint to this path and exit",
+    )
     parser.add_argument("--qformer_queries", type=int, default=8)
     parser.add_argument("--qformer_layers", type=int, default=2)
     parser.add_argument("--qformer_ffn_hidden", type=int, default=512)
     parser.add_argument("--feature_cache", default=None, help="Optional precomputed feature-cache folder")
-    parser.add_argument("--resume", default=None, help="Version-3 training checkpoint to resume")
+    parser.add_argument(
+        "--resume", default=None,
+        help="Version-3 standard checkpoint or version-4 OT-alignment checkpoint to resume",
+    )
     parser.add_argument("--seed", type=int, default=1105)
     parser.add_argument("--lr", type=float, default=None)
     parser.add_argument(

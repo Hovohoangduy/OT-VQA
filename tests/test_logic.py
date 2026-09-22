@@ -23,6 +23,9 @@ from model.vqa_model import VQAModel
 from model.features_extraction import ImageEmbedding
 from model.fusion_methods import parse_fusion_spec
 from model.optimal_transport import OTConfig
+from model.ot_alignment import (
+    AlignmentNegativeQueue, OTAlignmentConfig, OTContrastiveAligner,
+)
 from model.ot_san import OTSANConfig
 from model.decoder_model import MultiHeadAttention, MultiHeadCrossAttention, scaled_dot_product
 from model.sans import StackAttention
@@ -31,7 +34,13 @@ from utils.data_processing import preprocess_text
 from utils.vqa_dataset import VQADataset, resolve_image_root
 from utils.metrics import compute_em_and_f1
 from utils.json_to_csv import convert_json_folder
-from utils.checkpoint import load_model, save_checkpoint
+from utils.checkpoint import (
+    load_model, load_student_initialization, read_checkpoint,
+    restore_alignment_state, save_checkpoint,
+)
+from utils.ot_alignment_training import (
+    train_alignment_epoch, train_distillation_epoch,
+)
 from train import train
 from test import evaluation
 
@@ -229,6 +238,48 @@ class ModelLogicTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'Retrain'):
             load_model(path, torch.device('cpu'))
 
+    def test_common_student_initialization_restores_identical_weights(self):
+        source = self.make_ot_model(fusion='cross_attention')
+        path = self.root / 'common-init.pt'
+        save_checkpoint(
+            path, model=source, text_model=str(self.text),
+            image_model=str(self.visual),
+        )
+        target = self.make_ot_model(fusion='cross_attention')
+        with torch.no_grad():
+            next(target.fusion_module.parameters()).add_(1.0)
+        load_student_initialization(path, target)
+        for name, value in source.state_dict().items():
+            torch.testing.assert_close(value, target.state_dict()[name])
+
+    def test_cached_feature_student_export_loads_for_online_inference(self):
+        full = self.make_ot_model(fusion='cross_attention')
+        embeddings = self.root / 'cached-export-embeddings.pt'
+        torch.save(
+            full.answer_embedding.token_embeddings.state_dict(), embeddings
+        )
+        cached = VQAModel(
+            text_model=str(self.text), image_model=str(self.visual),
+            output_size=16, d_model=16, ffn_hidden=32, num_layers=1,
+            drop_prob=0, fusion='cross_attention',
+            fusion_config={
+                'layers': 1, 'heads': 4, 'ffn_hidden': 32, 'dropout': 0,
+            },
+            skip_encoders=True, embeddings_path=embeddings,
+        )
+        path = self.root / 'cached-student-v3.pt'
+        save_checkpoint(
+            path, model=cached, text_model=str(self.text),
+            image_model=str(self.visual),
+        )
+        restored = load_model(path, torch.device('cpu'))
+        self.assertIsNotNone(restored.image_model.model)
+        self.assertIsNotNone(restored.question_encoder.text_encoder)
+        for name, value in cached.fusion_module.state_dict().items():
+            torch.testing.assert_close(
+                value, restored.fusion_module.state_dict()[name]
+            )
+
     def test_answer_embeddings_can_be_frozen(self):
         model = VQAModel(
             text_model=str(self.text), image_model=str(self.visual),
@@ -379,6 +430,83 @@ class ModelLogicTests(unittest.TestCase):
         self.assertIsNone(native.ot_fusion)
         self.assertFalse(native.fusion_module.ot_gate.weight.requires_grad)
         self.assertTrue(unbalanced.fusion_module.ot_gate.weight.requires_grad)
+
+    def test_training_only_ot_warmup_distillation_and_v4_checkpoint(self):
+        model = self.make_ot_model(fusion='cross_attention').train()
+        images = torch.rand(2, 3, 32, 32)
+        with torch.no_grad():
+            image_features, _ = model.image_model(images)
+            question_features, question_mask, _ = model.question_encoder.encode_tokens(
+                ['what color ?', 'color ?']
+            )
+        batch = {
+            'image_features': image_features,
+            'question_features': question_features,
+            'question_padding_mask': question_mask,
+            'answers': ['red', 'blue'],
+        }
+        teacher = OTContrastiveAligner(
+            16, 16,
+            OTAlignmentConfig(
+                ot_dim=8, max_iterations=10, negative_count=1,
+            ),
+        )
+        queue = AlignmentNegativeQueue(capacity=4)
+        teacher_optimizer = torch.optim.AdamW(teacher.parameters(), lr=1e-3)
+        teacher_scheduler = torch.optim.lr_scheduler.LambdaLR(
+            teacher_optimizer, lambda _: 1
+        )
+        metrics = train_alignment_epoch(
+            model, teacher, [batch], teacher_optimizer, teacher_scheduler,
+            queue, torch.device('cpu'),
+        )
+        self.assertTrue(torch.isfinite(torch.tensor(metrics['ot_nce_loss'])))
+        self.assertEqual(len(queue), 2)
+
+        teacher_optimizer.zero_grad(set_to_none=True)
+        teacher.requires_grad_(False)
+        student_optimizer = torch.optim.AdamW(
+            [parameter for parameter in model.parameters() if parameter.requires_grad],
+            lr=1e-3,
+        )
+        student_scheduler = torch.optim.lr_scheduler.LambdaLR(
+            student_optimizer, lambda _: 1
+        )
+        criterion = nn.CrossEntropyLoss(ignore_index=model.pad_token_id)
+        losses, _, _, diagnostics = train_distillation_epoch(
+            model, teacher, [batch], student_optimizer, student_scheduler,
+            criterion, torch.device('cpu'), distill_weight=0.02,
+        )
+        self.assertTrue(torch.isfinite(torch.tensor(losses)).all())
+        self.assertGreaterEqual(diagnostics['ot_distill_loss'], 0)
+        self.assertIsNotNone(model.fusion_module.layers[-1].q.weight.grad)
+        self.assertIsNone(next(teacher.parameters()).grad)
+
+        path = self.root / 'alignment-v4.pt'
+        save_checkpoint(
+            path, model=model, text_model=str(self.text),
+            image_model=str(self.visual), optimizer=student_optimizer,
+            scheduler=student_scheduler, epoch=2, global_step=2,
+            format_version=4, alignment_teacher=teacher,
+            alignment_config={'teacher': teacher.config.to_dict()},
+            negative_queue=queue,
+            training_stage={'phase': 'distillation'},
+        )
+        checkpoint = read_checkpoint(path, torch.device('cpu'))
+        restored_teacher = OTContrastiveAligner(16, 16, teacher.config)
+        restored_queue = AlignmentNegativeQueue(capacity=1)
+        stage = restore_alignment_state(
+            checkpoint, restored_teacher, restored_queue
+        )
+        self.assertEqual(stage['phase'], 'distillation')
+        self.assertEqual(len(restored_queue), len(queue))
+        for expected, actual in zip(
+            teacher.state_dict().values(), restored_teacher.state_dict().values()
+        ):
+            torch.testing.assert_close(expected, actual)
+        deployed = load_model(path, torch.device('cpu'))
+        self.assertEqual(deployed.fusion_type, 'cross_attention')
+        self.assertFalse(hasattr(deployed, 'alignment_teacher'))
 
     def test_new_fusion_families_support_online_and_cached_paths(self):
         images = torch.rand(2, 3, 32, 32)

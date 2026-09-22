@@ -32,6 +32,8 @@ def _latest_run(path: Path) -> list[dict]:
 
 
 def _history_report(rows: list[dict]) -> dict:
+    # Staged OT training logs alignment-only warm-up rows before VQA metrics.
+    rows = [row for row in rows if "val_f1" in row and "val_loss" in row]
     if not rows:
         return {}
     best = max(rows, key=lambda row: (row["val_f1"], -row["val_loss"]))
