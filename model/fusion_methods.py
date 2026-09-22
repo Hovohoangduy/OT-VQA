@@ -79,6 +79,24 @@ class CrossAttentionFusionConfig:
 
 
 @dataclass(frozen=True)
+class AlignedCrossAttentionConfig:
+    layers: int = 1
+    heads: int = 4
+    ffn_hidden: int = 1024
+    dropout: float = 0.2
+    gate_init: float = -2.0
+
+    def __post_init__(self):
+        _validate_positive(self.layers, self.heads, self.ffn_hidden)
+        _validate_dropout(self.dropout)
+        if not math.isfinite(self.gate_init):
+            raise ValueError("Aligned cross-attention gate_init must be finite")
+
+    def to_dict(self):
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class QFormerConfig:
     query_tokens: int = 8
     layers: int = 2
@@ -109,6 +127,7 @@ def config_for_method(method: str, values: Optional[dict] = None):
         "ban": BANConfig,
         "mutan": MUTANConfig,
         "cross_attention": CrossAttentionFusionConfig,
+        "aligned_cross_attention": AlignedCrossAttentionConfig,
         "qformer": QFormerConfig,
     }
     if method not in config_types:
@@ -347,6 +366,82 @@ class CrossAttentionFusion(nn.Module):
         return FusionOutput(question, inputs.question_padding_mask, diagnostics)
 
 
+class AlignedCrossAttentionFusion(nn.Module):
+    """Cross-attention over raw or softly UOT-grounded question tokens."""
+
+    def __init__(self, visual_dim: int, question_dim: int, model_dim: int,
+                 config: AlignedCrossAttentionConfig):
+        super().__init__()
+        if model_dim % config.heads:
+            raise ValueError("Aligned cross-attention model_dim must be divisible by heads")
+        self.visual_projection = nn.Linear(visual_dim, model_dim)
+        self.question_projection = nn.Linear(question_dim, model_dim)
+        self.ot_grounded_projection = nn.Linear(model_dim, model_dim)
+        self.ot_gate = nn.Linear(2 * model_dim, 1)
+        nn.init.zeros_(self.ot_gate.weight)
+        nn.init.constant_(self.ot_gate.bias, config.gate_init)
+        self.layers = nn.ModuleList([
+            _CrossAttentionLayer(
+                model_dim, config.heads, config.ffn_hidden, config.dropout
+            ) for _ in range(config.layers)
+        ])
+
+    def forward(self, inputs: FusionInput, return_diagnostics=False) -> FusionOutput:
+        _validate_inputs(inputs)
+        visual = self.visual_projection(inputs.visual_tokens)
+        raw_question = self.question_projection(inputs.question_tokens)
+        raw_question = raw_question.masked_fill(
+            inputs.question_padding_mask.unsqueeze(-1), 0.0
+        )
+        question = raw_question
+        gate = None
+        alignment_distance = None
+        if inputs.transport is not None:
+            grounded = self.ot_grounded_projection(inputs.transport.fused_tokens)
+            grounded = grounded.masked_fill(
+                inputs.question_padding_mask.unsqueeze(-1), 0.0
+            )
+            gate = torch.sigmoid(self.ot_gate(torch.cat([raw_question, grounded], dim=-1)))
+            gate = gate.masked_fill(inputs.question_padding_mask.unsqueeze(-1), 0.0)
+            question = raw_question + gate * (grounded - raw_question)
+            question = question.masked_fill(
+                inputs.question_padding_mask.unsqueeze(-1), 0.0
+            )
+            alignment_distance = (question - raw_question).float().norm(dim=-1)
+
+        weights_by_layer = []
+        for layer in self.layers:
+            question, weights = layer(
+                question, visual, inputs.visual_padding_mask,
+                inputs.question_padding_mask, None, 0.0,
+            )
+            if return_diagnostics:
+                weights_by_layer.append(weights)
+
+        diagnostics = None
+        if return_diagnostics:
+            stacked = torch.stack(weights_by_layer, dim=1)
+            diagnostics = {
+                "attention_entropy": _attention_entropy(stacked).mean((1, 2, 3)),
+            }
+            if gate is not None:
+                valid = (~inputs.question_padding_mask).to(gate.dtype)
+                count = valid.sum(1).clamp_min(1.0)
+                gate_values = gate.squeeze(-1)
+                gate_mean = (gate_values * valid).sum(1) / count
+                gate_variance = (
+                    (gate_values - gate_mean.unsqueeze(1)).square() * valid
+                ).sum(1) / count
+                diagnostics.update({
+                    "ot_gate_mean": gate_mean,
+                    "ot_gate_std": gate_variance.sqrt(),
+                    "ot_alignment_distance": (
+                        alignment_distance * valid
+                    ).sum(1) / count,
+                })
+        return FusionOutput(question, inputs.question_padding_mask, diagnostics)
+
+
 class _QFormerLayer(nn.Module):
     def __init__(self, model_dim: int, heads: int, ffn_hidden: int, dropout: float):
         super().__init__()
@@ -427,6 +522,7 @@ FUSION_REGISTRY = {
     "ban": BANFusion,
     "mutan": MUTANFusion,
     "cross_attention": CrossAttentionFusion,
+    "aligned_cross_attention": AlignedCrossAttentionFusion,
     "qformer": QFormerFusion,
 }
 
@@ -442,4 +538,7 @@ def build_fusion_module(method: str, visual_dim: int, question_dim: int,
         if isinstance(module, QFormerFusion):
             module.question_projection.requires_grad_(not uses_ot)
             module.ot_grounded_projection.requires_grad_(uses_ot)
+        if isinstance(module, AlignedCrossAttentionFusion):
+            module.ot_grounded_projection.requires_grad_(uses_ot)
+            module.ot_gate.requires_grad_(uses_ot)
     return module

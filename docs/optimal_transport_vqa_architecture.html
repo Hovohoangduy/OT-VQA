@@ -149,7 +149,7 @@
     <div class="hero-meta">
       <span class="pill">ViT &amp; English BERT encoders</span>
       <span class="pill">Balanced OT &amp; UOT</span>
-      <span class="pill">5 Multimodal Fusion Families</span>
+      <span class="pill">5 Benchmark Families + Gated OT Alignment</span>
       <span class="pill">15 Paired Benchmark Grid</span>
       <span class="pill">Tensor Contracts</span>
       <span class="pill">Interactive Sinkhorn Explorer</span>
@@ -184,7 +184,7 @@
     <main>
       <section id="overview">
         <div class="eyebrow">End-to-End View</div>
-        <h2>Five Multimodal Fusion Families · Three Transport Paradigms</h2>
+        <h2>Five Benchmark Families plus Gated OT-Aligned Cross-Attention</h2>
         <p class="lead">The OT-VQA architecture unifies diverse multimodal fusion mechanisms under a single mathematical and engineering contract. All variants share the same frozen image encoder, question encoder, answer embeddings, and autoregressive Transformer decoder.</p>
 
         <div class="tabs" role="tablist">
@@ -192,6 +192,7 @@
           <button data-tab="tab-uot-ban">BAN (Bilinear Attention + OT Log-Prior)</button>
           <button data-tab="tab-uot-mutan">MUTAN (Tucker Tensor + OT Column Pooling)</button>
           <button data-tab="tab-uot-cross">Cross-Attention (Transformer + Logit Bias)</button>
+          <button data-tab="tab-aligned-cross">Gated OT-Aligned Cross-Attention</button>
           <button data-tab="tab-uot-qformer">Q-Former (Queries + Grounded Memory)</button>
           <button data-tab="tab-barycentric">Barycentric Baseline (UOT / Balanced)</button>
           <button data-tab="tab-legacy-san">Legacy SAN (Compatibility)</button>
@@ -201,6 +202,7 @@
         <div id="tab-uot-ban" class="tab-panel"><div class="callout green"><b>BAN with OT (<code>uot_ban</code> / <code>balanced_ot_ban</code>):</b> Computes multiple bilinear attention glimpses across visual patches and words. The OT transport plan acts as an additive log-prior <code>score_g + λ_ot * log(P + ε)</code> with a learned scalar <code>λ_ot</code> initialized to 1.0.</div></div>
         <div id="tab-uot-mutan" class="tab-panel"><div class="callout green"><b>MUTAN with OT (<code>uot_mutan</code> / <code>balanced_ot_mutan</code>):</b> Employs low-rank Tucker bilinear tensor decomposition (rank=5). In the OT variant, native pooling is replaced with normalized OT columns <code>Ṽ_j = Σ_i P_ij V_i / max(Σ_i P_ij, ε)</code>, isolating tensor fusion on OT-aligned evidence.</div></div>
         <div id="tab-uot-cross" class="tab-panel"><div class="callout green"><b>Cross-Attention with OT (<code>uot_cross_attention</code>):</b> Multi-head cross-attention where questions query visual keys/values. The normalized log-transport plan is added directly into attention logits across all heads: <code>QK^T / sqrt(d) + λ_ot * log(P^T + ε)</code>.</div></div>
+        <div id="tab-aligned-cross" class="tab-panel"><div class="callout green"><b>Gated OT-aligned Cross-Attention (<code>uot_aligned_cross_attention</code>):</b> Projects raw question tokens and OT-grounded tokens, predicts one scalar gate per valid word, and interpolates <code>Q_aligned = Q_raw + g(H_ot − Q_raw)</code>. Native Cross-Attention then operates without an OT logit bias. The gate starts at <code>sigmoid(−2) ≈ 0.119</code>, protecting the native path while the model learns where OT grounding helps.</div></div>
         <div id="tab-uot-qformer" class="tab-panel"><div class="callout green"><b>Q-Former with OT (<code>uot_qformer</code>):</b> A lightweight Querying Transformer with 8 learned query tokens. In the non-OT variant, queries attend <code>[V, Q]</code>; in the OT variant, queries attend <code>[V, H_ot]</code> where <code>H_ot</code> is grounded barycentric tokens.</div></div>
         <div id="tab-barycentric" class="tab-panel"><div class="callout blue"><b>Barycentric Baseline (<code>uot</code> / <code>balanced_ot</code>):</b> Standard OT alignment baseline. Directly projects pooled visual patches through a 4-way interaction MLP <code>[Q̄, Ṽ, Q̄⊙Ṽ, |Q̄−Ṽ|]</code> to create word-level memory tokens.</div></div>
         <div id="tab-legacy-san" class="tab-panel"><div class="callout"><b>Legacy SAN (<code>san</code>):</b> Historical non-OT baseline. Compresses the entire visual scene and question into a single summary token <code>[B, 1, d_model]</code> via 2-layer stacked attention. Version-2 checkpoints remain strictly loadable.</div></div>
@@ -292,6 +294,14 @@
               <td class="check"><code>balanced_ot_cross_attention</code></td>
               <td class="check"><code>uot_cross_attention</code></td>
               <td>Normalized log-transport plan added to attention logits across all heads</td>
+            </tr>
+            <tr>
+              <td><b>Gated OT-Aligned Cross-Attention</b><br><span class="small">Experimental; not included in the original reported results</span></td>
+              <td><code>aligned_cross_attention</code></td>
+              <td class="check"><code>aligned_cross_attention</code></td>
+              <td class="check"><code>balanced_ot_aligned_cross_attention</code></td>
+              <td class="check"><code>uot_aligned_cross_attention</code></td>
+              <td>Token-wise interpolation between raw and OT-grounded question embeddings before unbiased Cross-Attention</td>
             </tr>
             <tr>
               <td><b>Querying Transformer (Q-Former)</b></td>
@@ -637,6 +647,11 @@ memory = torch.cat([summary.unsqueeze(<span class="num">1</span>), fused_tokens]
             <p><b>Without OT:</b> a configurable stack (default one layer, four heads) uses word tokens as queries and image patches as keys/values, followed by residual output projection, feed-forward network, and two layer norms.<br><b>With OT:</b> normalized <code>log(Pᵀ)</code> is broadcast to every head and added to logits using learnable <code>ot_prior_scale</code>.</p>
           </div>
           <div class="card">
+            <span class="tag orange">Gated OT Alignment</span>
+            <h3>Aligned Cross-Attention</h3>
+            <p><b>Without OT:</b> behaves as native Cross-Attention over projected question tokens.<br><b>With OT:</b> a token-wise scalar gate interpolates between each raw question embedding and its OT-grounded embedding. Cross-Attention receives the aligned tokens but keeps unconstrained native logits.</p>
+          </div>
+          <div class="card">
             <span class="tag green">Q-Former</span>
             <h3>Querying Transformer</h3>
             <p><b>Without OT:</b> eight learned queries pass through two layers of self-attention, cross-attention to <code>[project(V), project(Q)]</code>, and an FFN.<br><b>With OT:</b> raw question memory is replaced with a learned projection of <code>transport.fused_tokens</code>, so queries attend <code>[project(V), project(H_ot)]</code>. The decoder receives exactly eight unmasked query tokens.</p>
@@ -691,6 +706,17 @@ memory = torch.cat([summary.unsqueeze(<span class="num">1</span>), fused_tokens]
               <div class="flow-node fusion-node"><b>QKᵀ / √d</b><span>learned attention logits</span></div><div class="flow-arrow">+</div>
               <div class="flow-node ot-node"><b>Optional log Pᵀ</b><span>same structural bias in every head</span></div><div class="flow-arrow">→</div>
               <div class="flow-node output-node"><b>Memory length M</b><span>residual attention + FFN</span></div>
+            </div>
+          </div>
+
+          <div class="method-flow">
+            <h3>Gated OT-aligned cross-attention · embedding alignment without logit forcing</h3>
+            <div class="flowline">
+              <div class="flow-node"><b>Raw Q</b><span>projected question token</span></div><div class="flow-arrow">+</div>
+              <div class="flow-node ot-node"><b>Grounded H_ot</b><span>UOT barycentric token</span></div><div class="flow-arrow">→</div>
+              <div class="flow-node fusion-node"><b>Token gate g</b><span>σ(MLP([Q, H_ot]))</span></div><div class="flow-arrow">→</div>
+              <div class="flow-node fusion-node"><b>Q_aligned</b><span>Q + g(H_ot − Q)</span></div><div class="flow-arrow">→</div>
+              <div class="flow-node output-node"><b>Native Cross-Attention</b><span>no transport bias in logits</span></div>
             </div>
           </div>
 
@@ -761,6 +787,20 @@ memory = torch.cat([summary.unsqueeze(<span class="num">1</span>), fused_tokens]
         </article>
 
         <article class="method-detail">
+          <h3>Gated OT-aligned Cross-Attention — preserve native attention while grounding its inputs</h3>
+          <div class="method-detail-grid">
+            <div><ol>
+              <li>The existing UOT subsystem aligns projected image patches and question words, then constructs one barycentric visual evidence vector and one fused token <code>H_ot</code> per question position.</li>
+              <li>The fusion module separately projects the raw question token to <code>Q_raw</code> and the grounded token to the same <code>d_model</code> space.</li>
+              <li>A linear gate reads <code>[Q_raw, H_ot]</code> and produces one scalar per token. Its zero weights and bias −2 initialize every valid token near 0.119 OT contribution.</li>
+              <li>The interpolation <code>Q_raw + g(H_ot − Q_raw)</code> retains the native representation when the gate is small and approaches the grounded representation when the gate is large. Padding gates and embeddings are forced to zero.</li>
+              <li>The existing multi-head Cross-Attention layers consume <code>Q_aligned</code> but receive no transport prior, leaving each head free to discover a different image alignment.</li>
+            </ol></div>
+            <div><div class="characteristic"><b>Characteristic combination:</b> OT acts on representation content rather than attention probability. Diagnostics expose gate mean, gate standard deviation, alignment distance, and attention entropy.</div><p><b>Efficiency profile:</b> <code>configs/ot_aligned_fast.json</code> uses a 128-dimensional OT space and at most 20 Sinkhorn iterations.</p><p><b>Status:</b> implemented and tested, but not included in the existing seed-42 result tables. Its accuracy and latency must be established by the paired three-seed benchmark.</p></div>
+          </div>
+        </article>
+
+        <article class="method-detail">
           <h3>Q-Former — query a long multimodal sequence through a fixed eight-token bottleneck</h3>
           <div class="method-detail-grid">
             <div><ol>
@@ -826,7 +866,19 @@ question = norm2(question + dropout(ffn(question)))
         </div>
 
         <div class="callout green">
-          <b>5. Q-Former: OT changes the question-side memory, not its attention logits:</b>
+          <b>5. Gated OT alignment: interpolate embeddings before unbiased Cross-Attention:</b>
+          <div class="code-block">
+raw_question = self.question_projection(inputs.question_tokens)
+grounded = self.ot_grounded_projection(inputs.transport.fused_tokens)
+gate = torch.sigmoid(self.ot_gate(torch.cat([raw_question, grounded], dim=-<span class="num">1</span>)))
+question = raw_question + gate * (grounded - raw_question)
+<span class="kw">for</span> layer <span class="kw">in</span> self.layers:
+    question, weights = layer(question, visual, visual_mask, question_mask, <span class="kw">None</span>, <span class="num">0.0</span>)
+          </div>
+        </div>
+
+        <div class="callout green">
+          <b>6. Q-Former: OT changes the question-side memory, not its attention logits:</b>
           <div class="code-block">
 <span class="kw">if</span> inputs.transport <span class="kw">is not</span> <span class="kw">None</span>:
     question_memory = self.ot_grounded_projection(inputs.transport.fused_tokens)

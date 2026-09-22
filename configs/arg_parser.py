@@ -25,12 +25,14 @@ def get_args(argv=None):
     parser.add_argument(
         "--fusion",
         choices=[
-            "san", "ban", "mutan", "cross_attention", "qformer",
+            "san", "ban", "mutan", "cross_attention",
+            "aligned_cross_attention", "qformer",
             "balanced_ot", "uot",
             "balanced_ot_san", "balanced_ot_ban", "balanced_ot_mutan",
-            "balanced_ot_cross_attention", "balanced_ot_qformer",
+            "balanced_ot_cross_attention", "balanced_ot_aligned_cross_attention",
+            "balanced_ot_qformer",
             "uot_san", "uot_ban", "uot_mutan", "uot_cross_attention",
-            "uot_qformer",
+            "uot_aligned_cross_attention", "uot_qformer",
         ],
         default="san",
     )
@@ -45,6 +47,7 @@ def get_args(argv=None):
     parser.add_argument("--mutan_rank", type=int, default=5)
     parser.add_argument("--mutan_dim", type=int, default=256)
     parser.add_argument("--cross_fusion_layers", type=int, default=1)
+    parser.add_argument("--aligned_ot_gate_init", type=float, default=-2.0)
     parser.add_argument("--qformer_queries", type=int, default=8)
     parser.add_argument("--qformer_layers", type=int, default=2)
     parser.add_argument("--qformer_ffn_hidden", type=int, default=512)

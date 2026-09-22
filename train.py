@@ -159,6 +159,14 @@ def _fusion_config_from_args(args):
             "ffn_hidden": args.ffn_hidden,
             "dropout": args.fusion_dropout,
         }
+    if method == "aligned_cross_attention":
+        return {
+            "layers": args.cross_fusion_layers,
+            "heads": args.num_heads,
+            "ffn_hidden": args.ffn_hidden,
+            "dropout": args.fusion_dropout,
+            "gate_init": args.aligned_ot_gate_init,
+        }
     if method == "qformer":
         return {
             "query_tokens": args.qformer_queries,

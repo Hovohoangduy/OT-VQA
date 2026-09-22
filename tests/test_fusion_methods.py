@@ -5,6 +5,7 @@ import unittest
 import torch
 
 from model.fusion_methods import (
+    AlignedCrossAttentionConfig,
     BANConfig,
     CrossAttentionFusionConfig,
     FusionInput,
@@ -59,6 +60,9 @@ class FusionMethodTests(unittest.TestCase):
             "cross_attention": CrossAttentionFusionConfig(
                 layers=2, heads=2, ffn_hidden=16, dropout=0
             ),
+            "aligned_cross_attention": AlignedCrossAttentionConfig(
+                layers=2, heads=2, ffn_hidden=16, dropout=0, gate_init=-2
+            ),
             "qformer": QFormerConfig(
                 query_tokens=2, layers=2, heads=2, ffn_hidden=16, dropout=0
             ),
@@ -88,6 +92,9 @@ class FusionMethodTests(unittest.TestCase):
             "mutan": MUTANConfig(rank=3, factor_dim=5, dropout=0),
             "cross_attention": CrossAttentionFusionConfig(
                 layers=1, heads=2, ffn_hidden=16, dropout=0
+            ),
+            "aligned_cross_attention": AlignedCrossAttentionConfig(
+                layers=1, heads=2, ffn_hidden=16, dropout=0, gate_init=-2
             ),
             "qformer": QFormerConfig(
                 query_tokens=3, layers=1, heads=2, ffn_hidden=16, dropout=0
@@ -125,6 +132,9 @@ class FusionMethodTests(unittest.TestCase):
             "cross_attention": CrossAttentionFusionConfig(
                 layers=1, heads=2, ffn_hidden=16, dropout=0
             ),
+            "aligned_cross_attention": AlignedCrossAttentionConfig(
+                layers=1, heads=2, ffn_hidden=16, dropout=0, gate_init=-2
+            ),
             "qformer": QFormerConfig(
                 query_tokens=3, layers=1, heads=2, ffn_hidden=16, dropout=0
             ),
@@ -137,6 +147,58 @@ class FusionMethodTests(unittest.TestCase):
                 first = original.eval()(self._inputs(self.transport)).memory
                 second = restored.eval()(self._inputs(self.transport)).memory
                 torch.testing.assert_close(first, second)
+
+    def test_aligned_cross_attention_gate_controls_ot_interpolation(self):
+        config = AlignedCrossAttentionConfig(
+            layers=1, heads=2, ffn_hidden=16, dropout=0, gate_init=-30
+        )
+        module = build_fusion_module(
+            "aligned_cross_attention", 6, 7, 8, config, uses_ot=True
+        ).eval()
+        without_ot = module(self._inputs(), return_diagnostics=True)
+        near_zero_gate = module(self._inputs(self.transport), return_diagnostics=True)
+        torch.testing.assert_close(
+            without_ot.memory, near_zero_gate.memory, atol=1e-5, rtol=1e-5
+        )
+        self.assertLess(
+            near_zero_gate.diagnostics["ot_gate_mean"].max().item(), 1e-10
+        )
+
+        with torch.no_grad():
+            module.ot_gate.bias.fill_(30)
+        first = module(self._inputs(self.transport), return_diagnostics=True)
+        changed_transport = TransportOutput(
+            **{
+                **self.transport.__dict__,
+                "fused_tokens": self.transport.fused_tokens + 2.0,
+            }
+        )
+        second = module(self._inputs(changed_transport), return_diagnostics=True)
+        self.assertFalse(torch.allclose(first.memory, second.memory))
+        self.assertGreater(first.diagnostics["ot_gate_mean"].min().item(), 0.999)
+
+    def test_aligned_cross_attention_masks_gate_diagnostics(self):
+        config = AlignedCrossAttentionConfig(
+            layers=1, heads=2, ffn_hidden=16, dropout=0, gate_init=-2
+        )
+        module = build_fusion_module(
+            "aligned_cross_attention", 6, 7, 8, config, uses_ot=True
+        ).eval()
+        changed = TransportOutput(
+            **{
+                **self.transport.__dict__,
+                "fused_tokens": self.transport.fused_tokens.clone(),
+            }
+        )
+        changed.fused_tokens[self.question_mask] = 1000
+        first = module(self._inputs(self.transport), return_diagnostics=True)
+        second = module(self._inputs(changed), return_diagnostics=True)
+        valid = ~self.question_mask
+        torch.testing.assert_close(first.memory[valid], second.memory[valid])
+        torch.testing.assert_close(
+            first.diagnostics["ot_gate_mean"],
+            second.diagnostics["ot_gate_mean"],
+        )
 
 
 if __name__ == "__main__":

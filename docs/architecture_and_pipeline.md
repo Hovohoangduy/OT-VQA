@@ -14,6 +14,11 @@ This document provides a comprehensive technical breakdown of the **OT-VQA** sys
 5. **Q-Former** (Learnable Query Tokens Attending Grounded Multimodal Memory)
 6. **Barycentric Reference Baseline** (Direct 4-way Interaction MLP on Aligned Patches)
 
+The source also provides an experimental **Gated OT-Aligned Cross-Attention** family.
+It interpolates raw and OT-grounded question embeddings with a learned token-wise gate
+before native Cross-Attention. It is intentionally outside the original 15-configuration
+result matrix until its paired multi-seed benchmark is completed.
+
 ### Controlled 15-Configuration Matrix
 Each fusion family is evaluated under three transport modes:
 - **`none`**: Native multimodal fusion without Optimal Transport.
@@ -106,7 +111,12 @@ All fusions adhere to `FusionInput` and `FusionOutput` contracts:
 4. **Cross-Attention Transformer**:
    - Multi-head attention with questions querying visual keys/values.
    - In `uot_cross_attention`, normalized log transport is injected directly into attention logits: $\frac{QK^T}{\sqrt{d_k}} + \lambda_{\text{ot}} \log(P^T + \epsilon)$.
-5. **Q-Former**:
+5. **Gated OT-Aligned Cross-Attention**:
+   - Available as `aligned_cross_attention`, `balanced_ot_aligned_cross_attention`, and `uot_aligned_cross_attention`.
+   - Projects raw question tokens $Q_r$ and OT-grounded tokens $H_{ot}$, predicts a scalar gate per valid token, and computes $Q_{aligned}=Q_r+g(H_{ot}-Q_r)$.
+   - Gate weights initialize to zero and bias to `-2.0`, so OT initially contributes about 11.9%; native attention logits remain unbiased by the transport plan.
+   - Reports gate mean/standard deviation, alignment distance, and attention entropy.
+6. **Q-Former**:
    - 8 learned query tokens. In `uot_qformer`, queries cross-attend multimodal memory $[V, H_{\text{ot}}]$ where $H_{\text{ot}}$ is the grounded barycentric tokens.
 
 ---
@@ -179,4 +189,3 @@ Generates `runs.csv`, `aggregate.csv`, `paired_deltas.csv`, and `paired_aggregat
 | `predict.py` | Single-image, single-question autoregressive inference CLI with optional visual diagnostics |
 | `diagnose_training.py` | Counterfactual modality shuffle test, bottleneck diagnostic, and output diversity metrics |
 | `docs/optimal_transport_vqa_architecture.html` | Interactive, styled visual system guide with live Sinkhorn convergence charts |
-

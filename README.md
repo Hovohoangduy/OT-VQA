@@ -148,6 +148,36 @@ fusion with `uot_` or `balanced_ot_`; for example, `uot_ban` and
 `--qformer_queries`, `--qformer_layers`, `--qformer_ffn_hidden`, and
 `--fusion_dropout`.
 
+An additional experimental family, `aligned_cross_attention`, uses OT to enrich question
+embeddings through a token-wise gate instead of adding the transport plan to attention
+logits. Its variants are `aligned_cross_attention`,
+`balanced_ot_aligned_cross_attention`, and `uot_aligned_cross_attention`. The gate starts
+near the native path (`--aligned_ot_gate_init -2.0`). For the efficient UOT profile:
+
+```bash
+python train.py \
+  --fusion uot_aligned_cross_attention \
+  --ot_profile configs/ot_aligned_fast.json \
+  --train_csv_path data/gqa_dataset/train.csv \
+  --dev_csv_path data/gqa_dataset/val.csv \
+  --img_path data/gqa_dataset/images \
+  --feature_cache data/gqa_cache \
+  --model_path data/gqa_uot_aligned_cross_attention \
+  --diagnostics
+```
+
+Run its paired native/UOT benchmark without changing the default fifteen-run grid:
+
+```bash
+DEVICE=mps \
+METHODS="aligned_cross_attention" \
+TRANSPORTS="none uot" \
+OT_PROFILE=configs/ot_aligned_fast.json \
+SEEDS="1105 1106 1107" \
+RUN_ROOT=results/aligned_cross_attention \
+scripts/run_fusion_benchmark.sh
+```
+
 Run the script from the repository root. Make it executable once, then check that every
 requested fusion name is available without starting training:
 

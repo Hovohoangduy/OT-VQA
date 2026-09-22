@@ -1,5 +1,6 @@
 """Numerical and integration checks for Optimal-Transport fusion."""
 
+from dataclasses import replace
 from pathlib import Path
 import tempfile
 import unittest
@@ -99,6 +100,27 @@ class SinkhornTests(unittest.TestCase):
                           fusion.question_marginal.scorer[0].weight):
             self.assertIsNotNone(parameter.grad)
             self.assertTrue(torch.isfinite(parameter.grad).all())
+
+    def test_fast_alignment_profile_is_finite_at_ten_and_twenty_iterations(self):
+        profile = OTConfig.from_json("configs/ot_aligned_fast.json")
+        self.assertEqual(profile.ot_dim, 128)
+        self.assertEqual(profile.max_iterations, 20)
+        cost = torch.rand(2, 5, 4)
+        visual_mask = torch.zeros(2, 5, dtype=torch.bool)
+        question_mask = torch.tensor([
+            [False, False, False, True],
+            [False, False, False, False],
+        ])
+        a = uniform_marginal(visual_mask, torch.float32)
+        b = uniform_marginal(question_mask, torch.float32)
+        for iterations in (10, 20):
+            output = sinkhorn_transport(
+                cost, a, b, visual_mask, question_mask,
+                replace(profile, max_iterations=iterations),
+            )
+            self.assertTrue(torch.isfinite(output.plan).all())
+            self.assertTrue(torch.isfinite(output.residual).all())
+            self.assertTrue((output.iterations <= iterations).all())
 
     def test_invalid_config_and_empty_token_set_raise(self):
         with self.assertRaises(ValueError):

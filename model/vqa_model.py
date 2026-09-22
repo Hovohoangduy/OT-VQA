@@ -56,7 +56,10 @@ class VQAModel(nn.Module):
         super().__init__()
         if output_size != d_model or num_att_layers < 1:
             raise ValueError('output_size must equal d_model and at least one attention layer is needed')
-        methods = {'san', 'ban', 'mutan', 'cross_attention', 'qformer'}
+        methods = {
+            'san', 'ban', 'mutan', 'cross_attention',
+            'aligned_cross_attention', 'qformer',
+        }
         valid_fusions = {'san', 'balanced_ot', 'uot'} | methods | {
             f'balanced_ot_{method}' for method in methods
         } | {f'uot_{method}' for method in methods}

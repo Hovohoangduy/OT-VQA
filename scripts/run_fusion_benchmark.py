@@ -47,7 +47,10 @@ def fusion_name(method: str, transport: str) -> str:
 
 
 def validate_method(method: str) -> None:
-    valid = {"san", "ban", "mutan", "cross_attention", "qformer"}
+    valid = {
+        "san", "ban", "mutan", "cross_attention",
+        "aligned_cross_attention", "qformer",
+    }
     if method not in valid:
         raise ValueError(f"Unsupported method: {method}; expected one of {sorted(valid)}")
 

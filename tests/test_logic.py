@@ -80,6 +80,10 @@ class ModelLogicTests(unittest.TestCase):
             'cross_attention': {
                 'layers': 1, 'heads': 4, 'ffn_hidden': 32, 'dropout': 0,
             },
+            'aligned_cross_attention': {
+                'layers': 1, 'heads': 4, 'ffn_hidden': 32,
+                'dropout': 0, 'gate_init': -2.0,
+            },
             'qformer': {
                 'query_tokens': 3, 'layers': 1, 'heads': 4,
                 'ffn_hidden': 32, 'dropout': 0,
@@ -344,12 +348,46 @@ class ModelLogicTests(unittest.TestCase):
         self.assertEqual(model.ot_config.transport_type, 'balanced')
         self.assertIsNotNone(model.ot_san)
 
+    def test_aligned_cross_attention_backpropagates_through_gate_and_ot(self):
+        model = self.make_ot_model(fusion='uot_aligned_cross_attention').train()
+        images = torch.rand(2, 3, 32, 32)
+        logits, targets, transport = model(
+            images, ['what color ?', 'color ?'], ['red', 'blue'],
+            max_len=6, return_diagnostics=True,
+        )
+        loss = nn.functional.cross_entropy(
+            logits.transpose(1, 2), targets, ignore_index=model.pad_token_id
+        )
+        loss.backward()
+        self.assertIsNotNone(transport)
+        self.assertIsNotNone(model.fusion_module.ot_gate.weight.grad)
+        self.assertIsNotNone(model.fusion_module.ot_grounded_projection.weight.grad)
+        self.assertIsNotNone(model.ot_fusion.fusion[0].weight.grad)
+        self.assertIsNotNone(model.ot_fusion.pairwise_cost.learned[0].weight.grad)
+        self.assertIsNotNone(model.ot_fusion.visual_marginal.scorer[0].weight.grad)
+        self.assertIsNotNone(model.ot_fusion.question_marginal.scorer[0].weight.grad)
+        self.assertTrue(torch.isfinite(model.fusion_module.ot_gate.weight.grad).all())
+
+    def test_aligned_cross_attention_selects_requested_transport(self):
+        balanced = self.make_ot_model(fusion='balanced_ot_aligned_cross_attention')
+        unbalanced = self.make_ot_model(fusion='uot_aligned_cross_attention')
+        native = self.make_ot_model(fusion='aligned_cross_attention')
+        self.assertEqual(balanced.ot_config.transport_type, 'balanced')
+        self.assertEqual(unbalanced.ot_config.transport_type, 'unbalanced')
+        self.assertIsNotNone(balanced.ot_fusion)
+        self.assertIsNotNone(unbalanced.ot_fusion)
+        self.assertIsNone(native.ot_fusion)
+        self.assertFalse(native.fusion_module.ot_gate.weight.requires_grad)
+        self.assertTrue(unbalanced.fusion_module.ot_gate.weight.requires_grad)
+
     def test_new_fusion_families_support_online_and_cached_paths(self):
         images = torch.rand(2, 3, 32, 32)
         questions = ['what color ?', 'color ?']
         names = [
             'ban', 'uot_ban', 'mutan', 'uot_mutan',
             'cross_attention', 'uot_cross_attention',
+            'aligned_cross_attention', 'balanced_ot_aligned_cross_attention',
+            'uot_aligned_cross_attention',
             'qformer', 'uot_qformer',
         ]
         for name in names:
@@ -383,7 +421,7 @@ class ModelLogicTests(unittest.TestCase):
                 )
 
     def test_new_fusion_checkpoint_restores_method_configuration(self):
-        for name in ('ban', 'uot_qformer'):
+        for name in ('ban', 'uot_qformer', 'uot_aligned_cross_attention'):
             with self.subTest(fusion=name):
                 model = self.make_ot_model(name).eval()
                 path = self.root / f'{name}.pt'
