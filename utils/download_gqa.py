@@ -196,9 +196,9 @@ def materialize_split(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Download a train/val/test GQA subset")
     parser.add_argument("--output", default="data/gqa_dataset")
-    parser.add_argument("--train-images", type=int, default=1000)
-    parser.add_argument("--val-images", type=int, default=100)
-    parser.add_argument("--test-images", type=int, default=100)
+    parser.add_argument("--train-images", type=int, default=5000)
+    parser.add_argument("--val-images", type=int, default=1000)
+    parser.add_argument("--test-images", type=int, default=500)
     parser.add_argument("--workers", type=int, default=12)
     return parser.parse_args()
 

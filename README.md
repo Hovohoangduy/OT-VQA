@@ -223,6 +223,25 @@ contains the exact command, `train.log`, and a `model/` folder containing `best.
 The paired reports calculate Balanced-OT minus no-OT, UOT minus no-OT, and UOT minus
 Balanced-OT deltas whenever both sides of a comparison are present.
 
+To train SAN and UOT-SAN concurrently on two CUDA GPUs and then produce the same paired
+reports, provide the physical GPU IDs through `GPUS`. The runner keeps at most one
+training process on each GPU and releases all of a run's device memory when that process
+exits:
+
+```bash
+DEVICE=cuda \
+GPUS="0 1" \
+METHODS="san" \
+TRANSPORTS="none uot" \
+SEEDS="1105 1106 1107" \
+EPOCHS=50 \
+RUN_ROOT=results/san_vs_uot_2gpu \
+scripts/run_fusion_benchmark.sh
+```
+
+Set `PARALLEL_WORKERS=1` to retain explicit GPU selection while returning to sequential
+execution. `PARALLEL_WORKERS` cannot exceed the number of IDs in `GPUS`.
+
 ### Single BERT Loading Optimization
 
 To ensure maximum benchmark efficiency, `scripts/run_fusion_benchmark.sh` (backed by

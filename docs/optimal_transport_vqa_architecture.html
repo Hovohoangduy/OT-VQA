@@ -119,9 +119,24 @@
     .bar-fill.warn{background:linear-gradient(90deg,var(--orange),var(--yellow))}
     .matrix-table{margin:18px 0}
     .matrix-table td.check{color:var(--green);font-weight:bold}
+    .method-atlas{display:grid;gap:16px;margin:24px 0}
+    .method-flow{border:1px solid var(--line);border-radius:15px;padding:18px;background:#fbfaf6}
+    .method-flow h3{margin:0 0 12px}
+    .flowline{display:flex;align-items:stretch;gap:8px;overflow-x:auto;padding:4px 0 8px}
+    .flow-node{min-width:140px;max-width:210px;display:flex;flex-direction:column;justify-content:center;padding:11px 12px;border:1px solid var(--line);border-radius:10px;background:#fff;font-size:.82rem}
+    .flow-node b{color:var(--navy);font-size:.9rem}.flow-node span{color:var(--muted)}
+    .flow-node.ot-node{background:#fff0df;border-color:#eab994}.flow-node.fusion-node{background:#eaf6ec;border-color:#abd1b4}.flow-node.output-node{background:#ece8f7;border-color:#c7bbe1}
+    .flow-arrow{align-self:center;color:var(--orange);font-weight:900;font-size:1.25rem;flex:0 0 auto}
+    .method-detail{margin:18px 0;padding:22px;border:1px solid var(--line);border-radius:15px;background:#fff}
+    .method-detail>h3{margin-top:0}.method-detail-grid{display:grid;grid-template-columns:1.1fr .9fr;gap:20px}
+    .method-detail ol{margin:8px 0 0;padding-left:1.25rem}.method-detail li{margin-bottom:8px}
+    .characteristic{border-left:4px solid var(--green);padding:10px 14px;background:#edf7f0;border-radius:0 9px 9px 0}
+    .positive{color:#2d7548;font-weight:800}
+    .negative{color:#b24b30;font-weight:800}
+    .neutral{color:var(--muted);font-weight:800}
     .foot{text-align:center;color:var(--muted);padding:22px}
     @media(max-width:1050px){.layout{grid-template-columns:1fr}nav{position:static;max-height:none}.grid.three{grid-template-columns:1fr 1fr}.flow{grid-template-columns:repeat(3,1fr)}.step:nth-child(3):after{display:none}.interactive{grid-template-columns:1fr}}
-    @media(max-width:700px){.shell{padding:0 12px 50px}.hero{margin-top:12px}.grid,.grid.three,.filemap,.metric-grid{grid-template-columns:1fr}.flow{grid-template-columns:1fr}.step:after{display:none}.sequence{grid-template-columns:1fr}.lane{background:#edf1f0}.heatmap{grid-template-columns:repeat(5,minmax(36px,1fr))}.cell{height:42px}.bar-row{grid-template-columns:1fr}.bar-row .mono{text-align:left!important}}
+    @media(max-width:700px){.shell{padding:0 12px 50px}.hero{margin-top:12px}.grid,.grid.three,.filemap,.metric-grid,.method-detail-grid{grid-template-columns:1fr}.flow{grid-template-columns:1fr}.step:after{display:none}.sequence{grid-template-columns:1fr}.lane{background:#edf1f0}.heatmap{grid-template-columns:repeat(5,minmax(36px,1fr))}.cell{height:42px}.bar-row{grid-template-columns:1fr}.bar-row .mono{text-align:left!important}.flow-node{min-width:125px}}
     @media print{body{background:#fff}.shell{max-width:none}.hero,section{box-shadow:none}nav{display:none}.layout{display:block}section{break-inside:avoid}.interactive{display:none}}
   </style>
 </head>
@@ -157,12 +172,13 @@
       <a href="#decoder">11. Autoregressive answer decoder</a>
       <a href="#training">12. Training &amp; validation flow</a>
       <a href="#benchmark">13. Automated benchmark runner</a>
-      <a href="#inference">14. Inference &amp; prediction flow</a>
-      <a href="#cache">15. Feature caching</a>
-      <a href="#checkpoint">16. Version-3 checkpoints</a>
-      <a href="#diagnostics">17. Transport diagnostics &amp; inspection</a>
-      <a href="#bottleneck">18. Measured bottleneck analysis</a>
-      <a href="#files">19. Source code map</a>
+      <a href="#results">14. Measured benchmark results</a>
+      <a href="#inference">15. Inference &amp; prediction flow</a>
+      <a href="#cache">16. Feature caching</a>
+      <a href="#checkpoint">17. Version-3 checkpoints</a>
+      <a href="#diagnostics">18. Transport diagnostics &amp; inspection</a>
+      <a href="#bottleneck">19. Measured bottleneck analysis</a>
+      <a href="#files">20. Source code map</a>
     </nav>
 
     <main>
@@ -181,7 +197,7 @@
           <button data-tab="tab-legacy-san">Legacy SAN (Compatibility)</button>
         </div>
 
-        <div id="tab-uot-san" class="tab-panel active"><div class="callout green"><b>OT-SAN (<code>uot_san</code> / <code>balanced_ot_san</code>):</b> Adds a masked Stacked Attention Network over OT-fused tokens. It computes a global context summary, scales it via a learnable gate initialized to <code>sigmoid(-2.0) ≈ 0.12</code>, and prepends it to local question tokens <code>[S, H]</code> for the decoder.</div></div>
+        <div id="tab-uot-san" class="tab-panel active"><div class="callout green"><b>OT-SAN (<code>uot_san</code> / <code>balanced_ot_san</code>):</b> Adds masked stacked attention over OT-fused tokens. Starting from their masked mean, it uses a learnable gate initialized to <code>sigmoid(-2.0) ≈ 0.12</code> to scale only the attention-derived correction, then prepends the resulting summary to the local tokens <code>[S, H]</code>.</div></div>
         <div id="tab-uot-ban" class="tab-panel"><div class="callout green"><b>BAN with OT (<code>uot_ban</code> / <code>balanced_ot_ban</code>):</b> Computes multiple bilinear attention glimpses across visual patches and words. The OT transport plan acts as an additive log-prior <code>score_g + λ_ot * log(P + ε)</code> with a learned scalar <code>λ_ot</code> initialized to 1.0.</div></div>
         <div id="tab-uot-mutan" class="tab-panel"><div class="callout green"><b>MUTAN with OT (<code>uot_mutan</code> / <code>balanced_ot_mutan</code>):</b> Employs low-rank Tucker bilinear tensor decomposition (rank=5). In the OT variant, native pooling is replaced with normalized OT columns <code>Ṽ_j = Σ_i P_ij V_i / max(Σ_i P_ij, ε)</code>, isolating tensor fusion on OT-aligned evidence.</div></div>
         <div id="tab-uot-cross" class="tab-panel"><div class="callout green"><b>Cross-Attention with OT (<code>uot_cross_attention</code>):</b> Multi-head cross-attention where questions query visual keys/values. The normalized log-transport plan is added directly into attention logits across all heads: <code>QK^T / sqrt(d) + λ_ot * log(P^T + ε)</code>.</div></div>
@@ -251,7 +267,7 @@
               <td class="check"><code>san</code></td>
               <td class="check"><code>balanced_ot_san</code></td>
               <td class="check"><code>uot_san</code></td>
-              <td>Gated global summary over barycentric tokens prepended to memory <code>[S·gate, H]</code></td>
+              <td>Masked-mean summary plus a gated stacked-attention correction, prepended to barycentric tokens</td>
             </tr>
             <tr>
               <td><b>Bilinear Attention (BAN)</b></td>
@@ -566,8 +582,8 @@ fused_tokens = self.fusion(fusion_features).masked_fill(
           <div class="card">
             <span class="tag orange">Architecture</span>
             <h3>Masked Stacked Attention + Learnable Gate</h3>
-            <p>OT-SAN takes the local barycentric question tokens <i>H</i> and runs 1 or 2 layers of masked stacked attention to compute a global summary vector <i>S</i>. A learnable gate initialized to <code>gate_init = -2.0</code> (sigmoid(-2.0) ≈ 0.12) allows the model to smoothly introduce global context without overriding learned local features:</p>
-            <div class="equation">S = StackedAttention(H, context=mean(H))<br>g = σ(gate_logit)<br>Memory = [g · S, H] <span class="shape">∈ ℝᴮˣ⁽¹⁺ᴹ⁾ˣᵈᵐᵒᵈᵉˡ</span></div>
+            <p>OT-SAN takes the local barycentric question tokens <i>H</i> and runs 1 or 2 masked attention layers. Let <i>S</i><sub>0</sub> be their masked mean and <i>S</i><sub>attn</sub> the context after attention updates. A learnable gate initialized to <code>gate_init = -2.0</code> controls the correction away from the stable mean:</p>
+            <div class="equation">S₀ = masked_mean(H)<br>S_attn = StackedAttention(H, context=S₀)<br>g = σ(gate_logit)<br>S = dropout(S₀ + g · (S_attn − S₀))<br>Memory = [S, H] <span class="shape">∈ ℝᴮˣ⁽¹⁺ᴹ⁾ˣᵈᵐᵒᵈᵉˡ</span></div>
           </div>
           <div class="card">
             <span class="tag green">Decoder Advantage</span>
@@ -580,117 +596,250 @@ fused_tokens = self.fusion(fusion_features).masked_fill(
         <h3>PyTorch Implementation in <code>model/ot_san.py</code></h3>
         <div class="code-block">
 <span class="cm"># From model/ot_san.py (OTSAN.forward)</span>
-summary = context  <span class="cm"># Initialized to masked_mean(fused_tokens)</span>
+initial_context = masked_mean(fused_tokens, padding_mask)
+context = initial_context
 <span class="kw">for</span> layer <span class="kw">in</span> self.layers:
-    summary, weights = layer(fused_tokens, summary, padding_mask)
+    context, weights = layer(fused_tokens, context, padding_mask)
 
 gate = torch.sigmoid(self.gate_logit)
-gated_summary = (self.summary_dropout(summary) * gate).unsqueeze(<span class="num">1</span>)
-memory = torch.cat([gated_summary, fused_tokens], dim=<span class="num">1</span>)
-memory_padding_mask = torch.cat([
-    torch.zeros((fused_tokens.size(<span class="num">0</span>), <span class="num">1</span>), dtype=torch.bool, device=fused_tokens.device),
-    padding_mask
-], dim=<span class="num">1</span>)
+summary = self.summary_dropout(
+    initial_context + gate * (context - initial_context)
+)
+memory = torch.cat([summary.unsqueeze(<span class="num">1</span>), fused_tokens], dim=<span class="num">1</span>)
         </div>
+        <div class="callout blue"><b>Important implementation detail:</b> the gate scales only the attention-derived correction <code>context − initial_context</code>; it does not scale the complete summary token. At initialization, <code>sigmoid(−2) ≈ 0.119</code>, so the module begins close to a stable masked-mean summary and gradually learns how much stacked-attention refinement to add.</div>
       </section>
 
       <section id="fusion-families">
         <div class="eyebrow">Stage 7 · Source Code Deep Dive</div>
         <h2>Five Multimodal Fusion Families &amp; OT Augmentation</h2>
-        <p class="lead">How does Optimal Transport integrate into different multimodal fusion architectures? In <code>model/fusion_methods.py</code>, five fusion families consume the transport plan <i>P</i> through mathematically principled injection mechanisms.</p>
+        <p class="lead">This section follows the active implementations in <code>model/vqa_model.py</code>, <code>model/sans.py</code>, <code>model/ot_san.py</code>, and <code>model/fusion_methods.py</code>. The native SAN has its own legacy path; OT-SAN consumes barycentric tokens; BAN, MUTAN, cross-attention, and Q-Former share the <code>FusionInput</code>/<code>FusionOutput</code> interface.</p>
 
         <div class="grid five">
           <div class="card">
             <span class="tag green">SAN</span>
             <h3>Stacked Attention</h3>
-            <p><b>Without OT:</b> Global question context repeatedly attends visual patches → 1 summary token.<br>
-            <b>With OT (<code>uot_san</code>):</b> Stacked attention over barycentric tokens → gated summary prepended to tokens <code>[S, H]</code>.</p>
+            <p><b>Without OT:</b> BERT embeddings pass through the question encoder's LSTM to form one context vector. Each <code>StackAttention</code> layer scores projected image tokens using that context, adds the attended image vector back to it, and finally emits one decoder-memory token.<br><b>With OT:</b> this legacy SAN path is frozen. <code>OTSAN</code> instead refines the masked mean of OT-fused word tokens and prepends the gated summary, producing <code>[summary, H_ot]</code>.</p>
           </div>
           <div class="card">
             <span class="tag green">BAN</span>
             <h3>Bilinear Attention</h3>
-            <p><b>Without OT:</b> Multi-glimpse bilinear attention scores <i>w<sub>g</sub><sup>T</sup></i>(tanh(<i>W<sub>v</sub> V</i>) ⊙ tanh(<i>W<sub>q</sub> Q</i>)).<br>
-            <b>With OT (<code>uot_ban</code>):</b> OT plan injected as additive log-prior: <code>score_g + λ_ot · log(P + ε)</code> with learned <i>λ</i><sub>ot</sub>.</p>
+            <p><b>Without OT:</b> Projected patch and word features form <code>G=2</code> bilinear score maps. Each glimpse pools a visual context per word and applies a residual update <code>LN(memory + joint(context ⊙ memory))</code>.<br><b>With OT:</b> row-normalized <code>Pᵀ</code> becomes an additive log-prior shared across glimpses, scaled by the learnable <code>ot_prior_scale</code>.</p>
           </div>
           <div class="card">
             <span class="tag green">MUTAN</span>
             <h3>Multimodal Tucker</h3>
-            <p><b>Without OT:</b> Rank-5 bilinear tensor decomposition with native visual attention pooling.<br>
-            <b>With OT (<code>uot_mutan</code>):</b> Visual evidence pooling weights directly replaced with normalized OT columns Ṽ<sub>j</sub> = Σ<sub>i</sub> P<sub>ij</sub> V<sub>i</sub> / max(Σ<sub>i</sub> P<sub>ij</sub>, ε).</p>
+            <p><b>Without OT:</b> scaled dot-product question-to-image attention produces one visual evidence vector per word.<br><b>With OT:</b> normalized columns of <code>P</code> replace those attention weights. Both paths then create rank-5, 256-dimensional visual/question factors, multiply them elementwise, sum over rank, project, and add a residual question connection with layer normalization.</p>
           </div>
           <div class="card">
             <span class="tag green">Cross-Attention</span>
             <h3>Transformer Fusion</h3>
-            <p><b>Without OT:</b> Standard multi-head cross-attention where questions query visual keys/values.<br>
-            <b>With OT (<code>uot_cross_attention</code>):</b> Normalized log-transport plan added to attention logits: <code>QK^T/√d + λ_ot · log(P^T + ε)</code>.</p>
+            <p><b>Without OT:</b> a configurable stack (default one layer, four heads) uses word tokens as queries and image patches as keys/values, followed by residual output projection, feed-forward network, and two layer norms.<br><b>With OT:</b> normalized <code>log(Pᵀ)</code> is broadcast to every head and added to logits using learnable <code>ot_prior_scale</code>.</p>
           </div>
           <div class="card">
             <span class="tag green">Q-Former</span>
             <h3>Querying Transformer</h3>
-            <p><b>Without OT:</b> 8 learnable queries self-attend, then cross-attend concatenated <code>[V, Q]</code>.<br>
-            <b>With OT (<code>uot_qformer</code>):</b> Queries cross-attend multimodal memory containing grounded barycentric tokens <code>[V, H_ot]</code>.</p>
+            <p><b>Without OT:</b> eight learned queries pass through two layers of self-attention, cross-attention to <code>[project(V), project(Q)]</code>, and an FFN.<br><b>With OT:</b> raw question memory is replaced with a learned projection of <code>transport.fused_tokens</code>, so queries attend <code>[project(V), project(H_ot)]</code>. The decoder receives exactly eight unmasked query tokens.</p>
           </div>
         </div>
+
+        <h3>Visual Combination Atlas</h3>
+        <p class="lead">Each row shows what is combined, where OT enters, and what sequence is handed to the common autoregressive decoder. Orange nodes are OT-specific; green nodes are the family-specific fusion operator; purple nodes are decoder memory.</p>
+        <div class="method-atlas" aria-label="Visual comparison of fusion method data flows">
+          <div class="method-flow">
+            <h3>SAN · global iterative attention</h3>
+            <div class="flowline">
+              <div class="flow-node"><b>Question</b><span>LSTM → one global context q</span></div><div class="flow-arrow">+</div>
+              <div class="flow-node"><b>Image</b><span>projected patch sequence V</span></div><div class="flow-arrow">→</div>
+              <div class="flow-node fusion-node"><b>StackAttention × L</b><span>q ← q + Σᵢ αᵢVᵢ</span></div><div class="flow-arrow">→</div>
+              <div class="flow-node output-node"><b>Memory length 1</b><span>single scene-question summary</span></div>
+            </div>
+            <div class="flowline">
+              <div class="flow-node"><b>OT word tokens H</b><span>one grounded token per word</span></div><div class="flow-arrow">→</div>
+              <div class="flow-node ot-node"><b>OT-SAN</b><span>masked mean + gated attention correction</span></div><div class="flow-arrow">→</div>
+              <div class="flow-node output-node"><b>Memory length 1 + M</b><span>[global summary, grounded words]</span></div>
+            </div>
+          </div>
+
+          <div class="method-flow">
+            <h3>BAN · multiple bilinear glimpses</h3>
+            <div class="flowline">
+              <div class="flow-node"><b>Projected V and Q</b><span>tanh feature spaces</span></div><div class="flow-arrow">→</div>
+              <div class="flow-node fusion-node"><b>G bilinear maps</b><span>score[g, word, patch]</span></div><div class="flow-arrow">+</div>
+              <div class="flow-node ot-node"><b>Optional log Pᵀ</b><span>normalized patch prior × learned scale</span></div><div class="flow-arrow">→</div>
+              <div class="flow-node fusion-node"><b>Sequential residual updates</b><span>context ⊙ current word memory</span></div><div class="flow-arrow">→</div>
+              <div class="flow-node output-node"><b>Memory length M</b><span>updated word tokens</span></div>
+            </div>
+          </div>
+
+          <div class="method-flow">
+            <h3>MUTAN · attention pooling + low-rank multiplicative fusion</h3>
+            <div class="flowline">
+              <div class="flow-node"><b>V and Q</b><span>project to d_model</span></div><div class="flow-arrow">→</div>
+              <div class="flow-node fusion-node"><b>Visual pooling</b><span>dot-product attention</span></div><div class="flow-arrow">or</div>
+              <div class="flow-node ot-node"><b>OT pooling</b><span>row-normalized Pᵀ</span></div><div class="flow-arrow">→</div>
+              <div class="flow-node fusion-node"><b>Rank-R factors</b><span>Σᵣ dropout(vᵣ) ⊙ dropout(qᵣ)</span></div><div class="flow-arrow">→</div>
+              <div class="flow-node output-node"><b>Memory length M</b><span>LN(Q + projected fusion)</span></div>
+            </div>
+          </div>
+
+          <div class="method-flow">
+            <h3>Cross-attention · word queries over image patches</h3>
+            <div class="flowline">
+              <div class="flow-node"><b>Q → queries</b><span>M word positions × heads</span></div><div class="flow-arrow">×</div>
+              <div class="flow-node"><b>V → keys/values</b><span>N image patches × heads</span></div><div class="flow-arrow">→</div>
+              <div class="flow-node fusion-node"><b>QKᵀ / √d</b><span>learned attention logits</span></div><div class="flow-arrow">+</div>
+              <div class="flow-node ot-node"><b>Optional log Pᵀ</b><span>same structural bias in every head</span></div><div class="flow-arrow">→</div>
+              <div class="flow-node output-node"><b>Memory length M</b><span>residual attention + FFN</span></div>
+            </div>
+          </div>
+
+          <div class="method-flow">
+            <h3>Q-Former · fixed learned-query bottleneck</h3>
+            <div class="flowline">
+              <div class="flow-node"><b>8 learned queries</b><span>shared initial parameters</span></div><div class="flow-arrow">→</div>
+              <div class="flow-node fusion-node"><b>Self-attention</b><span>queries coordinate</span></div><div class="flow-arrow">→</div>
+              <div class="flow-node"><b>Memory [V, Q]</b><span>native question tokens</span></div><div class="flow-arrow">or</div>
+              <div class="flow-node ot-node"><b>Memory [V, H_ot]</b><span>grounded question tokens</span></div><div class="flow-arrow">→</div>
+              <div class="flow-node output-node"><b>Memory length 8</b><span>compact query representation</span></div>
+            </div>
+          </div>
+        </div>
+
+        <h3>How Each Method Works, Step by Step</h3>
+        <article class="method-detail">
+          <h3>SAN / OT-SAN — compress globally, with an optional local-token escape route</h3>
+          <div class="method-detail-grid">
+            <div><ol>
+              <li><b>Native SAN forms a question state.</b> The token sequence is reduced by the question encoder LSTM to one vector <i>q</i>.</li>
+              <li><b>Each attention layer scores every image location.</b> It computes <code>tanh(Wv·Vᵢ + Wq·q)</code>, maps this to one scalar per patch, and applies softmax across patches.</li>
+              <li><b>The attended visual vector updates the question.</b> The weighted patch sum is added to <i>q</i>; later SAN layers repeat this with the already visually enriched state.</li>
+              <li><b>The decoder receives one token.</b> This is efficient and forces a strong global bottleneck, but token order and local word-specific alignments are no longer directly available.</li>
+              <li><b>OT-SAN changes the input representation.</b> OT first creates grounded word tokens <i>H</i>. Their masked mean is refined through one or two masked attention layers, while the gate controls only the refinement. The decoder receives both the summary and every grounded word token.</li>
+            </ol></div>
+            <div><div class="characteristic"><b>Characteristic combination:</b> additive recurrent visual evidence. Native SAN combines “where to look” and “what the question means” into a single evolving vector; OT-SAN combines a global summary with an intact local token sequence.</div><p><b>Best suited to:</b> questions that can be answered from one dominant region or a compact scene summary.</p><p><b>Main risk:</b> native SAN's one-token bottleneck may discard relations between multiple words or objects. OT-SAN is richer but introduces more capacity and possible overfitting.</p></div>
+          </div>
+        </article>
+
+        <article class="method-detail">
+          <h3>BAN — combine every word–patch pair through several attention glimpses</h3>
+          <div class="method-detail-grid">
+            <div><ol>
+              <li>Visual and question tokens are projected to <code>d_model</code>, then separately transformed to a 256-dimensional attention space with <code>tanh</code>.</li>
+              <li>For each of two default glimpse vectors, an einsum produces a complete <code>[word, patch]</code> score matrix. Unlike ordinary dot-product attention, each glimpse owns a learned direction in the shared bilinear feature space.</li>
+              <li>When OT is enabled, each word's transport weights over patches are normalized, logged, multiplied by <code>ot_prior_scale</code>, and added to every glimpse. The learned BAN score can still disagree with OT.</li>
+              <li>Softmax over patches creates a visual context for every word and glimpse. Glimpses are then applied sequentially: <code>memory ← LN(memory + joint(context_g ⊙ memory))</code>.</li>
+            </ol></div>
+            <div><div class="characteristic"><b>Characteristic combination:</b> multiplicative word–region interaction repeated across complementary glimpses. OT acts as a soft Bayesian-style prior, not a replacement for BAN attention.</div><p><b>Best suited to:</b> answers requiring several complementary visual cues or object–attribute combinations.</p><p><b>Main risk:</b> all glimpses share the same OT prior; a strongly scaled inaccurate plan can reduce glimpse diversity.</p></div>
+          </div>
+        </article>
+
+        <article class="method-detail">
+          <h3>MUTAN — factorized tensor interaction after selecting visual evidence</h3>
+          <div class="method-detail-grid">
+            <div><ol>
+              <li>Each question word selects a visual evidence vector. The native path uses scaled dot-product attention; the OT path directly uses normalized <code>Pᵀ</code>.</li>
+              <li>The selected visual vector and corresponding question vector are independently expanded into <code>rank × factor_dim</code> tensors (defaults: <code>5 × 256</code>).</li>
+              <li>Matching visual and question factors are multiplied elementwise. Summing the five rank slices approximates a much larger bilinear tensor without materializing it.</li>
+              <li>The 256-dimensional fused factor is projected to <code>d_model</code>, added back to the question token, layer-normalized, and masked.</li>
+            </ol></div>
+            <div><div class="characteristic"><b>Characteristic combination:</b> explicit multiplicative feature chemistry. Pooling decides <em>which patch evidence</em> belongs to each word; Tucker factors decide <em>which visual and linguistic channels interact</em>.</div><p><b>Best suited to:</b> fine-grained attribute and relation interactions where additive fusion is insufficient.</p><p><b>Main risk:</b> OT replaces native pooling completely. If the plan is wrong—especially under strict Balanced OT—the factorization cannot recover excluded visual evidence.</p></div>
+          </div>
+        </article>
+
+        <article class="method-detail">
+          <h3>Cross-attention — learn alignment directly, optionally regularized by OT</h3>
+          <div class="method-detail-grid">
+            <div><ol>
+              <li>Question tokens become queries; image patches become keys and values. Each of four heads operates in its own subspace.</li>
+              <li>Every head computes <code>QKᵀ/√head_dim</code>. If OT exists, normalized <code>log(Pᵀ)</code> is broadcast across heads and added before visual masking and softmax.</li>
+              <li>The weighted values are concatenated, projected, dropped out, and added residually to the question tokens before layer normalization.</li>
+              <li>A position-wise feed-forward network supplies nonlinear channel mixing, followed by a second residual connection and layer norm. Padded word positions are zeroed.</li>
+            </ol></div>
+            <div><div class="characteristic"><b>Characteristic combination:</b> flexible content-based retrieval. Unlike BAN, each head learns its own query/key projections; unlike MUTAN, visual selection and feature transformation are learned jointly.</div><p><b>Best suited to:</b> general token-level grounding where multiple relation types benefit from separate heads.</p><p><b>Main risk:</b> cross-attention already learns alignment. Adding the same OT prior to every head can over-constrain otherwise useful alternative alignments—consistent with the measured decrease in this benchmark.</p></div>
+          </div>
+        </article>
+
+        <article class="method-detail">
+          <h3>Q-Former — query a long multimodal sequence through a fixed eight-token bottleneck</h3>
+          <div class="method-detail-grid">
+            <div><ol>
+              <li>Eight learned query vectors are expanded across the batch. They are parameters, not derived directly from a particular question.</li>
+              <li>Self-attention lets queries specialize cooperatively—for example, different queries can capture objects, attributes, or relations.</li>
+              <li>Queries cross-attend the concatenated multimodal memory. The native path uses projected raw question tokens; the OT path substitutes projected grounded barycentric tokens. Visual patch tokens remain present in both paths.</li>
+              <li>An FFN refines each query. Two default layers repeat self-attention, cross-attention, and FFN. The resulting eight tokens become the complete decoder memory with no padding positions.</li>
+            </ol></div>
+            <div><div class="characteristic"><b>Characteristic combination:</b> learned information bottleneck. OT does not bias Q-Former attention weights directly; it improves the memory that the queries inspect.</div><p><b>Best suited to:</b> compressing long image–question sequences into a predictable memory size for the decoder.</p><p><b>Main risk:</b> eight queries may under-represent complex scenes, while extra Q-Former layers can overfit a small dataset. Its gain from UOT suggests grounded memory helps the bottleneck decide what to retain.</p></div>
+          </div>
+        </article>
 
         <h3>Exact OT Injection Mechanics in <code>model/fusion_methods.py</code></h3>
         
         <div class="callout green">
-          <b>1. BAN (Bilinear Attention Network) with Additive Log-Prior:</b>
+          <b>1. Native SAN and OT-SAN use different source paths:</b>
           <div class="code-block">
-<span class="cm"># From BANFusion.forward</span>
-attention = glimpse_weights.unsqueeze(-<span class="num">1</span>) * (visual_projected.unsqueeze(<span class="num">3</span>) * question_projected.unsqueeze(<span class="num">2</span>))
-<span class="kw">if</span> inputs.transport <span class="kw">is not</span> <span class="kw">None</span>:
-    <span class="cm"># OT plan acts as an additive structural log-prior across glimpses</span>
-    log_plan = torch.log(inputs.transport.plan.clamp_min(<span class="num">1e-8</span>)).unsqueeze(<span class="num">1</span>)
-    attention = attention + self.lambda_ot * log_plan
+<span class="cm"># VQAModel.encode_from_features</span>
+<span class="kw">if</span> self.fusion_type == <span class="str">"san"</span>:
+    context = question_encoder.forward_from_embeddings(question_embeddings, mask)
+    <span class="kw">for</span> layer <span class="kw">in</span> self.san_model:
+        context = layer(projected_images, context.unsqueeze(<span class="num">1</span>))
+    memory = context.unsqueeze(<span class="num">1</span>)
+<span class="kw">elif</span> self.ot_san <span class="kw">is not</span> <span class="kw">None</span>:
+    memory = self.ot_san(transport.fused_tokens, transport.memory_padding_mask).memory
           </div>
         </div>
 
         <div class="callout green">
-          <b>2. MUTAN with Normalized OT Column Pooling:</b>
+          <b>2. BAN: bilinear glimpses plus an optional transport prior:</b>
           <div class="code-block">
-<span class="cm"># From MUTANFusion.forward</span>
+scores = einsum(<span class="str">"bnh,bmh,gh-&gt;bgmn"</span>, visual_hidden, question_hidden, glimpse_vectors)
 <span class="kw">if</span> inputs.transport <span class="kw">is not</span> <span class="kw">None</span>:
-    <span class="cm"># Replace unconstrained self-learned attention with OT barycentric patches</span>
-    received_mass = inputs.transport.plan.sum(<span class="num">1</span>, keepdim=<span class="kw">True</span>).transpose(<span class="num">1</span>, <span class="num">2</span>)
-    visual_evidence = torch.bmm(inputs.transport.plan.transpose(<span class="num">1</span>, <span class="num">2</span>), visual.float())
-    visual_evidence = visual_evidence / received_mass.clamp_min(<span class="num">1e-8</span>)
+    prior = inputs.transport.plan.transpose(<span class="num">1</span>, <span class="num">2</span>).float()
+    prior = prior / prior.sum(-<span class="num">1</span>, keepdim=<span class="kw">True</span>).clamp_min(<span class="num">1e-8</span>)
+    scores = scores + self.ot_prior_scale * prior.clamp_min(<span class="num">1e-8</span>).log().unsqueeze(<span class="num">1</span>)
+contexts = einsum(<span class="str">"bgmn,bnd-&gt;bgmd"</span>, softmax(scores), visual)
+          </div>
+        </div>
+
+        <div class="callout green">
+          <b>3. MUTAN: attention/OT pooling followed by low-rank fusion:</b>
+          <div class="code-block">
+weights = native_dot_product_attention <span class="kw">if</span> transport <span class="kw">is</span> <span class="kw">None</span> \
+          <span class="kw">else</span> row_normalize(transport.plan.transpose(<span class="num">1</span>, <span class="num">2</span>))
+evidence = torch.bmm(weights, visual)
+v = self.visual_factor(evidence).reshape(B, M, rank, factor_dim)
+q = self.question_factor(question).reshape(B, M, rank, factor_dim)
+fused = (self.dropout(v) * self.dropout(q)).sum(dim=<span class="num">2</span>)
+memory = self.norm(question + self.output(fused))
+          </div>
+        </div>
+
+        <div class="callout green">
+          <b>4. Cross-attention: the same OT log-prior is reused by every layer:</b>
+          <div class="code-block">
+prior = row_normalize(transport.plan.transpose(<span class="num">1</span>, <span class="num">2</span>)).clamp_min(<span class="num">1e-8</span>).log()
+scores = torch.matmul(q, k.transpose(-<span class="num">1</span>, -<span class="num">2</span>)) / math.sqrt(head_dim)
+scores = scores + self.ot_prior_scale * prior.unsqueeze(<span class="num">1</span>)
+question = norm1(question + dropout(output(softmax(scores) @ v)))
+question = norm2(question + dropout(ffn(question)))
+          </div>
+        </div>
+
+        <div class="callout green">
+          <b>5. Q-Former: OT changes the question-side memory, not its attention logits:</b>
+          <div class="code-block">
+<span class="kw">if</span> inputs.transport <span class="kw">is not</span> <span class="kw">None</span>:
+    question_memory = self.ot_grounded_projection(inputs.transport.fused_tokens)
 <span class="kw">else</span>:
-    visual_evidence = self.native_attention_pooling(visual, question)
-<span class="cm"># Tucker low-rank tensor product: sum_r (v_r * q_r)</span>
-fused_memory = self.tucker_product(visual_evidence, question)
-          </div>
-        </div>
-
-        <div class="callout green">
-          <b>3. Cross-Attention Transformer with Logit Bias:</b>
-          <div class="code-block">
-<span class="cm"># From CrossAttentionFusion.forward</span>
-attention_scores = torch.matmul(q, k.transpose(-<span class="num">2</span>, -<span class="num">1</span>)) / math.sqrt(self.head_dim)
-<span class="kw">if</span> inputs.transport <span class="kw">is not</span> <span class="kw">None</span>:
-    <span class="cm"># Transport plan P [B, 196, M] transposed to [B, M, 196] and broadcast across heads</span>
-    plan_bias = self.lambda_ot * torch.log(
-        inputs.transport.plan.transpose(<span class="num">1</span>, <span class="num">2</span>).clamp_min(<span class="num">1e-8</span>)
-    ).unsqueeze(<span class="num">1</span>)
-    attention_scores = attention_scores + plan_bias
-          </div>
-        </div>
-
-        <div class="callout green">
-          <b>4. Q-Former with Barycentric Multimodal Memory:</b>
-          <div class="code-block">
-<span class="cm"># From QFormerFusion.forward</span>
-<span class="kw">if</span> inputs.transport <span class="kw">is not</span> <span class="kw">None</span>:
-    <span class="cm"># Grounded multimodal memory: raw visual tokens + OT barycentric question tokens</span>
-    memory = torch.cat([self.visual_projection(visual), inputs.transport.fused_tokens], dim=<span class="num">1</span>)
-<span class="kw">else</span>:
-    memory = torch.cat([self.visual_projection(visual), self.question_projection(question)], dim=<span class="num">1</span>)
-<span class="cm"># 8 learnable queries self-attend, then cross-attend memory</span>
-output_memory = self.query_transformer(self.learned_queries, memory)
+    question_memory = self.question_projection(inputs.question_tokens)
+memory = torch.cat([self.visual_projection(inputs.visual_tokens), question_memory], dim=<span class="num">1</span>)
+queries = self.query_tokens.unsqueeze(<span class="num">0</span>).expand(B, -<span class="num">1</span>, -<span class="num">1</span>)
+<span class="kw">for</span> layer <span class="kw">in</span> self.layers:
+    queries, weights = layer(queries, memory, memory_mask)
           </div>
         </div>
         <div class="callout blue">
-          <b>Fairness &amp; Modularity:</b> All fusion modules conform to the standardized <code>FusionInput</code> and <code>FusionOutput</code> software contracts in <code>model/fusion_methods.py</code>. Padded positions are masked identically, and output memory is mapped to <code>d_model</code>.
+          <b>Masking, memory, and optimization behavior:</b> all token methods validate Boolean masks and require at least one valid visual and question token. Padded question positions are zeroed after fusion. BAN, MUTAN, and cross-attention emit one memory token per question position; Q-Former emits eight unmasked query tokens; native SAN emits one unmasked token; OT-SAN emits one unmasked summary followed by masked OT word tokens. For non-SAN models, the BERT encoder, legacy LSTM, image projection, and legacy SAN stack are frozen. In non-OT BAN/cross-attention, <code>ot_prior_scale</code> is also frozen; Q-Former trains either its raw-question projection or its OT-grounded projection, never both.
         </div>
       </section>
 
@@ -751,6 +900,98 @@ output_memory = self.query_transformer(self.learned_queries, memory)
             <p class="small">Outputs: <code>runs.csv</code>, <code>aggregate.csv</code>, <code>paired_deltas.csv</code>, and <code>paired_aggregate.csv</code>.</p>
           </div>
         </div>
+      </section>
+
+      <section id="results">
+        <div class="eyebrow">Measured Results · Seed 42</div>
+        <h2>OT Helps Selectively; UOT Is the Strongest Overall Variant</h2>
+        <p class="lead">The available result CSVs contain one paired run per configuration on the same seed. Across the five fusion families, UOT raises mean best generated validation F1 from <b>0.3669</b> to <b>0.3775</b> (<b>+0.0107</b>, or +1.07 percentage points). Balanced OT averages <b>0.3639</b>, slightly below the no-OT mean. These values describe this run only; they are not yet a statistically reliable ranking.</p>
+
+        <div class="metric-grid">
+          <div class="metric"><strong>0.4110</strong><span>Best single F1 · Cross-attention without OT</span></div>
+          <div class="metric"><strong>4 / 5</strong><span>Families where UOT beats no OT</span></div>
+          <div class="metric"><strong>+0.0398</strong><span>Largest Balanced-OT gain · BAN</span></div>
+          <div class="metric"><strong>3.85×</strong><span>Mean UOT inference latency vs no OT</span></div>
+        </div>
+
+        <table>
+          <thead><tr><th>Fusion family</th><th>No OT F1</th><th>Balanced F1 (Δ)</th><th>UOT F1 (Δ)</th><th>Interpretation of this run</th></tr></thead>
+          <tbody>
+            <tr><td><b>SAN</b></td><td>0.3727</td><td>0.3667 <span class="negative">(−0.0060)</span></td><td>0.3853 <span class="positive">(+0.0127)</span></td><td>Relaxed matching helps; forcing all visual and word mass to match does not.</td></tr>
+            <tr><td><b>BAN</b></td><td>0.3417</td><td>0.3815 <span class="positive">(+0.0398)</span></td><td>0.3790 <span class="positive">(+0.0373)</span></td><td>Both OT priors provide a strong alignment bias; their difference is negligible at one seed.</td></tr>
+            <tr><td><b>MUTAN</b></td><td>0.3870</td><td>0.3587 <span class="negative">(−0.0283)</span></td><td>0.3890 <span class="neutral">(+0.0020)</span></td><td>UOT recovers the baseline, while strict OT pooling likely removes useful global evidence.</td></tr>
+            <tr><td><b>Cross-attention</b></td><td><b>0.4110</b></td><td>0.3693 <span class="negative">(−0.0417)</span></td><td>0.3753 <span class="negative">(−0.0357)</span></td><td>Native learned attention is already effective; an added OT log-prior over-constrains it.</td></tr>
+            <tr><td><b>Q-Former</b></td><td>0.3220</td><td>0.3435 <span class="positive">(+0.0215)</span></td><td>0.3590 <span class="positive">(+0.0370)</span></td><td>Grounded barycentric tokens give the small learned query set a more informative memory.</td></tr>
+          </tbody>
+        </table>
+
+        <h3>Why the results differ by fusion family</h3>
+        <div class="grid three">
+          <div class="card"><h3>OT is an inductive bias</h3><p>BAN and Q-Former benefit most because OT supplies explicit patch-to-word structure where their native bottlenecks otherwise must discover it from only 1,000 training examples.</p></div>
+          <div class="card"><h3>UOT tolerates irrelevant tokens</h3><p>Questions contain non-visual words and images contain clutter. UOT may leave mass unmatched; Balanced OT must allocate all mass, which can create noisy correspondences. This is consistent with UOT outperforming Balanced OT in SAN, MUTAN, cross-attention, and Q-Former.</p></div>
+          <div class="card"><h3>Strong attention can be over-biased</h3><p>Cross-attention already learns a dense alignment. Adding <code>λ_ot log(P)</code> can double-impose an alignment and suppress alternatives, matching its observed 3.6–4.2 point F1 decline.</p></div>
+        </div>
+
+        <div class="callout orange"><b>Generalization warning:</b> OT variants usually show much larger train–validation gaps. For example, cross-attention UOT has a gap of <b>0.4349</b> versus <b>0.2270</b> without OT, and BAN UOT has <b>0.3502</b> versus <b>−0.0166</b>. The added alignment module and roughly 1.0–1.6M extra trainable parameters can fit the small training set without reliably improving validation answers.</div>
+
+        <h3>Why Can OT Perform Worse Than the Same Method Without OT?</h3>
+        <p>The transport solver is numerically valid, but a valid transport plan is not automatically the best alignment for answer generation. OT introduces an additional structural assumption: that useful reasoning can be represented as low-cost mass transported between image patches and question words. When that assumption, its learned cost, or its optimization signal is imperfect, OT can restrict a fusion module that would otherwise learn a better task-specific alignment.</p>
+
+        <div class="method-detail">
+          <h3>1. Balanced OT must explain every patch and every word</h3>
+          <div class="method-detail-grid">
+            <div><p>Balanced Sinkhorn enforces row and column marginals: all prescribed visual mass and question mass must participate. Real VQA inputs violate this idealized one-to-one accounting. Many of the 196 ViT patches are background, and words such as “what”, “is”, or “the” may carry little visual grounding information.</p><p>Consequently, Balanced OT can assign nonzero mass to irrelevant word–patch pairs merely to satisfy its marginals. That noisy mass then enters BAN and cross-attention as a log-prior and completely replaces native visual pooling in MUTAN.</p></div>
+            <div><div class="characteristic"><b>Evidence:</b> Balanced OT lowers F1 for SAN (−0.0060), MUTAN (−0.0283), and cross-attention (−0.0417), and its five-method mean falls from 0.3669 to 0.3639. UOT, which relaxes marginal conservation, beats Balanced OT in four of five families.</div></div>
+          </div>
+        </div>
+
+        <div class="method-detail">
+          <h3>2. The OT objective is indirect: it optimizes alignment cost, not answer F1</h3>
+          <div class="method-detail-grid">
+            <div><p>The plan is generated from a hybrid cosine/learned pairwise cost and question-conditioned marginals. These components are trained through the answer loss, but there is no direct supervision saying which word should align with which patch. On only 1,000 training examples, the cost network can discover a transport pattern that helps minimize training cross-entropy without representing the causal evidence needed on unseen questions.</p><p>Moreover, low transport cost only means that the projected features look compatible under the current cost function. It does not guarantee that the aligned feature is discriminative between candidate answers.</p></div>
+            <div><div class="characteristic"><b>Observable symptom:</b> OT models often achieve high training F1 while validation F1 stagnates. Cross-attention UOT reaches training F1 0.8102 at its selected epoch but validation F1 only 0.3753, producing the largest reported gap, 0.4349.</div></div>
+          </div>
+        </div>
+
+        <div class="method-detail">
+          <h3>3. OT can duplicate or override a fusion method’s own attention</h3>
+          <div class="method-detail-grid">
+            <div><p><b>Cross-attention:</b> already learns multi-head word-to-patch alignment from <code>QKᵀ</code>. Adding the same <code>log(Pᵀ)</code> bias to every head pushes all heads toward one external alignment and can suppress useful head diversity. This is the clearest negative result: no OT scores 0.4110, Balanced OT 0.3693, and UOT 0.3753.</p><p><b>MUTAN:</b> OT does not merely regularize native attention; it replaces the native dot-product pooling weights. If the transport plan misses a relevant patch, the later Tucker factors never see that evidence. Balanced MUTAN loses 0.0283 F1.</p><p><b>BAN:</b> OT is softer: it is added as a learned-scale prior while BAN retains its own bilinear scores. This lets BAN use the prior when helpful and counteract it when not, which plausibly explains why both OT variants improve BAN.</p></div>
+            <div><div class="characteristic"><b>Design principle:</b> OT is safer when injected as an optional, learnably weighted prior than when it replaces native evidence selection or biases every attention head identically.</div></div>
+          </div>
+        </div>
+
+        <div class="method-detail">
+          <h3>4. Added capacity increases overfitting on the small training split</h3>
+          <div class="method-detail-grid">
+            <div><p>The OT subsystem adds projections, two conditional marginal networks, a learned pairwise-cost MLP, and a four-way fusion projection—approximately 1.0–1.6 million trainable parameters depending on the family. It also creates an easier route for the model to memorize dataset-specific word–region correlations.</p><p>The train–validation gap rises sharply for many OT configurations: BAN moves from −0.0166 without OT to 0.3364/0.3502 with Balanced/UOT; Q-Former moves from 0.0204 to 0.2577/0.1481. Higher training fit is therefore not evidence that transport improves grounding.</p></div>
+            <div><div class="characteristic"><b>Practical implication:</b> stronger dropout, weight decay, freezing parts of the OT cost/marginal networks, or training on substantially more data may be necessary before the added alignment capacity generalizes.</div></div>
+          </div>
+        </div>
+
+        <div class="method-detail">
+          <h3>5. Autoregressive F1 amplifies small representation errors</h3>
+          <div class="method-detail-grid">
+            <div><p>Checkpoint quality is measured from generated answers, whereas optimization uses teacher-forced token cross-entropy. A slightly distorted fused memory may still assign reasonable probability to the correct next token when the true prefix is supplied, yet choose a wrong early token during free generation. That error changes the later prefix and can alter the complete answer.</p><p>This is why loss and F1 sometimes disagree. MUTAN UOT has slightly higher F1 than no-OT MUTAN (0.3890 versus 0.3870) despite much worse validation loss (1.8896 versus 1.5095). The metrics observe different behavior.</p></div>
+            <div><div class="characteristic"><b>Interpretation rule:</b> use generated F1 for model selection, but inspect validation loss, output diversity, and modality-shuffle diagnostics to determine whether an apparent F1 change reflects better grounding, calibration, or a small decoding effect.</div></div>
+          </div>
+        </div>
+
+        <div class="callout blue"><b>Bottom line:</b> the current experiment does not show that “OT is worse” in general. It shows that OT is method-dependent. UOT improves the five-family mean and helps SAN, BAN, and Q-Former, is effectively neutral for MUTAN, and harms cross-attention. Balanced OT is less robust because strict mass conservation is poorly matched to images with clutter and questions containing non-visual words. Because every comparison uses only seed 42, these mechanisms are evidence-supported hypotheses—not proven causal conclusions.</div>
+
+        <h3>Accuracy–efficiency trade-off</h3>
+        <table>
+          <thead><tr><th>Transport</th><th>Mean best val F1</th><th>Mean latency / example</th><th>Mean trainable parameters</th><th>Practical reading</th></tr></thead>
+          <tbody>
+            <tr><td>None</td><td>0.3669</td><td>5.56 ms</td><td>18.38M</td><td>Fastest and the safest default when latency matters.</td></tr>
+            <tr><td>Balanced OT</td><td>0.3639</td><td>14.92 ms (2.69×)</td><td>19.37M</td><td>No mean accuracy gain in this run despite added cost.</td></tr>
+            <tr><td>UOT</td><td><b>0.3775</b></td><td>21.39 ms (3.85×)</td><td>19.37M</td><td>Best mean F1, but the +1.07-point gain has a substantial runtime cost.</td></tr>
+          </tbody>
+        </table>
+
+        <div class="callout blue"><b>How to interpret loss:</b> validation loss and generated F1 need not rank models identically. MUTAN UOT reaches F1 0.3890 but loss 1.8896, while no-OT MUTAN has F1 0.3870 and loss 1.5095. Cross-entropy measures token probability calibration under teacher forcing; generated F1 measures overlap of autoregressively produced answers. The benchmark correctly selects checkpoints by generated F1.</div>
+
+        <div class="callout purple"><b>Evidence limit:</b> every aggregate currently has <code>runs=1</code> and <code>std=0</code> only because seed 42 is the sole observation. Run at least three paired seeds and evaluate the selected checkpoints on a held-out test split before claiming that UOT or any fusion family is superior. Source tables: <a href="../results/aggregate_san-ban-mutan_results.csv">SAN/BAN/MUTAN</a>, <a href="../results/aggregate_crossatt-qformer_results.csv">cross-attention/Q-Former</a>, and their paired-delta CSVs.</div>
       </section>
 
       <section id="inference">
