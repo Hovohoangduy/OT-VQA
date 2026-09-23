@@ -75,6 +75,15 @@ def get_args(argv=None):
     parser.add_argument("--ot_distill_weight", type=float, default=0.02)
     parser.add_argument("--ot_distill_warmup_epochs", type=int, default=5)
     parser.add_argument(
+        "--ot_gate_failure_policy",
+        choices=["fallback", "error"],
+        default="fallback",
+        help=(
+            "Continue with native Cross-Attention when the OT teacher fails validation, "
+            "or stop with an error"
+        ),
+    )
+    parser.add_argument(
         "--student_init_checkpoint",
         default=None,
         help="Optional student-only checkpoint used as identical initialization across paired runs",

@@ -273,6 +273,9 @@ def _run_ot_alignment_training(
         distill_target_weight = float(saved_alignment["ot_distill_weight"])
         contrastive_weight = float(saved_alignment["ot_contrastive_weight"])
         alignment_lr = float(saved_alignment.get("ot_alignment_lr", 1e-4))
+        gate_failure_policy = str(
+            saved_alignment.get("ot_gate_failure_policy", args.ot_gate_failure_policy)
+        )
         queue_size = int(saved_alignment["ot_negative_queue_size"])
         training_seed = int(saved_alignment.get("seed", args.seed))
     else:
@@ -282,6 +285,7 @@ def _run_ot_alignment_training(
         distill_target_weight = args.ot_distill_weight
         contrastive_weight = args.ot_contrastive_weight
         alignment_lr = args.ot_alignment_lr
+        gate_failure_policy = args.ot_gate_failure_policy
         queue_size = args.ot_negative_queue_size
         training_seed = args.seed
     alignment_config = {
@@ -289,6 +293,7 @@ def _run_ot_alignment_training(
         "alignment_warmup_epochs": warmup_epochs,
         "ot_contrastive_weight": contrastive_weight,
         "ot_alignment_lr": alignment_lr,
+        "ot_gate_failure_policy": gate_failure_policy,
         "ot_distill_weight": distill_target_weight,
         "ot_distill_warmup_epochs": distill_warmup_epochs,
         "ot_negative_queue_size": queue_size,
@@ -350,15 +355,26 @@ def _run_ot_alignment_training(
     best_metric = None
     epochs_without_improvement = 0
     restored_stage = None
+    fallback_active = False
     if resume is not None:
         start_epoch, global_step, best_metric = restore_training_state(
             resume, base_model, optimizer, scheduler
         )
         restored_stage = restore_alignment_state(resume, teacher_base, queue)
+        fallback_active = bool((restored_stage or {}).get("fallback_active", False))
+        if (
+            start_epoch >= warmup_epochs
+            and not (restored_stage or {}).get("gate_passed", False)
+            and gate_failure_policy == "fallback"
+        ):
+            # Version-4 checkpoints written before fallback support stopped at
+            # the failed gate. They can safely resume as native VQA training.
+            fallback_active = True
         epochs_without_improvement = int(resume.get("epochs_without_improvement", 0))
         if (
             start_epoch >= warmup_epochs
             and not (restored_stage or {}).get("gate_passed", False)
+            and not fallback_active
         ):
             raise RuntimeError(
                 "Cannot resume distillation: the saved OT teacher did not pass "
@@ -410,6 +426,9 @@ def _run_ot_alignment_training(
                 gate_passed, gate_reason = teacher_passes_gate(
                     val_metrics, teacher_config.negative_count
                 )
+                fallback_active = (
+                    not gate_passed and gate_failure_policy == "fallback"
+                )
             row = {
                 "epoch": epoch + 1,
                 "stage": "alignment_warmup",
@@ -442,6 +461,7 @@ def _run_ot_alignment_training(
                         "warmup_complete": epoch + 1 >= warmup_epochs,
                         "gate_passed": gate_passed,
                         "gate_reason": gate_reason,
+                        "fallback_active": fallback_active,
                     },
                 )
                 print(
@@ -454,11 +474,17 @@ def _run_ot_alignment_training(
             distributed.barrier()
             if epoch + 1 == warmup_epochs:
                 if not gate_passed:
-                    raise RuntimeError(
-                        "OT teacher failed the pre-distillation decision gate: "
-                        + gate_reason
-                    )
-                if distributed.is_main:
+                    if gate_failure_policy == "error":
+                        raise RuntimeError(
+                            "OT teacher failed the pre-distillation decision gate: "
+                            + gate_reason
+                        )
+                    if distributed.is_main:
+                        print(
+                            "OT teacher failed the decision gate; continuing with "
+                            "native Cross-Attention fallback. Reason: " + gate_reason
+                        )
+                elif distributed.is_main:
                     print("OT teacher passed the alignment gate; starting student distillation.")
             continue
 
@@ -469,24 +495,51 @@ def _run_ot_alignment_training(
             # Make paired student training independent of random numbers consumed
             # while constructing and warming the training-only OT teacher.
             seed_everything(training_seed + distributed.rank)
-        if distill_warmup_epochs:
+        if fallback_active:
+            distill_weight = 0.0
+        elif distill_warmup_epochs:
             distill_weight = distill_target_weight * min(
                 1.0, (student_epoch + 1) / distill_warmup_epochs
             )
         else:
             distill_weight = distill_target_weight
-        losses, train_em, train_f1, train_diagnostics = train_distillation_epoch(
-            model,
-            teacher,
-            train_loader,
-            optimizer,
-            scheduler,
-            train_criterion,
-            device,
-            distill_weight,
-            gradient_clip=args.gradient_clip or None,
-            distributed=distributed,
-        )
+        if fallback_active:
+            losses, train_em_rows, train_f1_rows = train(
+                model,
+                train_loader,
+                1,
+                optimizer,
+                scheduler,
+                train_criterion,
+                device=device,
+                diagnostics=args.diagnostics,
+                epoch_offset=student_epoch,
+                total_epochs=args.epochs,
+                gradient_clip=args.gradient_clip or None,
+                distributed=distributed,
+            )
+            train_em = train_em_rows[-1]
+            train_f1 = train_f1_rows[-1]
+            train_diagnostics = {
+                "vqa_loss": losses[-1],
+                "ot_distill_loss": 0.0,
+                "ot_distill_weight": 0.0,
+                "ot_matched_mass": 0.0,
+                "ot_convergence_rate": 0.0,
+            }
+        else:
+            losses, train_em, train_f1, train_diagnostics = train_distillation_epoch(
+                model,
+                teacher,
+                train_loader,
+                optimizer,
+                scheduler,
+                train_criterion,
+                device,
+                distill_weight,
+                gradient_clip=args.gradient_clip or None,
+                distributed=distributed,
+            )
         global_step += len(train_loader)
         distributed.barrier()
         validation = (
@@ -532,7 +585,8 @@ def _run_ot_alignment_training(
                 training_stage={
                     "phase": "distillation",
                     "warmup_complete": True,
-                    "gate_passed": True,
+                    "gate_passed": not fallback_active,
+                    "fallback_active": fallback_active,
                 },
             )
             if improved:
@@ -548,7 +602,7 @@ def _run_ot_alignment_training(
                 )
         row = {
             "epoch": epoch + 1,
-            "stage": "distillation",
+            "stage": "vqa_fallback" if fallback_active else "distillation",
             "train_loss": sum(losses) / len(losses),
             "train_em": train_em,
             "train_f1": train_f1,
@@ -558,6 +612,7 @@ def _run_ot_alignment_training(
             "learning_rate": scheduler.get_last_lr()[0],
             "improved": improved,
             "epochs_without_improvement": epochs_without_improvement,
+            "ot_gate_fallback": fallback_active,
         }
         row.update({f"train_{key}": value for key, value in train_diagnostics.items()})
         row.update({f"val_{key}": value for key, value in val_diagnostics.items()})
@@ -565,8 +620,9 @@ def _run_ot_alignment_training(
             history.append(row)
             with metrics_path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(row) + "\n")
+            phase_name = "VQA fallback" if fallback_active else "Distillation"
             print(
-                f"Distillation epoch {student_epoch + 1}/{args.epochs}: "
+                f"{phase_name} epoch {student_epoch + 1}/{args.epochs}: "
                 f"loss={row['train_loss']:.4f}, KL={train_diagnostics['ot_distill_loss']:.4f}, "
                 f"generated val F1={val_f1:.4f}, weight={distill_weight:.4f}"
             )
@@ -582,7 +638,10 @@ def _run_ot_alignment_training(
                 )
             break
 
-    distillation_rows = [row for row in history if row["stage"] == "distillation"]
+    distillation_rows = [
+        row for row in history
+        if row["stage"] in {"distillation", "vqa_fallback"}
+    ]
     if distillation_rows and distributed.is_main:
         plt.figure(figsize=(10, 6))
         plt.plot(
@@ -907,4 +966,9 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    finally:
+        # Also clean up when a validation gate or another training check raises.
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            torch.distributed.destroy_process_group()

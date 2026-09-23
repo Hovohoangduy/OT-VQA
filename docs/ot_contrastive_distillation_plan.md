@@ -352,7 +352,10 @@ Proceed to distillation only when:
 - transport plans, mass, entropy, and residuals are finite;
 - matched mass does not collapse toward zero.
 
-If these checks fail, stop. Do not build VQA training around an invalid teacher.
+If these checks fail, do not distill the invalid teacher. The default operational policy
+continues the run as a native Cross-Attention fallback with zero OT weight and records the
+fallback in its metrics. Strict experiments can use `--ot_gate_failure_policy error` to
+stop at the gate.
 
 ### Stage 2 — frozen-teacher distillation
 

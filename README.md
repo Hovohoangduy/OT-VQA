@@ -213,6 +213,11 @@ torchrun --standalone --nproc_per_node=2 train.py \
 gradients and training metrics are synchronized, and only rank zero runs full validation
 and writes checkpoints.
 
+By default, a failed OT-teacher decision gate no longer aborts the VQA job. Training
+continues as native Cross-Attention with zero OT distillation weight and records
+`ot_gate_fallback=true` in `metrics.jsonl`. Use `--ot_gate_failure_policy error` when a
+failed alignment gate should terminate the run instead.
+
 First create one common student initialization per seed for a fair paired baseline:
 
 ```bash
