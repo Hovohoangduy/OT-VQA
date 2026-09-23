@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -10,7 +11,9 @@ import torch
 from torch import nn, optim
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader, DistributedSampler
-from transformers import get_linear_schedule_with_warmup
+from transformers import (
+    get_cosine_schedule_with_warmup, get_linear_schedule_with_warmup,
+)
 
 from configs.arg_parser import get_args
 from configs.config import Config
@@ -37,7 +40,9 @@ from utils.ot_alignment_training import (
 from utils.vqa_dataset import VQADataset, resolve_image_root
 
 
-def _forward_batch(model, batch, device, diagnostics=False):
+def _forward_batch(
+    model, batch, device, diagnostics=False, return_fusion_output=False,
+):
     if isinstance(batch, dict):
         answers = batch["answers"]
         result = model(
@@ -46,35 +51,130 @@ def _forward_batch(model, batch, device, diagnostics=False):
             question_padding_mask=batch["question_padding_mask"].to(device),
             answers=answers,
             return_diagnostics=diagnostics,
+            return_fusion_output=return_fusion_output,
         )
     else:
         anno_ids, images, questions, answers = batch
         result = model(images.to(device), questions, answers, anno_ids,
-                       return_diagnostics=diagnostics)
+                       return_diagnostics=diagnostics,
+                       return_fusion_output=return_fusion_output)
     return result, answers
 
 
+def _stable_gradient_norm(gradients):
+    """Compute an L2 norm without overflowing float32 or copying full fp64 grads."""
+    gradients = list(gradients)
+    if not gradients:
+        return 0.0
+    maximum = torch.stack([
+        gradient.detach().float().abs().amax() for gradient in gradients
+    ]).amax()
+    if not torch.isfinite(maximum):
+        return float("inf")
+    if maximum.item() == 0:
+        return 0.0
+    scaled_squares = torch.stack([
+        (gradient.detach().float() / maximum).square().sum()
+        for gradient in gradients
+    ]).sum().item()
+    return maximum.item() * math.sqrt(scaled_squares)
+
+
 def _module_gradient_norm(module):
-    squares = [
-        parameter.grad.detach().float().square().sum()
-        for parameter in module.parameters()
+    return _stable_gradient_norm(
+        parameter.grad for parameter in module.parameters()
+        if parameter.grad is not None
+    )
+
+
+def _gradient_health(parameters, detailed=True):
+    gradients = [
+        parameter.grad.detach() for parameter in parameters
         if parameter.grad is not None
     ]
-    if not squares:
-        return 0.0
-    return torch.stack(squares).sum().sqrt().item()
+    if not gradients:
+        return {"finite": True, "norm": 0.0, "max_abs": 0.0, "nonfinite": 0}
+    nonfinite = sum((~torch.isfinite(gradient)).sum().item() for gradient in gradients)
+    maximum = max(
+        gradient.float().abs().nan_to_num(posinf=float("inf")).amax().item()
+        for gradient in gradients
+    )
+    norm = (
+        _stable_gradient_norm(gradients)
+        if detailed and nonfinite == 0 else (float("inf") if nonfinite else 0.0)
+    )
+    return {
+        "finite": nonfinite == 0,
+        "norm": norm,
+        "max_abs": maximum,
+        "nonfinite": nonfinite,
+    }
+
+
+def _sequence_log_probability(logits, targets, pad_token_id):
+    token_scores = torch.log_softmax(logits.float(), dim=-1).gather(
+        -1, targets.unsqueeze(-1)
+    ).squeeze(-1)
+    valid = targets.ne(pad_token_id)
+    return (token_scores * valid).sum(-1) / valid.sum(-1).clamp_min(1)
+
+
+def _counterfactual_forward(model, batch, device):
+    """Use the best cyclic in-batch permutation with different image and answer."""
+    answers = list(batch["answers"] if isinstance(batch, dict) else batch[3])
+    identifiers = list(batch["anno_ids"] if isinstance(batch, dict) else batch[0])
+    count = len(answers)
+    if count < 2:
+        return None, None
+    best_shift, best_valid = None, None
+    for shift in range(1, count):
+        valid = torch.tensor([
+            str(identifiers[index]) != str(identifiers[(index + shift) % count])
+            and answers[index].strip().lower()
+            != answers[(index + shift) % count].strip().lower()
+            for index in range(count)
+        ], device=device, dtype=torch.bool)
+        if best_valid is None or valid.sum().item() > best_valid.sum().item():
+            best_shift, best_valid = shift, valid
+    if best_valid is None:
+        return None, None
+    order = torch.roll(torch.arange(count, device=device), shifts=-best_shift)
+    if isinstance(batch, dict):
+        result = model(
+            image_features=batch["image_features"].to(device).index_select(0, order),
+            question_features=batch["question_features"].to(device),
+            question_padding_mask=batch["question_padding_mask"].to(device),
+            answers=answers,
+        )
+    else:
+        anno_ids, images, questions, _ = batch
+        if torch.is_tensor(anno_ids):
+            wrong_ids = anno_ids.to(device).index_select(0, order)
+        else:
+            indices = order.cpu().tolist()
+            wrong_ids = [anno_ids[index] for index in indices]
+        result = model(
+            images.to(device).index_select(0, order), questions, answers, wrong_ids,
+        )
+    return result, best_valid
 
 
 def train(model, train_loader, num_epochs, optimizer, scheduler, criterion,
           vocab_swap=None, device=None, diagnostics=False, epoch_offset=0,
           total_epochs=None, gradient_clip=None, distributed=None,
-          grad_scaler=None):
+          grad_scaler=None, routing_query_diversity_weight=0.0,
+          gradient_accumulation_steps=1, counterfactual_weight=0.0,
+          counterfactual_margin=0.2, counterfactual_fraction=0.25,
+          return_diagnostics_summary=False):
     """Run teacher-forced optimization; generation is reserved for validation."""
     device = device or next(model.parameters()).device
     base_model = unwrap_model(model)
     losses, em_scores, f1_scores = [], [], []
+    latest_diagnostics = {}
     if len(train_loader) == 0:
         raise ValueError("Training dataset is empty")
+    if gradient_accumulation_steps < 1:
+        raise ValueError("gradient_accumulation_steps must be positive")
     for epoch in range(num_epochs):
         displayed_epoch = epoch_offset + epoch + 1
         displayed_total = total_epochs if total_epochs is not None else epoch_offset + num_epochs
@@ -82,6 +182,7 @@ def train(model, train_loader, num_epochs, optimizer, scheduler, criterion,
         total_loss = total_em = total_f1 = 0.0
         examples = tokens = 0
         diagnostic_rows = []
+        optimizer.zero_grad(set_to_none=True)
         for batch_idx, batch in enumerate(train_loader):
             amp_enabled = grad_scaler is not None and grad_scaler.is_enabled()
             with torch.autocast(
@@ -89,10 +190,19 @@ def train(model, train_loader, num_epochs, optimizer, scheduler, criterion,
                 dtype=torch.float16 if device.type == "cuda" else None,
                 enabled=amp_enabled,
             ):
-                result, answers = _forward_batch(model, batch, device, diagnostics)
-                if diagnostics:
+                needs_fusion_output = (
+                    diagnostics
+                    or (
+                        routing_query_diversity_weight > 0
+                        and base_model.fusion_type != "cross_attention"
+                    )
+                )
+                result, answers = _forward_batch(
+                    model, batch, device, diagnostics, needs_fusion_output,
+                )
+                if needs_fusion_output:
                     logits, targets, fusion_output = result
-                    if fusion_output.diagnostics:
+                    if diagnostics and fusion_output.diagnostics:
                         diagnostic_rows.append({
                             key: value.detach().float().mean().item()
                             for key, value in fusion_output.diagnostics.items()
@@ -100,14 +210,62 @@ def train(model, train_loader, num_epochs, optimizer, scheduler, criterion,
                 else:
                     logits, targets = result
                 loss = criterion(logits.transpose(1, 2), targets)
+                counterfactual_loss = loss.new_zeros(())
+                counterfactual_examples = 0
+                if counterfactual_weight > 0 and counterfactual_fraction > 0:
+                    wrong_result, eligible = _counterfactual_forward(
+                        model, batch, device
+                    )
+                    if wrong_result is not None:
+                        wrong_logits, wrong_targets = wrong_result[:2]
+                        selected = eligible & (
+                            torch.rand(eligible.shape, device=device)
+                            < counterfactual_fraction
+                        )
+                        if (counterfactual_fraction > 0 and eligible.any()
+                                and not selected.any()):
+                            selected[eligible.nonzero(as_tuple=False)[0, 0]] = True
+                        if selected.any():
+                            true_score = _sequence_log_probability(
+                                logits, targets, base_model.pad_token_id
+                            )
+                            wrong_score = _sequence_log_probability(
+                                wrong_logits, wrong_targets, base_model.pad_token_id
+                            )
+                            counterfactual_loss = torch.relu(
+                                counterfactual_margin - true_score + wrong_score
+                            )[selected].mean()
+                            counterfactual_examples = int(selected.sum().item())
+                            loss = loss + counterfactual_weight * counterfactual_loss
+                routing_loss = (
+                    getattr(fusion_output, "auxiliary_loss", None)
+                    if needs_fusion_output else None
+                )
+                if routing_loss is not None:
+                    loss = loss + routing_query_diversity_weight * routing_loss
+                    if diagnostics and diagnostic_rows:
+                        diagnostic_rows[-1]["routing_query_diversity_loss"] = (
+                            routing_loss.detach().float().item()
+                        )
+                if diagnostics and diagnostic_rows:
+                    diagnostic_rows[-1].update({
+                        "counterfactual_loss": counterfactual_loss.detach().float().item(),
+                        "counterfactual_examples": float(counterfactual_examples),
+                        "gradient_skipped_step": 0.0,
+                        "gradient_nonfinite_elements": 0.0,
+                    })
             if not torch.isfinite(loss):
                 raise FloatingPointError("Training loss is NaN or infinity")
-            optimizer.zero_grad(set_to_none=True)
+            group_start = (
+                batch_idx // gradient_accumulation_steps
+            ) * gradient_accumulation_steps
+            group_size = min(
+                gradient_accumulation_steps, len(train_loader) - group_start
+            )
             if grad_scaler is not None:
-                grad_scaler.scale(loss).backward()
-                grad_scaler.unscale_(optimizer)
+                grad_scaler.scale(loss / group_size).backward()
             else:
-                loss.backward()
+                (loss / group_size).backward()
             if diagnostics and diagnostic_rows:
                 diagnostic_rows[-1]["fusion_gradient_norm"] = _module_gradient_norm(
                     base_model.fusion_module
@@ -119,17 +277,58 @@ def train(model, train_loader, num_epochs, optimizer, scheduler, criterion,
                     diagnostic_rows[-1]["routing_preference_gradient_norm"] = (
                         _module_gradient_norm(base_model.fusion_module.preference_score)
                     )
-            if gradient_clip:
-                torch.nn.utils.clip_grad_norm_(
-                    (parameter for parameter in model.parameters() if parameter.requires_grad),
-                    gradient_clip,
-                )
-            if grad_scaler is not None:
-                grad_scaler.step(optimizer)
-                grad_scaler.update()
-            else:
-                optimizer.step()
-            scheduler.step()
+            should_step = (
+                (batch_idx + 1) % gradient_accumulation_steps == 0
+                or batch_idx + 1 == len(train_loader)
+            )
+            if should_step:
+                if grad_scaler is not None:
+                    grad_scaler.unscale_(optimizer)
+                trainable = [
+                    parameter for parameter in model.parameters()
+                    if parameter.requires_grad
+                ]
+                health = _gradient_health(trainable, detailed=diagnostics)
+                if distributed is not None and distributed.enabled:
+                    finite_flag = torch.tensor(
+                        1 if health["finite"] else 0,
+                        device=device, dtype=torch.int32,
+                    )
+                    torch.distributed.all_reduce(
+                        finite_flag, op=torch.distributed.ReduceOp.MIN
+                    )
+                    health["finite"] = bool(finite_flag.item())
+                if diagnostics and diagnostic_rows:
+                    diagnostic_rows[-1].update({
+                        "preclip_gradient_norm": health["norm"],
+                        "gradient_max_abs": health["max_abs"],
+                        "gradient_nonfinite_elements": float(health["nonfinite"]),
+                    })
+                if health["finite"]:
+                    if gradient_clip:
+                        torch.nn.utils.clip_grad_norm_(trainable, gradient_clip)
+                    if diagnostics and diagnostic_rows:
+                        diagnostic_rows[-1]["postclip_gradient_norm"] = (
+                            _gradient_health(trainable)["norm"]
+                        )
+                    if grad_scaler is not None:
+                        grad_scaler.step(optimizer)
+                        grad_scaler.update()
+                    else:
+                        optimizer.step()
+                    scheduler.step()
+                else:
+                    if diagnostics and diagnostic_rows:
+                        diagnostic_rows[-1]["gradient_skipped_step"] = 1.0
+                    if grad_scaler is not None:
+                        backoff = (
+                            grad_scaler.get_backoff_factor()
+                            if hasattr(grad_scaler, "get_backoff_factor") else 0.5
+                        )
+                        grad_scaler.update(
+                            new_scale=grad_scaler.get_scale() * backoff
+                        )
+                optimizer.zero_grad(set_to_none=True)
             batch_tokens = targets.ne(base_model.pad_token_id).sum().item()
             total_loss += loss.item() * batch_tokens
             tokens += batch_tokens
@@ -156,14 +355,30 @@ def train(model, train_loader, num_epochs, optimizer, scheduler, criterion,
                    f"loss={total_loss / max(tokens, 1):.4f}, "
                    f"teacher-forced EM={em_scores[-1]:.4f}, F1={f1_scores[-1]:.4f}")
         if diagnostic_rows:
-            means = {key: sum(row[key] for row in diagnostic_rows) / len(diagnostic_rows)
-                     for key in diagnostic_rows[0]}
+            ordered_keys = sorted(set().union(*(set(row) for row in diagnostic_rows)))
+            totals = [
+                sum(row[key] for row in diagnostic_rows if key in row)
+                for key in ordered_keys
+            ]
+            counts = [
+                sum(key in row for row in diagnostic_rows) for key in ordered_keys
+            ]
+            if distributed is not None:
+                reduced = reduce_totals(totals + counts, distributed)
+                totals = reduced[:len(ordered_keys)]
+                counts = reduced[len(ordered_keys):]
+            means = {
+                key: value / max(count, 1)
+                for key, value, count in zip(ordered_keys, totals, counts)
+            }
+            latest_diagnostics = means
             message += ", fusion " + ", ".join(
                 f"{key}={value:.4g}" for key, value in means.items()
             )
         if distributed is None or distributed.is_main:
             print(message)
-    return losses, em_scores, f1_scores
+    result = (losses, em_scores, f1_scores)
+    return (*result, latest_diagnostics) if return_diagnostics_summary else result
 
 
 def _make_loader(args, split, shuffle, text_model, image_model, distributed=None):
@@ -216,6 +431,7 @@ def _fusion_config_from_args(args):
 
 
 def _routing_config_from_args(args):
+    is_v2 = args.fusion.endswith("_v2")
     return {
         "slots": args.routing_slots,
         "reasoning_steps": args.routing_steps,
@@ -226,11 +442,35 @@ def _routing_config_from_args(args):
         "tau": args.routing_tau,
         "sinkhorn_iterations": args.routing_iterations,
         "diagnostic_tolerance": args.routing_tolerance,
-        "preference_smoothing": args.routing_preference_smoothing,
+        "preference_smoothing": (
+            args.routing_preference_smoothing
+            if args.routing_preference_smoothing is not None
+            else (0.001 if is_v2 else 0.05)
+        ),
         "null_min": args.routing_null_min,
         "null_max": args.routing_null_max,
         "shared_step_weights": True,
         "visual_preference": args.routing_visual_preference,
+        "memory_mode": "routed_patches" if is_v2 else "slots",
+        "preference_transform": (
+            args.routing_preference_transform
+            or ("sparsemax" if is_v2 else "softmax")
+        ),
+        "preference_topk": args.routing_preference_topk,
+        "cost_scale_mode": (
+            args.routing_cost_scale_mode or ("learned" if is_v2 else "fixed")
+        ),
+        "cost_scale": (
+            args.routing_cost_scale
+            if args.routing_cost_scale is not None else (4.0 if is_v2 else 1.0)
+        ),
+        "cost_scale_min": args.routing_cost_scale_min,
+        "cost_scale_max": args.routing_cost_scale_max,
+        "question_conditioned_keys": (
+            args.routing_question_conditioned_keys
+            if args.routing_question_conditioned_keys is not None else is_v2
+        ),
+        "routed_gate_max": args.routing_gate_max,
     }
 
 
@@ -682,6 +922,20 @@ def main():
         raise ValueError("weight_decay cannot be negative")
     if args.gradient_clip < 0:
         raise ValueError("gradient_clip cannot be negative")
+    if args.gradient_accumulation_steps < 1:
+        raise ValueError("gradient_accumulation_steps must be positive")
+    if not 0 <= args.warmup_ratio < 1:
+        raise ValueError("warmup_ratio must be in [0, 1)")
+    if any(value is not None and value <= 0 for value in (
+        args.lr, args.fusion_lr, args.decoder_lr,
+    )):
+        raise ValueError("Learning rates must be positive")
+    if args.counterfactual_weight < 0 or args.counterfactual_margin < 0:
+        raise ValueError("Counterfactual weight and margin must be nonnegative")
+    if not 0 <= args.counterfactual_fraction <= 1:
+        raise ValueError("counterfactual_fraction must be in [0, 1]")
+    if args.counterfactual_warmup_epochs < 0:
+        raise ValueError("counterfactual_warmup_epochs cannot be negative")
     if args.student_init_checkpoint and args.resume:
         raise ValueError("Use either --student_init_checkpoint or --resume, not both")
     if args.save_student_initialization and (args.resume or args.student_init_checkpoint):
@@ -734,10 +988,21 @@ def main():
             raise ValueError("routing_dim must be divisible by num_heads")
         if args.routing_epsilon <= 0 or args.routing_tau < 0 or args.routing_tolerance <= 0:
             raise ValueError("Routing epsilon/tolerance must be positive and tau nonnegative")
-        if not 0 <= args.routing_preference_smoothing < 1:
+        if (args.routing_preference_smoothing is not None and
+                not 0 <= args.routing_preference_smoothing < 1):
             raise ValueError("routing_preference_smoothing must be in [0, 1)")
         if not 0 < args.routing_null_min < args.routing_null_max < 1:
             raise ValueError("Routing null bounds must satisfy 0 < min < max < 1")
+        if args.routing_query_diversity_weight < 0:
+            raise ValueError("routing_query_diversity_weight cannot be negative")
+        if min(args.routing_tau_warmup_epochs, args.routing_tau_ramp_epochs) < 0:
+            raise ValueError("Routing tau schedule epochs cannot be negative")
+        if args.routing_preference_topk < 1 or args.routing_gate_max <= 0:
+            raise ValueError("Routing top-k and gate maximum must be positive")
+        routing_values = _routing_config_from_args(args)
+        # Run the dataclass validation before loading data or encoders.
+        from model.ot_routing import OTEvidenceRoutingConfig
+        OTEvidenceRoutingConfig.from_dict(routing_values)
     seed_everything(args.seed)
     distributed = initialize_distributed(args.device)
     device = distributed.device
@@ -854,11 +1119,51 @@ def main():
     trainable_parameter_count = sum(
         parameter.numel() for parameter in trainable_parameters
     )
-    optimizer = optim.AdamW(
-        trainable_parameters,
-        lr=args.lr if args.lr is not None else Config.lr,
-        weight_decay=args.weight_decay,
+    base_lr = args.lr if args.lr is not None else (
+        1e-4 if base_model.fusion_type.endswith("_v2") else Config.lr
     )
+    fusion_lr = args.fusion_lr if args.fusion_lr is not None else (
+        3e-4 if base_model.fusion_type.endswith("_v2") else base_lr
+    )
+    decoder_lr = args.decoder_lr if args.decoder_lr is not None else (
+        1e-4 if base_model.fusion_type.endswith("_v2") else base_lr
+    )
+    use_parameter_groups = (
+        base_model.fusion_type.endswith("_v2")
+        or args.fusion_lr is not None
+        or args.decoder_lr is not None
+    )
+    if use_parameter_groups:
+        fusion_parameters = [
+            parameter for parameter in base_model.fusion_module.parameters()
+            if parameter.requires_grad
+        ]
+        decoder_modules = [
+            base_model.decoder, base_model.answer_embedding,
+            base_model.answer_projection, base_model.mlp,
+        ]
+        decoder_parameters = [
+            parameter for module in decoder_modules for parameter in module.parameters()
+            if parameter.requires_grad
+        ]
+        assigned = {
+            id(parameter) for parameter in fusion_parameters + decoder_parameters
+        }
+        remaining_parameters = [
+            parameter for parameter in trainable_parameters
+            if id(parameter) not in assigned
+        ]
+        parameter_groups = []
+        if fusion_parameters:
+            parameter_groups.append({"params": fusion_parameters, "lr": fusion_lr})
+        if decoder_parameters:
+            parameter_groups.append({"params": decoder_parameters, "lr": decoder_lr})
+        if remaining_parameters:
+            parameter_groups.append({"params": remaining_parameters, "lr": base_lr})
+    else:
+        # Preserve the optimizer layout expected by existing V1 checkpoints.
+        parameter_groups = [{"params": trainable_parameters, "lr": base_lr}]
+    optimizer = optim.AdamW(parameter_groups, weight_decay=args.weight_decay)
     grad_scaler = (
         torch.amp.GradScaler("cuda")
         if args.mixed_precision and device.type == "cuda" else None
@@ -870,8 +1175,19 @@ def main():
             f"Parameters: total={total_parameter_count:,}, "
             f"trainable={trainable_parameter_count:,}"
         )
-    scheduler = get_linear_schedule_with_warmup(
-        optimizer, num_warmup_steps=0, num_training_steps=len(train_loader) * args.epochs
+    optimizer_steps_per_epoch = math.ceil(
+        len(train_loader) / args.gradient_accumulation_steps
+    )
+    total_optimizer_steps = optimizer_steps_per_epoch * args.epochs
+    warmup_steps = int(total_optimizer_steps * args.warmup_ratio)
+    scheduler_factory = (
+        get_cosine_schedule_with_warmup
+        if args.lr_schedule == "cosine" else get_linear_schedule_with_warmup
+    )
+    scheduler = scheduler_factory(
+        optimizer,
+        num_warmup_steps=warmup_steps,
+        num_training_steps=total_optimizer_steps,
     )
     start_epoch = global_step = 0
     best_metric = None
@@ -909,15 +1225,41 @@ def main():
     from test import evaluation
     for epoch in range(start_epoch, args.epochs):
         _set_loader_epoch(train_loader, epoch)
-        losses, train_em, train_f1 = train(
+        runtime_tau = None
+        if base_model.fusion_type != "cross_attention":
+            target_tau = base_model.fusion_module.config.tau
+            if base_model.fusion_module.routing_mode == "softmax":
+                runtime_tau = 0.0
+            elif epoch < args.routing_tau_warmup_epochs:
+                runtime_tau = 0.0
+            elif (args.routing_tau_ramp_epochs > 0 and
+                  epoch < args.routing_tau_warmup_epochs + args.routing_tau_ramp_epochs):
+                runtime_tau = target_tau * (
+                    epoch - args.routing_tau_warmup_epochs + 1
+                ) / args.routing_tau_ramp_epochs
+            else:
+                runtime_tau = target_tau
+            base_model.fusion_module.set_tau(runtime_tau)
+        counterfactual_weight = args.counterfactual_weight
+        if args.counterfactual_warmup_epochs:
+            counterfactual_weight *= min(
+                1.0, epoch / args.counterfactual_warmup_epochs
+            )
+        losses, train_em, train_f1, train_diagnostics = train(
             model, train_loader, 1, optimizer, scheduler, train_criterion,
             device=device, diagnostics=args.diagnostics,
             epoch_offset=epoch, total_epochs=args.epochs,
             gradient_clip=args.gradient_clip or None,
             distributed=distributed,
             grad_scaler=grad_scaler,
+            routing_query_diversity_weight=args.routing_query_diversity_weight,
+            gradient_accumulation_steps=args.gradient_accumulation_steps,
+            counterfactual_weight=counterfactual_weight,
+            counterfactual_margin=args.counterfactual_margin,
+            counterfactual_fraction=args.counterfactual_fraction,
+            return_diagnostics_summary=True,
         )
-        global_step += len(train_loader)
+        global_step += optimizer_steps_per_epoch
         distributed.barrier()
         validation = (
             evaluation(
@@ -952,10 +1294,19 @@ def main():
                "train_em": train_em[-1], "train_f1": train_f1[-1],
                "val_loss": val_loss, "val_em": val_em, "val_f1": val_f1,
                "learning_rate": scheduler.get_last_lr()[0],
+               "learning_rates": scheduler.get_last_lr(),
+               "routing_runtime_tau": runtime_tau,
+               "counterfactual_weight": counterfactual_weight,
+               "gradient_accumulation_steps": args.gradient_accumulation_steps,
+               "routing_query_diversity_weight": (
+                   args.routing_query_diversity_weight
+                   if base_model.fusion_type != "cross_attention" else 0.0
+               ),
                "total_parameters": total_parameter_count,
                "trainable_parameters": trainable_parameter_count,
                "improved": improved,
                "epochs_without_improvement": epochs_without_improvement}
+        row.update({f"train_{key}": value for key, value in train_diagnostics.items()})
         row.update({f"val_{key}": value for key, value in val_diagnostics.items()})
         if distributed.is_main:
             history.append(row)

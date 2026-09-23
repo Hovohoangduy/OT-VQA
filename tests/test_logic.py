@@ -195,6 +195,32 @@ class ModelLogicTests(unittest.TestCase):
         self.assertEqual(output.memory.shape, (1, 2, 16))
         self.assertEqual(model.fusion_module.routing_mode, "softmax")
 
+    def test_v2_routed_memory_checkpoint_and_matched_control(self):
+        ot = self.make_model(fusion="ot_evidence_routing_v2")
+        control = self.make_model(fusion="softmax_evidence_routing_v2")
+        control.load_state_dict(ot.state_dict())
+        images = torch.rand(2, 3, 32, 32)
+        questions = ["what color ?", "color ?"]
+        ot.eval()
+        control.eval()
+        with torch.no_grad():
+            routed = ot.encode(images, questions, return_diagnostics=True)
+        # Five padded/tokenizer positions, two slots, and four spatial DeiT patches.
+        self.assertEqual(routed.memory.shape[1], 11)
+        self.assertIn("routing_gate_mean", routed.fusion_output.diagnostics)
+        self.assertEqual(ot.fusion_module.config.memory_mode, "routed_patches")
+        self.assertEqual(ot.fusion_module.config.preference_transform, "sparsemax")
+
+        path = self.root / "ot-routing-v2.pt"
+        save_checkpoint(
+            path, model=ot, text_model=str(self.text), image_model=str(self.visual),
+        )
+        payload = read_checkpoint(path, torch.device("cpu"))
+        self.assertEqual(payload["architecture"], "ot_evidence_routing_v2")
+        load_student_initialization(path, control)
+        restored = load_model(path, torch.device("cpu"))
+        self.assertEqual(restored.fusion_type, "ot_evidence_routing_v2")
+
     def test_routing_initialization_can_transfer_between_matched_controls(self):
         source = self.make_model(fusion="ot_evidence_routing")
         path = self.root / "routing-initialization.pt"

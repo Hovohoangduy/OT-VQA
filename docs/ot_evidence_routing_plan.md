@@ -220,6 +220,22 @@ Do not enable the current contrastive teacher or attention distillation in these
 runs. Add grounding or diversity losses only after diagnosing a specific failure,
 as separately reported experiments.
 
+Post-pilot revision: training diagnostics showed pairwise routing similarity near
+0.98 and routing-query gradients orders of magnitude below the complete fusion
+gradient. The implemented follow-up objective is therefore:
+
+    L = autoregressive answer cross-entropy
+        + lambda_div * mean_(i != j) cosine(query_i, query_j)^2
+
+with `lambda_div=0.05` by default and a zero-weight ablation. Slot templates and the
+shared question context are also normalized independently before being combined.
+The default fixed Sinkhorn budget is increased from 20 to 40 because the pilot's
+late-training fixed-point residual was about `0.005`, while the configured tolerance
+is `0.001`. Existing checkpoints retain the iteration count saved in their model
+configuration.
+This is a targeted response to measured slot collapse, not evidence by itself that OT
+improves VQA accuracy; matched multi-seed results remain required.
+
 Required diagnostics, detached from the computation graph:
 
 - Answer loss and generated EM/F1.

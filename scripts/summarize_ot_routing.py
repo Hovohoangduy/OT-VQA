@@ -15,6 +15,8 @@ MODELS = (
     "softmax_evidence_routing",
     "ot_evidence_routing",
     "ot_tau_zero",
+    "softmax_evidence_routing_v2",
+    "ot_evidence_routing_v2",
 )
 
 
@@ -58,7 +60,23 @@ def main():
                 "train_val_f1_gap": row["train_f1"] - row["val_f1"],
                 "latency_ms_per_example": row.get("val_latency_ms_per_example"),
                 "routing_null": row.get("val_fusion_routing_null"),
+                "routing_similarity": row.get("val_fusion_routing_similarity"),
+                "routing_query_similarity": row.get(
+                    "val_fusion_routing_query_similarity"
+                ),
                 "routing_converged": row.get("val_fusion_routing_converged"),
+                "preference_effective_support": row.get(
+                    "val_fusion_routing_preference_effective_support"
+                ),
+                "column_effective_support": row.get(
+                    "val_fusion_routing_column_effective_support"
+                ),
+                "cost_to_epsilon": row.get(
+                    "val_fusion_routing_cost_to_epsilon"
+                ),
+                "routed_gate_mean": row.get(
+                    "val_fusion_routing_gate_mean"
+                ),
             })
     if not records:
         raise ValueError(f"No matched run metrics found below {root}")
@@ -89,16 +107,31 @@ def main():
         if ot is not None and softmax is not None:
             paired.append({
                 "seed": seed,
+                "comparison": "v1",
                 "ot_minus_softmax_f1": ot["best_val_f1"] - softmax["best_val_f1"],
+            })
+        ot_v2 = by_model_seed.get(("ot_evidence_routing_v2", seed))
+        softmax_v2 = by_model_seed.get(("softmax_evidence_routing_v2", seed))
+        if ot_v2 is not None and softmax_v2 is not None:
+            paired.append({
+                "seed": seed,
+                "comparison": "v2",
+                "ot_minus_softmax_f1": (
+                    ot_v2["best_val_f1"] - softmax_v2["best_val_f1"]
+                ),
             })
     report = {
         "runs": records,
         "summary": summary,
         "paired_ot_vs_softmax": paired,
-        "mean_paired_f1_difference": (
-            statistics.fmean(row["ot_minus_softmax_f1"] for row in paired)
-            if paired else None
-        ),
+        "mean_paired_f1_difference": {
+            version: statistics.fmean(
+                row["ot_minus_softmax_f1"] for row in paired
+                if row["comparison"] == version
+            )
+            for version in ("v1", "v2")
+            if any(row["comparison"] == version for row in paired)
+        },
     }
     output = Path(args.output) if args.output else root / "summary.json"
     output.parent.mkdir(parents=True, exist_ok=True)

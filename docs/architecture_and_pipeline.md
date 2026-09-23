@@ -47,8 +47,12 @@ cache manifests also record grid size and prefix-token count.
 For pooled question representation `q` and learned slot identity `e_i`:
 
 ```text
-S_i(0) = LayerNorm(e_i + Wq q)
+S_i(0) = LayerNorm((LayerNorm(e_i) + LayerNorm(Wq q)) / sqrt(2))
 ```
+
+Independent normalization is important: adding a small slot embedding directly to a
+larger shared question vector collapses the initial slot roles and therefore the OT
+rows.
 
 At each reasoning step, normalized slot queries and evidence keys produce the bounded
 cosine cost:
@@ -91,8 +95,40 @@ and a feed-forward update. The starting configuration shares these weights over 
 reasoning steps. Final slots are projected to decoder width and become unmasked decoder
 memory.
 
-The training objective is ordinary shifted autoregressive answer cross-entropy. No
-retrieval teacher or distillation loss is active for routing models. Gradients pass
+## V2 detail-preserving memory
+
+The V2 fusion names (`ot_evidence_routing_v2` and
+`softmax_evidence_routing_v2`) retain the same slot reasoning and matched OT control,
+but do not force all visual information through only four final vectors. From the
+final plan they compute each spatial token's column mass and slot-role mixture:
+
+```text
+column_mass_j = sum_i P_ij
+role_j = sum_i P_ij S_i / (column_mass_j + delta)
+gate_j = N_valid * column_mass_j
+```
+
+The decoder receives projected question tokens, final slots, and FiLM-conditioned
+spatial tokens multiplied by `gate_j`. There is no untransported visual residual;
+every spatial feature reaching the decoder is modulated by the transport plan.
+Padding remains masked throughout.
+
+V2 defaults to a sparsemax visual preference with a small uniform numerical floor,
+a bounded learned cost scale initialized to four, question-conditioned visual keys,
+and target `tau=0.1`. Training can hold `tau=0` and then ramp to the target so visual
+relevance starts learning before column coupling is imposed. Top-k and dense-softmax
+preferences, fixed cost scale, and disabled question conditioning are explicit
+ablations.
+
+The optional counterfactual objective compares gold-answer log probability under the
+true image and a different in-batch image/answer pair. The diagnostic tool separately
+reports blank-image, shuffled-image, and cyclically shuffled-plan interventions.
+
+The routing objective combines shifted autoregressive answer cross-entropy with a small
+orthogonality penalty on the normalized slot cost queries. The latter directly addresses
+the observed all-slots-learn-the-same-query collapse and is controlled by
+`--routing_query_diversity_weight` (default `0.05`; use `0` for the original ablation).
+No retrieval teacher or distillation loss is active for routing models. Gradients pass
 through every unrolled transport iteration into cost, visual-preference, evidence, and
 slot modules.
 
@@ -104,15 +140,18 @@ slot modules.
 | `softmax_evidence_routing` | Same evidence and slot reasoner, independent routing |
 | `ot_evidence_routing` | Semi-relaxed column-coupled routing |
 | OT with `routing_tau=0` | Exact mathematical independent-routing limit |
+| `softmax_evidence_routing_v2` | V2 routed-patch memory with independent rows |
+| `ot_evidence_routing_v2` | V2 routed-patch memory with column coupling |
 
 Only the softmax/OT pair isolates the transport constraint. A difference from native
 Cross-Attention also includes the effect of the slot-reasoning architecture.
 
 ## Diagnostics
 
-When enabled, each reasoning step measures normalized row entropy, slot-assignment
-similarity, null fraction, generalized column KL, hard-row error, fixed-point residual,
-finite-plan and convergence rates, iteration count, cost mean/std, and evidence coverage.
+When enabled, each reasoning step measures normalized row entropy, slot-assignment and
+cost-query similarity, null fraction, generalized column KL, hard-row error, fixed-point
+residual, finite-plan and convergence rates, iteration count, cost mean/std, and
+evidence coverage.
 The interface reports averages across steps and the final-step value separately.
 
 Evaluation adds generated EM/F1, validation loss, latency, CUDA peak memory, unique
@@ -145,6 +184,7 @@ the DDP graph with exact zero gradients.
 | --- | --- | --- |
 | Cross-Attention | `cross_attention_only_v1` | v3 |
 | OT/softmax evidence routing | `ot_evidence_routing_v1` | v3 |
+| V2 OT/softmax evidence routing | `ot_evidence_routing_v2` | v3 |
 | Historical teacher resume | Cross-Attention marker | v4 |
 
 Complete fusion/routing configuration is stored in `model_config`. Strict loading checks

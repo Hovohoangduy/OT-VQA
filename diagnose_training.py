@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 
 import torch
+from torch.nn import functional as F
 
 from configs.config import Config
 from utils.checkpoint import load_model
@@ -96,6 +97,14 @@ def _roll(values):
     return values[-1:] + values[:-1]
 
 
+def _gold_sequence_scores(model, logits, targets):
+    scores = F.log_softmax(logits.float(), dim=-1).gather(
+        -1, targets.unsqueeze(-1)
+    ).squeeze(-1)
+    valid = targets.ne(model.pad_token_id)
+    return ((scores * valid).sum(-1) / valid.sum(-1).clamp_min(1)).cpu().tolist()
+
+
 def _reliance_report(model, dataset, samples: int, batch_size: int,
                      device: torch.device) -> dict:
     count = min(samples, len(dataset))
@@ -104,7 +113,13 @@ def _reliance_report(model, dataset, samples: int, batch_size: int,
     records = [dataset[index] for index in range(count)]
     original_predictions: list[str] = []
     image_shuffled_predictions: list[str] = []
+    blank_image_predictions: list[str] = []
     question_shuffled_predictions: list[str] = []
+    plan_shuffled_predictions: list[str] = []
+    original_gold_scores: list[float] = []
+    image_shuffled_gold_scores: list[float] = []
+    blank_image_gold_scores: list[float] = []
+    plan_shuffled_gold_scores: list[float] = []
     answers: list[str] = []
     fusion_rows = []
     for start in range(0, count, batch_size):
@@ -127,10 +142,47 @@ def _reliance_report(model, dataset, samples: int, batch_size: int,
                 images, questions, anno_ids, return_diagnostics=True
             )
             image_shuffled = model.generate(shuffled_images, questions, anno_ids)
+            blank_image = model.generate(torch.zeros_like(images), questions, anno_ids)
             question_shuffled = model.generate(images, shuffled_questions, anno_ids)
+            original_logits, original_targets = model(
+                images, questions, [row[3] for row in batch], anno_ids
+            )
+            shuffled_logits, shuffled_targets = model(
+                shuffled_images, questions, [row[3] for row in batch], anno_ids
+            )
+            blank_logits, blank_targets = model(
+                torch.zeros_like(images), questions,
+                [row[3] for row in batch], anno_ids
+            )
+            plan_shuffled = None
+            plan_logits = plan_targets = None
+            if model.fusion_type != "cross_attention":
+                model.fusion_module.set_plan_intervention("shuffle_evidence")
+                try:
+                    plan_shuffled = model.generate(images, questions, anno_ids)
+                    plan_logits, plan_targets = model(
+                        images, questions, [row[3] for row in batch], anno_ids
+                    )
+                finally:
+                    model.fusion_module.set_plan_intervention(None)
         original_predictions.extend(model.answers_from_ids(original))
         image_shuffled_predictions.extend(model.answers_from_ids(image_shuffled))
+        blank_image_predictions.extend(model.answers_from_ids(blank_image))
         question_shuffled_predictions.extend(model.answers_from_ids(question_shuffled))
+        original_gold_scores.extend(_gold_sequence_scores(
+            model, original_logits, original_targets
+        ))
+        image_shuffled_gold_scores.extend(_gold_sequence_scores(
+            model, shuffled_logits, shuffled_targets
+        ))
+        blank_image_gold_scores.extend(_gold_sequence_scores(
+            model, blank_logits, blank_targets
+        ))
+        if plan_shuffled is not None:
+            plan_shuffled_predictions.extend(model.answers_from_ids(plan_shuffled))
+            plan_shuffled_gold_scores.extend(_gold_sequence_scores(
+                model, plan_logits, plan_targets
+            ))
         if (original.fusion_output is not None and
                 original.fusion_output.diagnostics is not None):
             fusion_rows.append({
@@ -144,14 +196,34 @@ def _reliance_report(model, dataset, samples: int, batch_size: int,
         "samples": count,
         "original": _prediction_summary(answers, original_predictions),
         "image_shuffled": _prediction_summary(answers, image_shuffled_predictions),
+        "blank_image": _prediction_summary(answers, blank_image_predictions),
         "question_shuffled": _prediction_summary(answers, question_shuffled_predictions),
         "prediction_change_fraction": {
             "image_shuffled": sum(a != b for a, b in zip(
                 original_predictions, image_shuffled_predictions)) / count,
+            "blank_image": sum(a != b for a, b in zip(
+                original_predictions, blank_image_predictions)) / count,
             "question_shuffled": sum(a != b for a, b in zip(
                 original_predictions, question_shuffled_predictions)) / count,
         },
+        "mean_gold_log_probability": {
+            "original": sum(original_gold_scores) / count,
+            "image_shuffled": sum(image_shuffled_gold_scores) / count,
+            "blank_image": sum(blank_image_gold_scores) / count,
+        },
     }
+    if plan_shuffled_predictions:
+        result["plan_shuffled"] = _prediction_summary(
+            answers, plan_shuffled_predictions
+        )
+        result["prediction_change_fraction"]["plan_shuffled"] = sum(
+            a != b for a, b in zip(
+                original_predictions, plan_shuffled_predictions
+            )
+        ) / count
+        result["mean_gold_log_probability"]["plan_shuffled"] = (
+            sum(plan_shuffled_gold_scores) / count
+        )
     if fusion_rows:
         total = sum(row["count"] for row in fusion_rows)
         keys = [key for key in fusion_rows[0] if key != "count"]

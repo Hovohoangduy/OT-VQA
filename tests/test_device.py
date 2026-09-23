@@ -33,6 +33,30 @@ class DeviceSelectionTests(unittest.TestCase):
         )
         self.assertEqual(get_args(["--device", "mps"]).device, "mps")
 
+    def test_training_command_compatibility_aliases(self):
+        args = get_args([
+            "--fusion_method", "ot_evidence_routing",
+            "--train_csv", "train.csv",
+            "--dev_csv", "val.csv",
+            "--test_csv", "test.csv",
+            "--save_dir", "results/run",
+            "--distributed",
+        ])
+        self.assertEqual(args.fusion, "ot_evidence_routing")
+        self.assertEqual(args.train_csv_path, "train.csv")
+        self.assertEqual(args.dev_csv_path, "val.csv")
+        self.assertEqual(args.test_csv_path, "test.csv")
+        self.assertEqual(args.model_path, "results/run")
+        self.assertTrue(args.distributed)
+
+    def test_v2_routing_defaults(self):
+        args = get_args(["--fusion", "ot_evidence_routing_v2"])
+        self.assertEqual(args.routing_tau, 0.1)
+        self.assertEqual(args.routing_query_diversity_weight, 0.0)
+        self.assertIsNone(args.routing_preference_transform)
+        control = get_args(["--fusion", "softmax_evidence_routing_v2"])
+        self.assertEqual(control.routing_tau, 0.1)
+
     def test_auto_prefers_cuda_then_mps_then_cpu(self):
         with patch("torch.cuda.is_available", return_value=True), \
              patch("torch.backends.mps.is_available", return_value=True):

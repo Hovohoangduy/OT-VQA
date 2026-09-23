@@ -6,6 +6,7 @@ import torch
 
 from model.ot_routing import (
     OTEvidenceRouter, OTEvidenceRoutingConfig,
+    _masked_sparsemax,
     independent_softmax_transport, semi_relaxed_sinkhorn,
 )
 
@@ -111,10 +112,29 @@ class EvidenceRouterTests(unittest.TestCase):
         self.assertEqual(output.memory_padding_mask.shape, (2, 3))
         self.assertEqual(output.attention_weights.shape, (2, 3, 6))
         self.assertIn("routing_null", output.diagnostics)
+        self.assertIn("routing_query_similarity", output.diagnostics)
+        self.assertTrue(torch.isfinite(output.auxiliary_loss))
         output.memory.square().mean().backward()
         self.assertIsNotNone(module.cost_query.weight.grad)
         self.assertIsNotNone(module.preference_score.weight.grad)
         self.assertGreater(module.cost_query.weight.grad.abs().sum().item(), 0)
+
+    def test_slot_initialization_preserves_distinct_roles(self):
+        module = OTEvidenceRouter(8, 10, 16, self.config(), routing_mode="ot")
+        torch.manual_seed(9)
+        common_question = 20 * torch.randn(2, self.config().routing_dim)
+        slots = module._initialize_slots(common_question)
+        normalized = torch.nn.functional.normalize(slots, dim=-1)
+        similarities = torch.matmul(normalized, normalized.transpose(1, 2))
+        off_diagonal = ~torch.eye(3, dtype=torch.bool).unsqueeze(0)
+        self.assertLess(similarities.masked_select(off_diagonal).mean().item(), 0.9)
+
+    def test_query_diversity_loss_trains_routing_queries(self):
+        module = OTEvidenceRouter(8, 10, 16, self.config(), routing_mode="ot")
+        output = module(*self.inputs(), grid_size=(2, 2))
+        output.auxiliary_loss.backward()
+        self.assertGreater(module.cost_query.weight.grad.abs().sum().item(), 0)
+        self.assertGreater(module.slot_embeddings.grad.abs().sum().item(), 0)
 
     def test_padded_values_cannot_change_output(self):
         module = OTEvidenceRouter(8, 10, 16, self.config(), routing_mode="ot").eval()
@@ -212,6 +232,94 @@ class EvidenceRouterTests(unittest.TestCase):
             question_mask, grid_size=(2, 2),
         ).memory
         self.assertFalse(torch.allclose(first, changed))
+
+    def test_sparsemax_is_normalized_masked_and_sparse(self):
+        logits = torch.tensor([
+            [3.0, 1.0, 0.0, -2.0],
+            [0.1, 0.2, 0.3, 9.0],
+        ])
+        mask = torch.tensor([
+            [False, False, False, False],
+            [False, False, False, True],
+        ])
+        output = _masked_sparsemax(logits, mask)
+        torch.testing.assert_close(output.sum(-1), torch.ones(2))
+        self.assertEqual(output[1, 3].item(), 0.0)
+        self.assertGreater((output == 0).sum().item(), 2)
+
+    def test_v2_routed_patch_memory_preserves_tokens_and_gradients(self):
+        config = self.config(
+            memory_mode="routed_patches",
+            preference_transform="sparsemax",
+            preference_smoothing=0.001,
+            cost_scale_mode="learned",
+            cost_scale=4.0,
+            question_conditioned_keys=True,
+        )
+        module = OTEvidenceRouter(8, 10, 16, config, routing_mode="ot")
+        visual, question, visual_mask, question_mask = self.inputs()
+        output = module(
+            visual, question, visual_mask, question_mask,
+            grid_size=(2, 2), return_diagnostics=True,
+        )
+        expected_length = question.size(1) + config.slots + visual.size(1)
+        self.assertEqual(output.memory.shape, (2, expected_length, 16))
+        torch.testing.assert_close(
+            output.memory_padding_mask[:, :question.size(1)], question_mask
+        )
+        torch.testing.assert_close(
+            output.memory_padding_mask[:, -visual.size(1):], visual_mask
+        )
+        self.assertIn("routing_gate_mean", output.diagnostics)
+        self.assertIn("routing_preference_effective_support", output.diagnostics)
+        output.memory.square().mean().backward()
+        self.assertGreater(module.cost_query.weight.grad.abs().sum().item(), 0)
+        self.assertGreater(module.raw_cost_scale.grad.abs().item(), 0)
+
+    def test_v2_sparse_preference_is_safe_under_outer_autocast(self):
+        config = self.config(
+            memory_mode="routed_patches",
+            preference_transform="sparsemax",
+            preference_smoothing=0.001,
+            cost_scale_mode="learned",
+            cost_scale=4.0,
+            question_conditioned_keys=True,
+        )
+        module = OTEvidenceRouter(8, 10, 16, config, routing_mode="ot")
+        with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+            output = module(
+                *self.inputs(), grid_size=(2, 2), return_diagnostics=True,
+            )
+            loss = output.memory.square().mean()
+        loss.backward()
+        self.assertEqual(output.memory.dtype, torch.bfloat16)
+        self.assertTrue(torch.isfinite(output.memory).all())
+        self.assertTrue(torch.isfinite(module.preference_score.weight.grad).all())
+        self.assertGreater(module.preference_score.weight.grad.abs().sum().item(), 0)
+
+    def test_runtime_tau_can_warm_from_independent_routing(self):
+        module = OTEvidenceRouter(8, 10, 16, self.config(), routing_mode="ot")
+        module.set_tau(0.0)
+        output = module(
+            *self.inputs(), grid_size=(2, 2), return_diagnostics=True,
+        )
+        torch.testing.assert_close(
+            output.diagnostics["routing_runtime_tau"], torch.zeros(2)
+        )
+        output.memory.square().mean().backward()
+        self.assertIsNotNone(module.preference_score.weight.grad)
+
+    def test_plan_intervention_changes_routed_result_and_is_reversible(self):
+        config = self.config(memory_mode="routed_patches")
+        module = OTEvidenceRouter(8, 10, 16, config, routing_mode="ot").eval()
+        inputs = self.inputs()
+        original = module(*inputs, grid_size=(2, 2)).memory
+        module.set_plan_intervention("shuffle_evidence")
+        changed = module(*inputs, grid_size=(2, 2)).memory
+        module.set_plan_intervention(None)
+        restored = module(*inputs, grid_size=(2, 2)).memory
+        self.assertFalse(torch.allclose(original, changed))
+        torch.testing.assert_close(original, restored)
 
 
 if __name__ == "__main__":

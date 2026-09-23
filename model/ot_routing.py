@@ -20,13 +20,22 @@ class OTEvidenceRoutingConfig:
     dropout: float = 0.2
     epsilon: float = 0.1
     tau: float = 0.5
-    sinkhorn_iterations: int = 20
+    sinkhorn_iterations: int = 40
     diagnostic_tolerance: float = 1e-3
     preference_smoothing: float = 0.05
     null_min: float = 0.02
     null_max: float = 0.25
     shared_step_weights: bool = True
     visual_preference: str = "question_conditioned"
+    memory_mode: str = "slots"
+    preference_transform: str = "softmax"
+    preference_topk: int = 32
+    cost_scale_mode: str = "fixed"
+    cost_scale: float = 1.0
+    cost_scale_min: float = 1.0
+    cost_scale_max: float = 20.0
+    question_conditioned_keys: bool = False
+    routed_gate_max: float = 4.0
 
     def __post_init__(self) -> None:
         if min(
@@ -46,6 +55,24 @@ class OTEvidenceRoutingConfig:
             raise ValueError("null preference bounds must satisfy 0 < min < max < 1")
         if self.visual_preference not in {"question_conditioned", "uniform"}:
             raise ValueError("visual_preference must be question_conditioned or uniform")
+        if self.memory_mode not in {"slots", "routed_patches"}:
+            raise ValueError("memory_mode must be slots or routed_patches")
+        if self.preference_transform not in {"softmax", "sparsemax", "topk"}:
+            raise ValueError("preference_transform must be softmax, sparsemax, or topk")
+        if self.preference_topk < 1:
+            raise ValueError("preference_topk must be positive")
+        if self.cost_scale_mode not in {"fixed", "learned"}:
+            raise ValueError("cost_scale_mode must be fixed or learned")
+        if self.cost_scale <= 0 or self.cost_scale_min <= 0:
+            raise ValueError("Cost scales must be positive")
+        if self.cost_scale_max <= self.cost_scale_min:
+            raise ValueError("cost_scale_max must exceed cost_scale_min")
+        if self.cost_scale_mode == "learned" and not (
+            self.cost_scale_min < self.cost_scale < self.cost_scale_max
+        ):
+            raise ValueError("Learned cost_scale must lie strictly inside its bounds")
+        if self.routed_gate_max <= 0:
+            raise ValueError("routed_gate_max must be positive")
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -74,6 +101,7 @@ class EvidenceRoutingOutput:
     memory_padding_mask: torch.Tensor
     diagnostics: Optional[dict[str, torch.Tensor]] = None
     attention_weights: Optional[torch.Tensor] = None
+    auxiliary_loss: Optional[torch.Tensor] = None
 
 
 def _validate_transport_inputs(cost, slot_marginal, evidence_preference, evidence_mask):
@@ -201,6 +229,35 @@ def _masked_mean(tokens: torch.Tensor, padding_mask: torch.Tensor) -> torch.Tens
     return (tokens * valid).sum(1) / valid.sum(1).clamp_min(1.0)
 
 
+def _masked_sparsemax(logits: torch.Tensor, padding_mask: torch.Tensor) -> torch.Tensor:
+    """Sparsemax over the last dimension with exact zeros on padding."""
+    if logits.shape != padding_mask.shape or padding_mask.dtype != torch.bool:
+        raise ValueError("Sparsemax mask must be Boolean and match logits")
+    valid = ~padding_mask
+    if not valid.any(-1).all():
+        raise ValueError("Sparsemax requires at least one valid value per row")
+    floor = torch.finfo(logits.dtype).min
+    shifted = logits - logits.masked_fill(padding_mask, floor).amax(
+        dim=-1, keepdim=True
+    )
+    shifted = shifted.masked_fill(padding_mask, floor)
+    sorted_values = shifted.sort(dim=-1, descending=True).values
+    cumulative = sorted_values.cumsum(dim=-1)
+    ranks = torch.arange(
+        1, logits.size(-1) + 1, device=logits.device, dtype=logits.dtype
+    ).view(*([1] * (logits.ndim - 1)), -1)
+    support = (
+        (1 + ranks * sorted_values > cumulative)
+        & (ranks <= valid.sum(dim=-1, keepdim=True))
+    )
+    support_size = support.sum(dim=-1, keepdim=True).clamp_min(1)
+    threshold = (
+        cumulative.gather(-1, support_size - 1) - 1
+    ) / support_size.to(logits.dtype)
+    output = (shifted - threshold).clamp_min(0).masked_fill(padding_mask, 0.0)
+    return output / output.sum(dim=-1, keepdim=True).clamp_min(1e-8)
+
+
 class _ReasoningUpdate(nn.Module):
     def __init__(self, dim: int, heads: int, dropout: float):
         super().__init__()
@@ -274,6 +331,20 @@ class OTEvidenceRouter(nn.Module):
         nn.init.normal_(self.null_token, std=0.02)
         self.cost_query = nn.Linear(dim, dim, bias=False)
         self.cost_key = nn.Linear(dim, dim, bias=False)
+        if config.question_conditioned_keys:
+            self.key_scale = nn.Linear(dim, dim)
+            self.key_shift = nn.Linear(dim, dim)
+        else:
+            self.key_scale = self.key_shift = None
+        if config.cost_scale_mode == "learned":
+            position = (
+                (config.cost_scale - config.cost_scale_min)
+                / (config.cost_scale_max - config.cost_scale_min)
+            )
+            raw_scale = math.log(position / (1.0 - position))
+            self.raw_cost_scale = nn.Parameter(torch.tensor(raw_scale))
+        else:
+            self.register_parameter("raw_cost_scale", None)
         self.preference_evidence = nn.Linear(dim, dim)
         self.preference_question = nn.Linear(dim, dim)
         self.preference_score = nn.Linear(dim, 1)
@@ -285,6 +356,72 @@ class OTEvidenceRouter(nn.Module):
         ])
         self.output_projection = (
             nn.Identity() if dim == model_dim else nn.Linear(dim, model_dim)
+        )
+        if config.memory_mode == "routed_patches":
+            self.question_output_projection = (
+                nn.Identity() if dim == model_dim else nn.Linear(dim, model_dim)
+            )
+            self.routed_value_norm = nn.LayerNorm(dim)
+            self.routed_role_norm = nn.LayerNorm(dim)
+            self.routed_scale = nn.Linear(dim, dim)
+            self.routed_shift = nn.Linear(dim, dim)
+            self.routed_output_projection = (
+                nn.Identity() if dim == model_dim else nn.Linear(dim, model_dim)
+            )
+        else:
+            self.question_output_projection = None
+            self.routed_value_norm = self.routed_role_norm = None
+            self.routed_scale = self.routed_shift = None
+            self.routed_output_projection = None
+        self.runtime_tau = float(config.tau)
+        self.plan_intervention = None
+
+    def set_tau(self, value: float) -> None:
+        if value < 0:
+            raise ValueError("Routing tau must be nonnegative")
+        self.runtime_tau = float(value)
+
+    def set_plan_intervention(self, value: Optional[str]) -> None:
+        if value not in {None, "shuffle_evidence"}:
+            raise ValueError("Unknown routing-plan intervention")
+        self.plan_intervention = value
+
+    def _intervene_on_plan(
+        self, plan: torch.Tensor, evidence_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.plan_intervention is None:
+            return plan
+        changed = plan.clone()
+        # Keep global/null mass fixed and cyclically permute only spatial evidence.
+        for batch_index in range(plan.size(0)):
+            valid = (~evidence_mask[batch_index, :-2]).nonzero(
+                as_tuple=False
+            ).squeeze(-1)
+            if valid.numel() > 1:
+                changed[batch_index, :, valid] = plan[
+                    batch_index, :, valid.roll(1)
+                ]
+        return changed
+
+    def _cost_scale(self) -> torch.Tensor:
+        if self.raw_cost_scale is None:
+            return self.slot_embeddings.new_tensor(self.config.cost_scale)
+        span = self.config.cost_scale_max - self.config.cost_scale_min
+        return self.config.cost_scale_min + span * torch.sigmoid(self.raw_cost_scale)
+
+    def _initialize_slots(self, question_summary: torch.Tensor) -> torch.Tensor:
+        """Combine question context with role-preserving slot templates.
+
+        Normalizing only after adding the old small slot embeddings to the
+        question made every initial slot almost identical.  Normalize the two
+        sources independently so learned slot roles remain visible to the first
+        transport solve.
+        """
+        dim = self.config.routing_dim
+        templates = F.layer_norm(self.slot_embeddings, (dim,))
+        context = F.layer_norm(question_summary, (dim,))
+        return self.slot_norm(
+            (templates.unsqueeze(0) + context.unsqueeze(1)) / math.sqrt(2.0)
         )
 
     @staticmethod
@@ -355,7 +492,28 @@ class OTEvidenceRouter(nn.Module):
                 evidence_mask[:, :-1], float("-inf")
             )
             safe_logits = logits.masked_fill(~has_non_null, 0.0)
-            learned = torch.softmax(safe_logits.float(), dim=-1).to(evidence.dtype)
+            if self.config.preference_transform == "sparsemax":
+                learned = torch.zeros_like(safe_logits)
+                if has_non_null.any():
+                    active = has_non_null.squeeze(-1)
+                    learned[active] = _masked_sparsemax(
+                        safe_logits[active].float(), evidence_mask[active, :-1]
+                    ).to(device=learned.device, dtype=learned.dtype)
+            elif self.config.preference_transform == "topk":
+                count = min(self.config.preference_topk, safe_logits.size(-1))
+                indices = safe_logits.masked_fill(
+                    evidence_mask[:, :-1], torch.finfo(safe_logits.dtype).min
+                ).topk(count, dim=-1).indices
+                selected = torch.zeros_like(evidence_mask[:, :-1])
+                selected.scatter_(1, indices, True)
+                selected &= ~evidence_mask[:, :-1]
+                selected_logits = safe_logits.masked_fill(~selected, float("-inf"))
+                selected_logits = selected_logits.masked_fill(~has_non_null, 0.0)
+                learned = torch.softmax(selected_logits.float(), dim=-1).to(
+                    evidence.dtype
+                )
+            else:
+                learned = torch.softmax(safe_logits.float(), dim=-1).to(evidence.dtype)
             learned = learned * valid_non_null
             learned = learned / learned.sum(-1, keepdim=True).clamp_min(1e-8)
             uniform = valid_non_null / valid_non_null.sum(-1, keepdim=True).clamp_min(1)
@@ -399,10 +557,7 @@ class OTEvidenceRouter(nn.Module):
         question_summary = self.question_pool_projection(
             _masked_mean(question, question_padding_mask)
         )
-        slots = self.slot_norm(
-            self.slot_embeddings.to(question_summary.dtype).unsqueeze(0)
-            + question_summary.unsqueeze(1)
-        )
+        slots = self._initialize_slots(question_summary)
         evidence, evidence_mask, positions = self._build_evidence(
             visual_tokens, visual_padding_mask, grid_size
         )
@@ -413,15 +568,31 @@ class OTEvidenceRouter(nn.Module):
             device=slots.device, dtype=slots.dtype,
         )
         step_stats = []
+        diversity_losses = []
         final_plan = None
+        cost_scale = self._cost_scale()
         for step in range(self.config.reasoning_steps):
             queries = F.normalize(self.cost_query(slots), dim=-1)
-            keys = F.normalize(self.cost_key(evidence), dim=-1)
-            cost = -torch.matmul(queries, keys.transpose(-1, -2))
-            if self.routing_mode == "softmax":
-                # Keep the matched preference parameters in the DDP graph. They
-                # receive exact zero gradients because softmax routing does not
-                # use a visual marginal.
+            key_evidence = evidence
+            if self.key_scale is not None:
+                scale = 0.5 * torch.tanh(self.key_scale(question_summary)).unsqueeze(1)
+                shift = self.key_shift(question_summary).unsqueeze(1)
+                key_evidence = evidence * (1.0 + scale) + shift
+            keys = F.normalize(self.cost_key(key_evidence), dim=-1)
+            query_similarity = torch.matmul(queries, queries.transpose(1, 2))
+            if self.config.slots > 1:
+                off_diagonal = ~torch.eye(
+                    self.config.slots, dtype=torch.bool, device=queries.device
+                ).unsqueeze(0)
+                diversity_losses.append(
+                    query_similarity.masked_select(off_diagonal).square().mean()
+                )
+            else:
+                diversity_losses.append(queries.sum() * 0.0)
+            cost = -cost_scale * torch.matmul(queries, keys.transpose(-1, -2))
+            if self.routing_mode == "softmax" or self.runtime_tau == 0:
+                # Keep preference parameters in the DDP graph when column
+                # coupling is disabled. They receive exact zero gradients.
                 cost = cost + preference.sum(-1)[:, None, None] * 0.0
             if self.routing_mode == "softmax":
                 transport = independent_softmax_transport(
@@ -431,11 +602,12 @@ class OTEvidenceRouter(nn.Module):
                 transport = semi_relaxed_sinkhorn(
                     cost, budget, preference, evidence_mask,
                     epsilon=self.config.epsilon,
-                    tau=self.config.tau,
+                    tau=self.runtime_tau,
                     iterations=self.config.sinkhorn_iterations,
                     tolerance=self.config.diagnostic_tolerance,
                 )
             plan = transport.plan.to(evidence.dtype)
+            plan = self._intervene_on_plan(plan, evidence_mask)
             real_plan = plan[:, :, :-1]
             evidence_readout = torch.matmul(real_plan, evidence[:, :-1]) / budget.unsqueeze(-1)
             spatial_moments = torch.matmul(
@@ -475,6 +647,18 @@ class OTEvidenceRouter(nn.Module):
                     * (~evidence_mask[:, :-1]).float()
                 ).sum(-1) / (~evidence_mask[:, :-1]).sum(-1).clamp_min(1)
                 step_stats.append({
+                    "query_similarity": query_similarity.masked_select(
+                        ~torch.eye(
+                            self.config.slots,
+                            dtype=torch.bool,
+                            device=queries.device,
+                        ).unsqueeze(0)
+                    ).reshape(visual_tokens.size(0), -1).mean(-1)
+                    if self.config.slots > 1 else torch.zeros(
+                        visual_tokens.size(0),
+                        device=queries.device,
+                        dtype=queries.dtype,
+                    ),
                     "entropy": entropy,
                     "similarity": off_diagonal,
                     "null": null_mass.float().mean(-1),
@@ -487,12 +671,66 @@ class OTEvidenceRouter(nn.Module):
                     "cost_mean": cost.float().mean((1, 2)),
                     "cost_std": cost.float().std((1, 2), unbiased=False),
                     "coverage": coverage,
+                    "cost_scale": cost_scale.expand(visual_tokens.size(0)),
+                    "cost_to_epsilon": (
+                        cost.float().std((1, 2), unbiased=False)
+                        / self.config.epsilon
+                    ),
                 })
 
-        memory = self.output_projection(slots)
-        memory_mask = torch.zeros(
-            memory.shape[:2], dtype=torch.bool, device=memory.device
+        slot_memory = self.output_projection(slots)
+        slot_mask = torch.zeros(
+            slot_memory.shape[:2], dtype=torch.bool, device=slot_memory.device
         )
+        routed_stats = {}
+        if self.config.memory_mode == "routed_patches":
+            spatial_count = visual_tokens.size(1)
+            spatial_plan = final_plan[:, :, :spatial_count]
+            column_mass = spatial_plan.sum(1)
+            valid_count = (~visual_padding_mask).sum(-1, keepdim=True).to(
+                column_mass.dtype
+            ).clamp_min(1)
+            raw_gate = valid_count * column_mass
+            gate = raw_gate.clamp(max=self.config.routed_gate_max).masked_fill(
+                visual_padding_mask, 0.0
+            )
+            role = torch.matmul(spatial_plan.transpose(1, 2), slots)
+            role = role / column_mass.unsqueeze(-1).clamp_min(1e-8)
+            role = self.routed_role_norm(role)
+            base = self.routed_value_norm(evidence[:, :spatial_count])
+            film_scale = 0.5 * torch.tanh(self.routed_scale(role))
+            film_shift = self.routed_shift(role)
+            routed = self.routed_output_projection(
+                base * (1.0 + film_scale) + film_shift
+            )
+            routed = (routed * gate.unsqueeze(-1)).masked_fill(
+                visual_padding_mask.unsqueeze(-1), 0.0
+            )
+            question_memory = self.question_output_projection(question).masked_fill(
+                question_padding_mask.unsqueeze(-1), 0.0
+            )
+            memory = torch.cat([question_memory, slot_memory, routed], dim=1)
+            memory_mask = torch.cat([
+                question_padding_mask,
+                slot_mask,
+                visual_padding_mask,
+            ], dim=1)
+            routed_stats = {
+                "routing_gate_mean": (
+                    gate.sum(-1) / (~visual_padding_mask).sum(-1).clamp_min(1)
+                ).detach(),
+                "routing_gate_max": gate.amax(-1).detach(),
+                "routing_gate_clipped": (
+                    (raw_gate > self.config.routed_gate_max)
+                    & ~visual_padding_mask
+                ).float().sum(-1).div(
+                    (~visual_padding_mask).sum(-1).clamp_min(1)
+                ).detach(),
+                "routing_spatial_mass": column_mass.sum(-1).detach(),
+            }
+        else:
+            memory = slot_memory
+            memory_mask = slot_mask
         diagnostics = None
         if return_diagnostics:
             diagnostics = {}
@@ -500,9 +738,36 @@ class OTEvidenceRouter(nn.Module):
                 values = torch.stack([row[key] for row in step_stats], dim=1)
                 diagnostics[f"routing_{key}"] = values.mean(1).detach()
                 diagnostics[f"routing_final_{key}"] = values[:, -1].detach()
+            preference32 = preference.float()
+            preference_entropy = -(
+                preference32
+                * preference32.clamp_min(torch.finfo(torch.float32).tiny).log()
+            ).sum(-1)
+            final_column = final_plan.float().sum(1)
+            column_entropy = -(
+                final_column
+                * final_column.clamp_min(torch.finfo(torch.float32).tiny).log()
+            ).sum(-1)
+            top_count = min(
+                self.config.preference_topk, max(final_column.size(-1) - 1, 1)
+            )
+            top_mass = final_column[:, :-1].topk(top_count, dim=-1).values.sum(-1)
+            diagnostics.update({
+                "routing_preference_entropy": preference_entropy.detach(),
+                "routing_preference_effective_support": preference_entropy.exp().detach(),
+                "routing_column_entropy": column_entropy.detach(),
+                "routing_column_effective_support": column_entropy.exp().detach(),
+                "routing_topk_mass": top_mass.detach(),
+                "routing_global_mass": final_column[:, -2].detach(),
+                "routing_runtime_tau": torch.full_like(
+                    preference_entropy, self.runtime_tau
+                ),
+                **routed_stats,
+            })
         return EvidenceRoutingOutput(
             memory=memory,
             memory_padding_mask=memory_mask,
             diagnostics=diagnostics,
             attention_weights=final_plan.detach() if return_diagnostics else None,
+            auxiliary_loss=torch.stack(diversity_losses).mean(),
         )

@@ -60,6 +60,7 @@ class VQAModel(nn.Module):
         super().__init__()
         supported = {
             "cross_attention", "ot_evidence_routing", "softmax_evidence_routing",
+            "ot_evidence_routing_v2", "softmax_evidence_routing_v2",
         }
         if fusion not in supported:
             raise ValueError(
@@ -73,8 +74,18 @@ class VQAModel(nn.Module):
             CrossAttentionFusionConfig.from_dict(fusion_config)
             if fusion == "cross_attention" else None
         )
+        if fusion.endswith("_v2"):
+            routing_values = dict(routing_config or {})
+            routing_values.setdefault("memory_mode", "routed_patches")
+            routing_values.setdefault("preference_transform", "sparsemax")
+            routing_values.setdefault("preference_smoothing", 0.001)
+            routing_values.setdefault("cost_scale_mode", "learned")
+            routing_values.setdefault("cost_scale", 4.0)
+            routing_values.setdefault("question_conditioned_keys", True)
+        else:
+            routing_values = routing_config
         parsed_routing = (
-            OTEvidenceRoutingConfig.from_dict(routing_config)
+            OTEvidenceRoutingConfig.from_dict(routing_values)
             if fusion != "cross_attention" else None
         )
         self.model_config = {
@@ -158,7 +169,11 @@ class VQAModel(nn.Module):
                 question_dim,
                 d_model,
                 parsed_routing,
-                routing_mode="ot" if fusion == "ot_evidence_routing" else "softmax",
+                routing_mode=(
+                    "ot" if fusion in {
+                        "ot_evidence_routing", "ot_evidence_routing_v2",
+                    } else "softmax"
+                ),
             )
         self.decoder = Decoder(d_model, ffn_hidden, num_heads, drop_prob, num_layers)
         actual_vocab = self.answer_embedding.token_embeddings.word_embeddings.num_embeddings
@@ -269,6 +284,7 @@ class VQAModel(nn.Module):
         image_features=None, question_features=None, question_padding_mask=None,
         visual_features=None, visual_padding_mask=None,
         return_attention_weights=False,
+        return_fusion_output=False,
     ):
         diagnostics_requested = return_diagnostics or return_attention_weights
         if visual_features is not None:
@@ -315,7 +331,7 @@ class VQAModel(nn.Module):
             if encoded.fusion_output.attention_weights is None:
                 raise RuntimeError("Requested routing/attention weights were not produced")
             return logits, ids[:, 1:], encoded.fusion_output.attention_weights
-        if return_diagnostics:
+        if return_diagnostics or return_fusion_output:
             return logits, ids[:, 1:], encoded.fusion_output
         return logits, ids[:, 1:]
 

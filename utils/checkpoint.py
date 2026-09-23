@@ -56,10 +56,12 @@ def checkpoint_payload(
     ):
         raise ValueError("Training-only alignment state requires checkpoint version 4")
     fusion = getattr(model, "fusion_type", model.model_config.get("fusion"))
-    architecture = (
-        "cross_attention_only_v1"
-        if fusion == "cross_attention" else "ot_evidence_routing_v1"
-    )
+    if fusion == "cross_attention":
+        architecture = "cross_attention_only_v1"
+    elif str(fusion).endswith("_v2"):
+        architecture = "ot_evidence_routing_v2"
+    else:
+        architecture = "ot_evidence_routing_v1"
     payload = {
         "format_version": format_version,
         "architecture": architecture,
@@ -141,6 +143,8 @@ def read_checkpoint(checkpoint_path, device):
         "cross_attention": "cross_attention_only_v1",
         "ot_evidence_routing": "ot_evidence_routing_v1",
         "softmax_evidence_routing": "ot_evidence_routing_v1",
+        "ot_evidence_routing_v2": "ot_evidence_routing_v2",
+        "softmax_evidence_routing_v2": "ot_evidence_routing_v2",
     }
     if fusion not in allowed:
         raise ValueError(
@@ -231,10 +235,26 @@ def load_student_initialization(checkpoint_path, model):
     target_config = model.model_config
     comparable_source = dict(source_config)
     comparable_target = dict(target_config)
-    routing_fusions = {"ot_evidence_routing", "softmax_evidence_routing"}
+    routing_fusions = {
+        "ot_evidence_routing", "softmax_evidence_routing",
+        "ot_evidence_routing_v2", "softmax_evidence_routing_v2",
+    }
+    if (comparable_source.get("fusion") in routing_fusions or
+            comparable_target.get("fusion") in routing_fusions):
+        from model.ot_routing import OTEvidenceRoutingConfig
+    if comparable_source.get("fusion") in routing_fusions:
+        comparable_source["routing_config"] = OTEvidenceRoutingConfig.from_dict(
+            comparable_source.get("routing_config")
+        ).to_dict()
+    if comparable_target.get("fusion") in routing_fusions:
+        comparable_target["routing_config"] = OTEvidenceRoutingConfig.from_dict(
+            comparable_target.get("routing_config")
+        ).to_dict()
     if (
         comparable_source.get("fusion") in routing_fusions
         and comparable_target.get("fusion") in routing_fusions
+        and comparable_source.get("fusion", "").endswith("_v2")
+        == comparable_target.get("fusion", "").endswith("_v2")
     ):
         comparable_source["fusion"] = "evidence_routing_control"
         comparable_target["fusion"] = "evidence_routing_control"
