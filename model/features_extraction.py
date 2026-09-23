@@ -2,7 +2,6 @@ from pathlib import Path
 
 import torch
 from torch import nn
-from torch.nn.utils.rnn import pack_padded_sequence
 from transformers import AutoImageProcessor, AutoModel, AutoTokenizer
 
 from configs.config import Config
@@ -70,7 +69,7 @@ class ImageEmbedding(nn.Module):
 
 class QuestionEmbedding(nn.Module):
     def __init__(
-        self, input_size=None, output_size=768, model_name=Config.text_model,
+        self, model_name=Config.text_model,
         text_encoder=None, tokenizer=None, skip_model=False,
     ):
         super().__init__()
@@ -85,12 +84,9 @@ class QuestionEmbedding(nn.Module):
                 self.hidden_size = getattr(cfg, "hidden_size", 768)
             except Exception:
                 self.hidden_size = 768
-            hidden_size = input_size or self.hidden_size
         else:
             self.text_encoder = text_encoder or AutoModel.from_pretrained(model_name)
             self.hidden_size = self.text_encoder.config.hidden_size
-            hidden_size = input_size or self.hidden_size
-        self.lstm = nn.LSTM(hidden_size, output_size, batch_first=True)
         self.encoder_frozen = False
 
     def freeze_encoder(self):
@@ -124,21 +120,9 @@ class QuestionEmbedding(nn.Module):
         padding_mask = tokens['attention_mask'].eq(0) | special_mask
         return embeddings, padding_mask, tokens['input_ids']
 
-    def forward_from_embeddings(self, embeddings, padding_mask):
-        """Summarize precomputed token embeddings with LSTM for SAN fusion."""
-        lengths = (~padding_mask).sum(1).clamp_min(1).cpu()
-        packed = pack_padded_sequence(embeddings, lengths, batch_first=True, enforce_sorted=False)
-        _, (hidden, _) = self.lstm(packed)
-        return hidden.squeeze(0)
-
     def forward(self, questions):
-        embeddings, _, input_ids = self.encode_tokens(questions)
-        # Preserve the SAN baseline contract: summarize all non-padding tokens,
-        # including tokenizer boundary tokens, with the LSTM.
-        lengths = input_ids.ne(self.tokenizer.pad_token_id).sum(1).cpu()
-        packed = pack_padded_sequence(embeddings, lengths, batch_first=True, enforce_sorted=False)
-        _, (hidden, _) = self.lstm(packed)
-        return hidden.squeeze(0)
+        embeddings, padding_mask, _ = self.encode_tokens(questions)
+        return embeddings, padding_mask
 
 
 class AnswerEmbedding(nn.Module):

@@ -106,7 +106,7 @@ def _reliance_report(model, dataset, samples: int, batch_size: int,
     image_shuffled_predictions: list[str] = []
     question_shuffled_predictions: list[str] = []
     answers: list[str] = []
-    transport_rows = []
+    attention_rows = []
     for start in range(0, count, batch_size):
         batch = records[start:start + batch_size]
         if len(batch) == 1:
@@ -131,14 +131,13 @@ def _reliance_report(model, dataset, samples: int, batch_size: int,
         original_predictions.extend(model.answers_from_ids(original))
         image_shuffled_predictions.extend(model.answers_from_ids(image_shuffled))
         question_shuffled_predictions.extend(model.answers_from_ids(question_shuffled))
-        if original.transport is not None:
-            transport = original.transport
-            transport_rows.append({
+        if (original.fusion_output is not None and
+                original.fusion_output.diagnostics is not None):
+            attention_rows.append({
                 "count": len(batch),
-                "matched_mass": transport.matched_mass.mean().item(),
-                "residual": transport.residual.mean().item(),
-                "convergence_rate": transport.converged.float().mean().item(),
-                "iterations": transport.iterations.float().mean().item(),
+                "attention_entropy": original.fusion_output.diagnostics[
+                    "attention_entropy"
+                ].mean().item(),
             })
     result = {
         "samples": count,
@@ -152,11 +151,12 @@ def _reliance_report(model, dataset, samples: int, batch_size: int,
                 original_predictions, question_shuffled_predictions)) / count,
         },
     }
-    if transport_rows:
-        total = sum(row["count"] for row in transport_rows)
-        result["ot"] = {
-            key: sum(row[key] * row["count"] for row in transport_rows) / total
-            for key in ("matched_mass", "residual", "convergence_rate", "iterations")
+    if attention_rows:
+        total = sum(row["count"] for row in attention_rows)
+        result["cross_attention"] = {
+            "attention_entropy": sum(
+                row["attention_entropy"] * row["count"] for row in attention_rows
+            ) / total
         }
     return result
 

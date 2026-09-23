@@ -75,7 +75,6 @@ def train_alignment_epoch(
     queue: AlignmentNegativeQueue,
     device,
     gradient_clip: float | None = None,
-    contrastive_weight: float = 1.0,
     distributed: DistributedContext | None = None,
 ) -> dict[str, float]:
     """Warm up only the OT teacher with symmetric hard-negative InfoNCE."""
@@ -98,7 +97,7 @@ def train_alignment_epoch(
         if not torch.isfinite(output.loss):
             raise FloatingPointError("OT contrastive loss is NaN or infinity")
         optimizer.zero_grad(set_to_none=True)
-        (contrastive_weight * output.loss).backward()
+        output.loss.backward()
         if gradient_clip:
             torch.nn.utils.clip_grad_norm_(teacher.parameters(), gradient_clip)
         optimizer.step()

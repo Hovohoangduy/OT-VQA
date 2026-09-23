@@ -56,6 +56,7 @@ def checkpoint_payload(
         raise ValueError("Training-only alignment state requires checkpoint version 4")
     payload = {
         "format_version": format_version,
+        "architecture": "cross_attention_only_v1",
         "model_state_dict": model.state_dict(),
         "model_config": model.model_config,
         "text_model": text_model,
@@ -124,10 +125,19 @@ def read_checkpoint(checkpoint_path, device):
     if not isinstance(checkpoint, dict):
         raise ValueError("Checkpoint must be a dictionary")
     version = checkpoint.get("format_version")
-    if version not in {2, 3, 4}:
+    if version not in {3, 4}:
         raise ValueError(
-            "Legacy checkpoint was trained with the incorrect decoder/objective. "
-            "Retrain with the corrected train.py before generating answers."
+            "Only simplified Cross-Attention checkpoint versions 3 and 4 are supported"
+        )
+    fusion = checkpoint.get("model_config", {}).get("fusion")
+    if fusion != "cross_attention":
+        raise ValueError(
+            f"Checkpoint fusion {fusion!r} was removed; retrain the Cross-Attention model"
+        )
+    if checkpoint.get("architecture") != "cross_attention_only_v1":
+        raise ValueError(
+            "This checkpoint predates the simplified Cross-Attention-only architecture; "
+            "retrain it with the current source"
         )
     return checkpoint
 
@@ -135,16 +145,11 @@ def read_checkpoint(checkpoint_path, device):
 def load_model(checkpoint_path, device):
     checkpoint = read_checkpoint(checkpoint_path, device)
     model_config = dict(checkpoint.get("model_config", {}))
-    if checkpoint["format_version"] == 2:
-        model_config["fusion"] = "san"
-        model_config.pop("ot_config", None)
-        model_config.pop("fusion_spec", None)
     model = VQAModel(
         text_model=checkpoint["text_model"], image_model=checkpoint["image_model"],
         **model_config,
     )
     state = _adapt_deit_state_dict(checkpoint["model_state_dict"], model.state_dict())
-    state = _adapt_legacy_text_keys(state)
     if checkpoint.get("encoders_omitted", False):
         incompatible = model.load_state_dict(state, strict=False)
         allowed_missing = (
@@ -168,30 +173,10 @@ def load_model(checkpoint_path, device):
     return model
 
 
-def _adapt_legacy_text_keys(state_dict):
-    """Map legacy text-branch modules to the current English names."""
-    converted = {}
-    for key, value in state_dict.items():
-        updated = key
-        parts = key.split(".")
-        if len(parts) > 2 and parts[0] == "ques_model":
-            if parts[1] == "lstm":
-                updated = ".".join(["question_encoder", *parts[1:]])
-            else:
-                updated = ".".join(["question_encoder", "text_encoder", *parts[2:]])
-        elif len(parts) > 2 and parts[0] == "ans_model":
-            updated = ".".join(["answer_embedding", "token_embeddings", *parts[2:]])
-        converted[updated] = value
-    # Leave unknown legacy entries intact so strict loading still reports any
-    # genuine architecture mismatch rather than silently discarding parameters.
-    return converted
-
-
 def restore_training_state(checkpoint, model, optimizer, scheduler):
     if checkpoint.get("format_version") not in {3, 4}:
         raise ValueError("Only version-3/4 checkpoints contain resumable training state")
     state = _adapt_deit_state_dict(checkpoint["model_state_dict"], model.state_dict())
-    state = _adapt_legacy_text_keys(state)
     model.load_state_dict(state, strict=True)
     if checkpoint.get("optimizer_state_dict") is not None:
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
@@ -231,5 +216,4 @@ def load_student_initialization(checkpoint_path, model):
     if source_config != model.model_config:
         raise ValueError("Student initialization checkpoint model_config does not match")
     state = _adapt_deit_state_dict(checkpoint["model_state_dict"], model.state_dict())
-    state = _adapt_legacy_text_keys(state)
     model.load_state_dict(state, strict=True)

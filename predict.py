@@ -8,7 +8,6 @@ from configs.config import Config
 from utils.checkpoint import load_model
 from utils.data_processing import preprocess_text
 from utils.device import resolve_device
-from utils.transport_visualization import save_transport_diagnostics
 
 
 def main():
@@ -27,8 +26,6 @@ def main():
     parser.add_argument("--image", required=True)
     parser.add_argument("--question", required=True)
     parser.add_argument("--diagnostics", action="store_true")
-    parser.add_argument("--diagnostics_output", default=None,
-                        help="Optional path for an OT plan/cost/marginal figure")
     parser.add_argument("--device", choices=["auto", "cpu", "cuda", "mps"],
                         default="auto")
     args = parser.parse_args()
@@ -38,46 +35,12 @@ def main():
         display_image = source.convert("RGB")
         image = Config.transforms(display_image).unsqueeze(0).to(device)
     question = preprocess_text(args.question)
-    diagnostics = args.diagnostics or args.diagnostics_output is not None
+    diagnostics = args.diagnostics
     result = model.generate(image, [question], return_diagnostics=diagnostics)
     ids = result.generated_ids if diagnostics else result
     print(model.answers_from_ids(ids)[0])
     if diagnostics:
-        transport = result.transport
         payload = {"fusion": model.fusion_type}
-        if transport is None:
-            if args.diagnostics_output:
-                raise ValueError("diagnostics_output requires a Balanced OT or UOT checkpoint")
-        else:
-            payload.update({
-                "transport_cost": transport.transport_cost.item(),
-                "entropy": transport.entropy.item(),
-                "matched_mass": transport.matched_mass.item(),
-                "unmatched_mass": transport.unmatched_mass.item(),
-                "residual": transport.residual.item(),
-                "iterations": transport.iterations.item(),
-                "converged": bool(transport.converged.item()),
-            })
-            if result.ot_san is not None:
-                payload.update({
-                    "ot_san_gate": result.ot_san.gate.item(),
-                    "ot_san_summary_norm": result.ot_san.summary_norm.item(),
-                    "ot_san_attention_entropy": (
-                        result.ot_san.attention_entropy.mean().item()
-                    ),
-                })
-            if args.diagnostics_output:
-                encoded = model.question_encoder.tokenizer(
-                    [question], max_length=Config.MAX_LEN_QUES,
-                    truncation=True, padding=True, return_tensors="pt",
-                )
-                tokens = model.question_encoder.tokenizer.convert_ids_to_tokens(
-                    encoded["input_ids"][0].tolist()
-                )
-                save_transport_diagnostics(
-                    transport, args.diagnostics_output,
-                    image=display_image, question_tokens=tokens,
-                )
         if result.fusion_output is not None and result.fusion_output.diagnostics is not None:
             payload.update({
                 f"fusion_{key}": value.detach().float().mean().item()

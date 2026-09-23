@@ -51,10 +51,6 @@ class OTAlignmentConfig:
 
     def transport_config(self) -> OTConfig:
         return OTConfig(
-            transport_type="unbalanced",
-            marginal_mode="uniform",
-            cost_type="cosine",
-            ot_dim=self.ot_dim,
             epsilon=self.epsilon,
             tau_visual=self.tau_visual,
             tau_question=self.tau_question,

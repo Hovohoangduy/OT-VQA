@@ -1,4 +1,4 @@
-"""Train SAN or Optimal-Transport VQA and select checkpoints by generated F1."""
+"""Train the Cross-Attention VQA student and select by generated F1."""
 
 from __future__ import annotations
 
@@ -14,12 +14,9 @@ from transformers import get_linear_schedule_with_warmup
 
 from configs.arg_parser import get_args
 from configs.config import Config
-from model.fusion_methods import parse_fusion_spec
 from model.ot_alignment import (
     AlignmentNegativeQueue, OTAlignmentConfig, OTContrastiveAligner,
 )
-from model.optimal_transport import OTConfig
-from model.ot_san import OTSANConfig
 from model.vqa_model import VQAModel
 from utils.checkpoint import (
     load_student_initialization, read_checkpoint, restore_alignment_state,
@@ -76,26 +73,12 @@ def train(model, train_loader, num_epochs, optimizer, scheduler, criterion,
         for batch_idx, batch in enumerate(train_loader):
             result, answers = _forward_batch(model, batch, device, diagnostics)
             if diagnostics:
-                logits, targets, transport = result
-                if transport is not None:
-                    row = {
-                        "matched_mass": transport.matched_mass.detach().mean().item(),
-                        "entropy": transport.entropy.detach().mean().item(),
-                        "residual": transport.residual.detach().mean().item(),
-                        "iterations": transport.iterations.float().mean().item(),
-                        "convergence": transport.converged.float().mean().item(),
-                    }
-                    if transport.ot_san is not None:
-                        row.update({
-                            "ot_san_gate": transport.ot_san.gate.detach().item(),
-                            "ot_san_summary_norm": (
-                                transport.ot_san.summary_norm.detach().mean().item()
-                            ),
-                            "ot_san_attention_entropy": (
-                                transport.ot_san.attention_entropy.detach().mean().item()
-                            ),
-                        })
-                    diagnostic_rows.append(row)
+                logits, targets, fusion_output = result
+                if fusion_output.diagnostics:
+                    diagnostic_rows.append({
+                        key: value.detach().float().mean().item()
+                        for key, value in fusion_output.diagnostics.items()
+                    })
             else:
                 logits, targets = result
             loss = criterion(logits.transpose(1, 2), targets)
@@ -138,7 +121,9 @@ def train(model, train_loader, num_epochs, optimizer, scheduler, criterion,
         if diagnostic_rows:
             means = {key: sum(row[key] for row in diagnostic_rows) / len(diagnostic_rows)
                      for key in diagnostic_rows[0]}
-            message += ", OT " + ", ".join(f"{key}={value:.4g}" for key, value in means.items())
+            message += ", fusion " + ", ".join(
+                f"{key}={value:.4g}" for key, value in means.items()
+            )
         if distributed is None or distributed.is_main:
             print(message)
     return losses, em_scores, f1_scores
@@ -185,44 +170,12 @@ def _set_loader_epoch(loader, epoch):
 
 
 def _fusion_config_from_args(args):
-    """Return only the active fusion family's checkpointable configuration."""
-    method = parse_fusion_spec(args.fusion).method
-    if method == "ban":
-        return {
-            "glimpses": args.ban_glimpses,
-            "hidden_dim": args.ban_dim,
-            "dropout": args.fusion_dropout,
-        }
-    if method == "mutan":
-        return {
-            "rank": args.mutan_rank,
-            "factor_dim": args.mutan_dim,
-            "dropout": args.fusion_dropout,
-        }
-    if method == "cross_attention":
-        return {
-            "layers": args.cross_fusion_layers,
-            "heads": args.num_heads,
-            "ffn_hidden": args.ffn_hidden,
-            "dropout": args.fusion_dropout,
-        }
-    if method == "aligned_cross_attention":
-        return {
-            "layers": args.cross_fusion_layers,
-            "heads": args.num_heads,
-            "ffn_hidden": args.ffn_hidden,
-            "dropout": args.fusion_dropout,
-            "gate_init": args.aligned_ot_gate_init,
-        }
-    if method == "qformer":
-        return {
-            "query_tokens": args.qformer_queries,
-            "layers": args.qformer_layers,
-            "heads": args.num_heads,
-            "ffn_hidden": args.qformer_ffn_hidden,
-            "dropout": args.fusion_dropout,
-        }
-    return None
+    return {
+        "layers": args.cross_fusion_layers,
+        "heads": args.num_heads,
+        "ffn_hidden": args.ffn_hidden,
+        "dropout": args.fusion_dropout,
+    }
 
 
 def _alignment_config_from_args(args):
@@ -260,8 +213,7 @@ def _run_ot_alignment_training(
     base_model = unwrap_model(model)
     if base_model.fusion_type != "cross_attention":
         raise ValueError(
-            "ot_contrastive_distill requires --fusion cross_attention; "
-            "runtime OT fusion must remain disabled"
+            "ot_contrastive_distill requires --fusion cross_attention"
         )
     if resume is not None and resume.get("format_version") != 4:
         raise ValueError("OT alignment training can resume only from version-4 last_training.pt")
@@ -271,7 +223,6 @@ def _run_ot_alignment_training(
         warmup_epochs = int(saved_alignment["alignment_warmup_epochs"])
         distill_warmup_epochs = int(saved_alignment["ot_distill_warmup_epochs"])
         distill_target_weight = float(saved_alignment["ot_distill_weight"])
-        contrastive_weight = float(saved_alignment["ot_contrastive_weight"])
         alignment_lr = float(saved_alignment.get("ot_alignment_lr", 1e-4))
         gate_failure_policy = str(
             saved_alignment.get("ot_gate_failure_policy", args.ot_gate_failure_policy)
@@ -283,7 +234,6 @@ def _run_ot_alignment_training(
         warmup_epochs = args.alignment_warmup_epochs
         distill_warmup_epochs = args.ot_distill_warmup_epochs
         distill_target_weight = args.ot_distill_weight
-        contrastive_weight = args.ot_contrastive_weight
         alignment_lr = args.ot_alignment_lr
         gate_failure_policy = args.ot_gate_failure_policy
         queue_size = args.ot_negative_queue_size
@@ -291,7 +241,6 @@ def _run_ot_alignment_training(
     alignment_config = {
         "alignment_mode": "ot_contrastive_distill",
         "alignment_warmup_epochs": warmup_epochs,
-        "ot_contrastive_weight": contrastive_weight,
         "ot_alignment_lr": alignment_lr,
         "ot_gate_failure_policy": gate_failure_policy,
         "ot_distill_weight": distill_target_weight,
@@ -408,9 +357,6 @@ def _run_ot_alignment_training(
                 queue,
                 device,
                 gradient_clip=args.gradient_clip or None,
-                # Stage 1 optimizes the complete OT-NCE objective. The
-                # contrastive weight is reserved for optional joint refinement.
-                contrastive_weight=1.0,
                 distributed=distributed,
             )
             global_step += len(train_loader)
@@ -709,16 +655,10 @@ def main():
             args.ot_alignment_lr,
         ) <= 0:
             raise ValueError("OT alignment regularization values must be positive")
-        if min(args.ot_contrastive_weight, args.ot_distill_weight) < 0:
-            raise ValueError("OT auxiliary-loss weights cannot be negative")
+        if args.ot_distill_weight < 0:
+            raise ValueError("OT distillation weight cannot be negative")
         if args.ot_distill_warmup_epochs < 0:
             raise ValueError("OT distillation warm-up cannot be negative")
-    ot_san_config = OTSANConfig(
-        hidden_dim=args.ot_san_hidden_dim,
-        num_layers=args.ot_san_layers,
-        dropout=args.ot_san_dropout,
-        gate_init=args.ot_san_gate_init,
-    )
     seed_everything(args.seed)
     distributed = initialize_distributed(args.device)
     device = distributed.device
@@ -757,14 +697,12 @@ def main():
                          **resume["model_config"]).to(device)
     else:
         text_model, image_model = args.text_model, args.image_model
-        ot_config = OTConfig.from_json(args.ot_profile) if args.ot_profile else OTConfig()
         model = VQAModel(text_model=text_model, image_model=image_model,
-                         output_size=args.d_model, d_model=args.d_model,
+                         d_model=args.d_model,
                          ffn_hidden=args.ffn_hidden, num_layers=args.num_layers,
                          num_heads=args.num_heads, drop_prob=args.drop_prob,
                          freeze_answer_embeddings=args.freeze_answer_embeddings,
-                         fusion=args.fusion, ot_config=ot_config,
-                         ot_san_config=ot_san_config,
+                         fusion=args.fusion,
                          fusion_config=_fusion_config_from_args(args),
                          skip_encoders=bool(args.feature_cache),
                          embeddings_path=embeddings_file).to(device)
@@ -941,8 +879,8 @@ def main():
                     "Validation diagnostics: "
                     f"unique predictions={val_diagnostics.get('unique_predictions', 0):g}, "
                     f"top prediction fraction={val_diagnostics.get('top_prediction_fraction', 0):.3f}, "
-                    f"OT convergence={val_diagnostics.get('ot_convergence_rate', 0):.3f}, "
-                    f"residual={val_diagnostics.get('ot_residual', 0):.5f}"
+                    f"attention entropy={val_diagnostics.get('fusion_attention_entropy', 0):.3f}, "
+                    f"latency={val_diagnostics.get('latency_ms_per_example', 0):.2f} ms/example"
                 )
         distributed.barrier()
         if (args.early_stopping_patience and

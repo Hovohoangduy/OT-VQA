@@ -53,30 +53,11 @@ def evaluation(model, test_loader, criterion, vocab_swap=None, device=None,
                 generated = model.generate(images, questions, anno_ids,
                                            return_diagnostics=diagnostics)
             if diagnostics:
-                logits, targets, transport = result
+                logits, targets, fusion_output = result
                 ids = generated.generated_ids
                 row = {"_count": len(answers)}
-                if transport is not None:
-                    row.update({
-                        "ot_transport_cost": transport.transport_cost.mean().item(),
-                        "ot_entropy": transport.entropy.mean().item(),
-                        "ot_matched_mass": transport.matched_mass.mean().item(),
-                        "ot_unmatched_mass": transport.unmatched_mass.mean().item(),
-                        "ot_residual": transport.residual.mean().item(),
-                        "ot_iterations": transport.iterations.float().mean().item(),
-                        "ot_convergence_rate": transport.converged.float().mean().item(),
-                    })
-                    if generated.ot_san is not None:
-                        row.update({
-                            "fusion_ot_san_gate": generated.ot_san.gate.item(),
-                            "fusion_ot_san_summary_norm": generated.ot_san.summary_norm.mean().item(),
-                            "fusion_ot_san_attention_entropy": (
-                                generated.ot_san.attention_entropy.mean().item()
-                            ),
-                        })
-                if (generated.fusion_output is not None and
-                        generated.fusion_output.diagnostics is not None):
-                    for key, value in generated.fusion_output.diagnostics.items():
+                if fusion_output.diagnostics is not None:
+                    for key, value in fusion_output.diagnostics.items():
                         row[f"fusion_{key}"] = value.detach().float().mean().item()
                 diagnostic_rows.append(row)
             else:
@@ -129,8 +110,6 @@ def main():
     model = load_model(checkpoint, device)
     csv_path = args.dev_csv_path if args.split == "dev" else args.test_csv_path
     if args.feature_cache:
-        if model.fusion_type == "san":
-            raise ValueError("Feature caches require a token-level fusion checkpoint")
         dataset = FeatureCacheDataset(
             args.feature_cache, csv_path, model.text_model_name, model.image_model_name
         )
