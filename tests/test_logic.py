@@ -54,14 +54,22 @@ class ModelLogicTests(unittest.TestCase):
     def tearDownClass(cls):
         cls.directory.cleanup()
 
-    def make_model(self, skip_encoders=False, embeddings_path=None, freeze=False):
+    def make_model(
+        self, skip_encoders=False, embeddings_path=None, freeze=False,
+        fusion="cross_attention",
+    ):
         return VQAModel(
             text_model=str(self.text), image_model=str(self.visual),
             d_model=16, ffn_hidden=32, num_layers=1,
-            num_heads=4, drop_prob=0, fusion="cross_attention",
+            num_heads=4, drop_prob=0, fusion=fusion,
             fusion_config={
                 "layers": 1, "heads": 4, "ffn_hidden": 32, "dropout": 0,
-            },
+            } if fusion == "cross_attention" else None,
+            routing_config={
+                "slots": 2, "reasoning_steps": 2, "routing_dim": 16,
+                "heads": 4, "dropout": 0, "epsilon": 0.2, "tau": 0.5,
+                "sinkhorn_iterations": 5,
+            } if fusion != "cross_attention" else None,
             freeze_answer_embeddings=freeze,
             skip_encoders=skip_encoders,
             embeddings_path=embeddings_path,
@@ -135,6 +143,68 @@ class ModelLogicTests(unittest.TestCase):
         restored = load_model(path, torch.device("cpu"))
         for name, value in model.state_dict().items():
             torch.testing.assert_close(value, restored.state_dict()[name])
+
+    def test_ot_routing_raw_cache_backward_and_checkpoint(self):
+        model = self.make_model(fusion="ot_evidence_routing")
+        images = torch.rand(2, 3, 32, 32)
+        questions = ["what color ?", "color ?"]
+        answers = ["red", "blue"]
+        logits, targets, output = model(
+            images, questions, answers, max_len=6, return_diagnostics=True,
+        )
+        self.assertEqual(logits.shape, (2, 5, 12))
+        self.assertEqual(output.memory.shape, (2, 2, 16))
+        self.assertIn("routing_null", output.diagnostics)
+        nn.functional.cross_entropy(
+            logits.transpose(1, 2), targets, ignore_index=model.pad_token_id,
+        ).backward()
+        self.assertIsNotNone(model.fusion_module.cost_query.weight.grad)
+
+        with torch.no_grad():
+            image_features, _ = model.image_model(images)
+            question_features, question_mask, _ = model.question_encoder.encode_tokens(
+                questions
+            )
+            online = model.encode(images, questions).memory
+            cached = model.encode_from_features(
+                image_features.half(), question_features.half(), question_mask,
+            ).memory
+        torch.testing.assert_close(online, cached, atol=2e-3, rtol=2e-3)
+
+        path = self.root / "ot-routing.pt"
+        save_checkpoint(
+            path, model=model, text_model=str(self.text), image_model=str(self.visual),
+        )
+        payload = read_checkpoint(path, torch.device("cpu"))
+        self.assertEqual(payload["architecture"], "ot_evidence_routing_v1")
+        restored = load_model(path, torch.device("cpu"))
+        self.assertEqual(restored.fusion_type, "ot_evidence_routing")
+        for name, value in model.state_dict().items():
+            torch.testing.assert_close(value, restored.state_dict()[name])
+        model.eval()
+        with torch.no_grad():
+            expected = model.generate(images, questions, max_len=6)
+            actual = restored.generate(images, questions, max_len=6)
+        torch.testing.assert_close(expected, actual)
+
+    def test_softmax_routing_model_constructs(self):
+        model = self.make_model(fusion="softmax_evidence_routing")
+        output = model.encode(
+            torch.rand(1, 3, 32, 32), ["what color ?"], return_diagnostics=True,
+        )
+        self.assertEqual(output.memory.shape, (1, 2, 16))
+        self.assertEqual(model.fusion_module.routing_mode, "softmax")
+
+    def test_routing_initialization_can_transfer_between_matched_controls(self):
+        source = self.make_model(fusion="ot_evidence_routing")
+        path = self.root / "routing-initialization.pt"
+        save_checkpoint(
+            path, model=source, text_model=str(self.text), image_model=str(self.visual),
+        )
+        target = self.make_model(fusion="softmax_evidence_routing")
+        load_student_initialization(path, target)
+        for name, value in source.state_dict().items():
+            torch.testing.assert_close(value, target.state_dict()[name])
 
     def test_removed_fusion_checkpoint_fails_clearly(self):
         path = self.root / "legacy.pt"

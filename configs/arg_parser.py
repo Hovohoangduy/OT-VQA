@@ -24,12 +24,29 @@ def get_args(argv=None):
     parser.add_argument("--split", choices=["dev", "test"], default="dev")
     parser.add_argument(
         "--fusion",
-        choices=["cross_attention"],
+        choices=[
+            "cross_attention", "ot_evidence_routing", "softmax_evidence_routing",
+        ],
         default="cross_attention",
-        help="Retained for explicit experiment records; Cross-Attention is the only model",
+        help="Visual evidence integration architecture",
     )
     parser.add_argument("--fusion_dropout", type=float, default=0.2)
     parser.add_argument("--cross_fusion_layers", type=int, default=1)
+    parser.add_argument("--routing_slots", type=int, default=4)
+    parser.add_argument("--routing_steps", type=int, default=2)
+    parser.add_argument("--routing_dim", type=int, default=256)
+    parser.add_argument("--routing_epsilon", type=float, default=0.1)
+    parser.add_argument("--routing_tau", type=float, default=0.5)
+    parser.add_argument("--routing_iterations", type=int, default=20)
+    parser.add_argument("--routing_tolerance", type=float, default=0.001)
+    parser.add_argument("--routing_preference_smoothing", type=float, default=0.05)
+    parser.add_argument("--routing_null_min", type=float, default=0.02)
+    parser.add_argument("--routing_null_max", type=float, default=0.25)
+    parser.add_argument(
+        "--routing_visual_preference",
+        choices=["question_conditioned", "uniform"],
+        default="question_conditioned",
+    )
     parser.add_argument(
         "--alignment_mode",
         choices=["none", "ot_contrastive_distill"],
@@ -108,10 +125,16 @@ def get_args(argv=None):
         default=True,
         help="Freeze pretrained answer-token embeddings (default: enabled)",
     )
+    parser.add_argument(
+        "--mixed_precision",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Use CUDA float16 outside the float32 OT solver",
+    )
     parser.add_argument("--checkpoint", default=None, help="Explicit evaluation checkpoint")
     parser.add_argument(
         "--diagnostics", action="store_true",
-        help="Report Cross-Attention, latency, and output-diversity diagnostics",
+        help="Report fusion/routing, latency, and output-diversity diagnostics",
     )
     parser.add_argument(
         "--device", choices=["auto", "cpu", "cuda", "mps"], default="auto",

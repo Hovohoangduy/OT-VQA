@@ -1,91 +1,60 @@
-# Simplified Source Review
+# Source Review: OT Evidence Routing
 
-## Result
+## Implemented result
 
-The active source now has one deployable model and one optional research teacher:
+The repository now contains a runtime OT architecture in which every visual token sent
+to the answer decoder is allocated through semi-relaxed OT. It works with raw images and
+feature caches, single-GPU training, two-rank CUDA DDP, evaluation, prediction, strict
+checkpoints, and architecture-neutral diagnostics.
 
-- deployable model: native Cross-Attention VQA;
-- research component: training-only contrastive UOT alignment and attention distillation.
+The implementation adds:
 
-This removes multiple public branches that previously complicated construction,
-checkpoint loading, diagnostics, tests, and experiment interpretation.
+- `model/ot_routing.py` with a float32 hard-row/soft-column solver;
+- general spatial, global, and null evidence tokens;
+- question-conditioned multi-step reasoning slots;
+- matched softmax and `tau=0` controls;
+- routing CLI and architecture-aware checkpoints;
+- a reproducible experiment runner;
+- cache grid metadata and validation;
+- focused solver, gradient, mask, integration, and checkpoint tests.
 
-## Removed source
+## Preserved behavior
 
-- `model/sans.py` and `model/ot_san.py`;
-- BAN, MUTAN, aligned Cross-Attention, Q-Former, registries, and transport priors from
-  `model/fusion_methods.py`;
-- runtime projections, learned cost, learned marginals, barycentric fusion, and
-  `TransportOutput` from `model/optimal_transport.py`;
-- all runtime OT JSON profiles;
-- transport-map visualization;
-- fusion benchmark runner and aggregator;
-- tests dedicated to removed architectures;
-- old runtime-OT and fusion-family design documents.
+Native Cross-Attention and its checkpoint marker remain supported. The answer decoder,
+answer normalization, shifted targets, autoregressive generation, EOS handling, frozen
+encoders, feature caches, generated-F1 selection, and existing DDP behavior remain shared.
 
-## Retained source
+The historical contrastive UOT teacher remains reproducible only with Cross-Attention.
+Routing models reject that alignment mode because they train OT directly from the VQA
+answer objective.
 
-- frozen ViT/DeiT patch extraction;
-- frozen English BERT token extraction;
-- native multi-head Cross-Attention;
-- causal autoregressive answer decoder;
-- raw and cached feature paths;
-- generated EM/F1 checkpoint selection;
-- output-diversity and modality-shuffle diagnostics;
-- training-only UOT teacher, gate, fallback, and KL distillation;
-- single-process and DDP execution;
-- version-3 student and version-4 staged checkpoints.
+## Numerical contracts
 
-## Public contract
+- Slot row sums equal fixed uniform budgets.
+- Padded evidence receives exactly zero returned mass.
+- Log-domain padded columns retain finite gradients.
+- Transport always executes in float32.
+- `tau=0` equals the independent-softmax implementation.
+- Null mass remains explicit in the readout.
+- Grid dimensions must match spatial-token count.
+- Diagnostics do not alter routing outputs.
 
-`--fusion` accepts only `cross_attention`. The flag remains to make experiment records
-explicit. Removed fusion names fail during CLI parsing. Removed and pre-cleanup
-checkpoints fail during loading with a retraining message.
-
-New checkpoints contain:
+## Checkpoint contract
 
 ```text
-architecture = cross_attention_only_v1
+cross_attention            -> cross_attention_only_v1
+ot_evidence_routing        -> ot_evidence_routing_v1
+softmax_evidence_routing   -> ot_evidence_routing_v1
 ```
 
-This marker prevents a legacy state dictionary from being interpreted as the smaller
-model.
+OT and softmax controls can exchange a common initialization when all model fields except
+their routing mode match. Other mismatches fail strictly.
 
-## Corrections preserved
+## Verification status
 
-The cleanup retains the previously corrected VQA contract:
+The full local test suite and compile check pass after implementation. These checks
+establish numerical and software behavior. CUDA/MPS hardware checks, the Kaggle DDP
+smoke test, multi-seed training, test-set accuracy, and latency measurement require the
+target hardware and dataset and remain experiment work.
 
-- shifted answer inputs/targets;
-- causal answer self-attention;
-- memory padding masks;
-- generation from BOS without reference answers;
-- EOS termination and per-row padding;
-- correct attention head merge order;
-- ViT prefix-token removal without reshaping token dimensions;
-- no double pixel rescaling;
-- frozen encoders remain in evaluation mode;
-- partial batches are processed;
-- generated validation F1 selects checkpoints;
-- feature-cache fingerprints are validated.
-
-## OT interpretation
-
-The supplied failed experiment did not distill OT. The gate rejected negative margin and
-below-chance retrieval, after which KL and effective OT weight were zero. The later VQA
-epochs therefore measured native Cross-Attention fallback.
-
-The source deliberately keeps that safety behavior. It does not weaken the gate to make
-an ineffective teacher appear successful.
-
-## Verification
-
-After cleanup:
-
-```text
-python -m compileall -q configs model utils train.py test.py predict.py tests
-python -m unittest discover -s tests -q
-```
-
-Both commands pass. The focused suite currently runs 26 tests. These tests establish
-software behavior and numerical validity, not VQA accuracy. Full paired training and
-untouched-test evaluation remain required.
+No VQA performance improvement is claimed from source implementation alone.

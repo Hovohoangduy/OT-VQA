@@ -1,4 +1,4 @@
-"""Focused tests for the only deployed fusion method: Cross-Attention."""
+"""Focused tests for the native Cross-Attention baseline."""
 
 import unittest
 

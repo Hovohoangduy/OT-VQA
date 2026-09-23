@@ -1,6 +1,6 @@
 # Question-Conditioned Multi-Step OT Evidence Routing for General VQA
 
-Status: proposed; not implemented or benchmarked.
+Status: implemented and unit-tested; VQA benchmark results are pending.
 
 ## 1. Objective and scope
 
@@ -252,7 +252,8 @@ identifier such as `ot_evidence_routing_v1`; do not rewrite the identity of exis
 Cross-Attention checkpoints. Preserve strict loading of currently supported
 checkpoints and explicitly reject incompatible routing metadata.
 
-This document does not add these files or make proposed flags runnable.
+These files and flags are now implemented. Accuracy and latency statements remain
+experimental targets until the matched benchmark is run.
 
 ## 11. Starting configuration
 

@@ -1,9 +1,15 @@
-# Training-Only OT Alignment: Current State and Next Improvement
+# Historical Training-Only OT Alignment Experiment
+
+This path remains available for reproducibility, but the active OT architecture is now
+question-conditioned multi-step evidence routing. See
+`docs/ot_evidence_routing_plan.md`. The failure analysis below explains why the older
+teacher experiment is not evidence of an OT VQA gain.
 
 ## Status
 
-The repository has been reduced to native Cross-Attention plus one optional training-only
-UOT teacher. Runtime OT and alternative fusion families no longer exist.
+The repository retains this native Cross-Attention plus optional training-only UOT
+teacher path for reproduction. A separate runtime OT evidence-routing architecture now
+exists; it does not use this teacher or its distillation objective.
 
 The existing teacher is implemented and numerically stable, but the supplied experiment
 did not validate it:

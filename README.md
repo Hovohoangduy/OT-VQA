@@ -1,36 +1,49 @@
 # OT-VQA
 
-This repository now contains one VQA architecture: **native Cross-Attention**. Optimal
-Transport is retained only as an optional training-time alignment teacher. It is never
-part of the deployed model and never adds inference latency.
+The repository provides two VQA architecture families:
 
-Removed architectures include SAN, OT-SAN, BAN, MUTAN, Q-Former, gated OT-aligned
-Cross-Attention, barycentric runtime fusion, and Balanced/UOT attention priors. Their CLI
-options, benchmark runner, profiles, tests, and checkpoint compatibility were also
-removed.
+- Native Cross-Attention, the established performance baseline.
+- Question-conditioned evidence routing, where all visual evidence reaching the
+  answer decoder passes through either semi-relaxed Optimal Transport or its matched
+  independent-softmax control.
+
+The evidence-routing model supports general patch-level visual evidence. It does not
+require object detection or scene graphs. Its implementation is complete, but its VQA
+accuracy has not yet been established by training experiments.
 
 ## Architecture
 
 ```text
-image ── frozen ViT ── patch tokens ─────────────┐
-                                                 ├─ native Cross-Attention ── memory
-question ── frozen BERT ── content tokens ───────┘                         │
-                                                                            ▼
-answer prefix ── BERT token embeddings ── causal Transformer decoder ── answer
+image -> frozen ViT patches -> spatial/global/null evidence -----------+
+                                                                     |
+question -> frozen BERT -> question-conditioned reasoning slots       |
+                                |                                    |
+                                +-- cost matrix -- semi-relaxed OT <--+
+                                           |
+                                  OT-weighted evidence
+                                           |
+                                     update slots
+                                           |
+                                  repeat reasoning step
+                                           |
+                                  answer decoder memory
 ```
 
-Optional training-only OT:
+Semi-relaxed OT enforces a fixed budget for every reasoning slot and softly matches
+the combined slot allocation to a question-conditioned visual preference. The null
+token represents unavailable or unnecessary evidence. The solver uses float32
+log-domain iterations, including during mixed-precision training.
 
-```text
-frozen ViT/BERT features ── UOT contrastive teacher ── validation gate
-                                                        │
-                         pass: soft attention target ───┤
-                         fail: native VQA fallback ─────┘
-```
+Available `--fusion` values:
 
-The teacher must obtain a positive hard-negative margin and retrieval above chance. If
-it fails, the default policy trains native Cross-Attention with OT weight zero. Such a
-run is a fallback baseline and is not evidence of an OT improvement.
+| Value | Purpose |
+| --- | --- |
+| `cross_attention` | Native baseline |
+| `softmax_evidence_routing` | Matched slot reasoner with independent routing |
+| `ot_evidence_routing` | Slot reasoner with semi-relaxed OT |
+
+Setting `--fusion ot_evidence_routing --routing_tau 0` gives the exact independent
+row-softmax transport limit at the same temperature and slot budget.
 
 ## Install
 
@@ -38,83 +51,97 @@ run is a fallback baseline and is not evidence of an OT improvement.
 python -m pip install -r requirements.txt
 ```
 
-Default encoders are `google/vit-base-patch16-224-in21k` and
-`bert-base-uncased`. The first online run downloads them.
+The default encoders are `google/vit-base-patch16-224-in21k` and
+`bert-base-uncased`.
 
-## Native Cross-Attention baseline
+## Train the OT model
+
+Single GPU:
 
 ```bash
 python train.py \
   --device cuda \
-  --fusion cross_attention \
+  --fusion ot_evidence_routing \
+  --alignment_mode none \
+  --mixed_precision \
+  --routing_slots 4 \
+  --routing_steps 2 \
+  --routing_dim 256 \
+  --routing_epsilon 0.1 \
+  --routing_tau 0.5 \
+  --routing_iterations 20 \
   --epochs 100 \
   --batch_size 4 \
   --train_csv_path data/gqa_dataset/train.csv \
   --dev_csv_path data/gqa_dataset/val.csv \
   --img_path data/gqa_dataset/images \
-  --model_path results/cross_attention \
-  --seed 42
+  --model_path results/ot_evidence_routing/seed_42 \
+  --seed 42 \
+  --diagnostics
 ```
 
-`--fusion cross_attention` is optional but retained so experiment records remain
-explicit. No other fusion value is accepted.
-
-## Training-only OT experiment
-
-```bash
-python train.py \
-  --device cuda \
-  --fusion cross_attention \
-  --alignment_mode ot_contrastive_distill \
-  --alignment_warmup_epochs 10 \
-  --ot_alignment_lr 0.0001 \
-  --ot_alignment_dim 128 \
-  --ot_alignment_iterations 20 \
-  --ot_negative_count 3 \
-  --ot_negative_queue_size 32 \
-  --ot_contrastive_temperature 0.07 \
-  --ot_distill_weight 0.02 \
-  --ot_distill_warmup_epochs 5 \
-  --ot_gate_failure_policy error \
-  --epochs 100 \
-  --batch_size 4 \
-  --train_csv_path data/gqa_dataset/train.csv \
-  --dev_csv_path data/gqa_dataset/val.csv \
-  --img_path data/gqa_dataset/images \
-  --model_path results/ot_distilled_cross_attention \
-  --seed 42
-```
-
-Use `--ot_gate_failure_policy error` while improving the teacher so an invalid teacher
-does not consume time on a long fallback run. Use `fallback` only when completing a
-native baseline is useful.
-
-## Two T4 GPUs in a Kaggle notebook
-
-The batch size is per GPU. This command gives a global batch of eight:
+Two T4 GPUs in one Kaggle notebook cell:
 
 ```bash
 !CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nproc_per_node=2 train.py \
   --device cuda \
-  --fusion cross_attention \
-  --alignment_mode ot_contrastive_distill \
-  --alignment_warmup_epochs 10 \
-  --ot_gate_failure_policy error \
+  --fusion ot_evidence_routing \
+  --alignment_mode none \
+  --mixed_precision \
+  --routing_slots 4 \
+  --routing_steps 2 \
+  --routing_dim 256 \
+  --routing_epsilon 0.1 \
+  --routing_tau 0.5 \
+  --routing_iterations 20 \
   --epochs 100 \
   --batch_size 4 \
   --train_csv_path /kaggle/input/datasets/duytrain02/gqa-dataset-1909/gqa_dataset/train.csv \
   --dev_csv_path /kaggle/input/datasets/duytrain02/gqa-dataset-1909/gqa_dataset/val.csv \
   --img_path /kaggle/input/datasets/duytrain02/gqa-dataset-1909/gqa_dataset/images \
-  --model_path results/ot_distilled_cross_attention \
-  --seed 42
+  --model_path results/ot_evidence_routing/seed_42 \
+  --seed 42 \
+  --diagnostics
 ```
 
-DDP shards training data, synchronizes gradients and metrics, performs full validation
-on rank zero, writes checkpoints once, and broadcasts gate/early-stop decisions.
+`--batch_size` is per GPU, so the second command has a global batch size of eight.
+DDP shards the training set, synchronizes gradients and metrics, validates on rank
+zero, and writes each checkpoint once.
+
+## Matched pilot experiment
+
+The experiment runner executes the native baseline, slot-softmax control, OT model,
+and the OT `tau=0` limit:
+
+```bash
+python scripts/run_ot_routing_experiment.py \
+  --train_csv data/gqa_dataset/train.csv \
+  --dev_csv data/gqa_dataset/val.csv \
+  --img_path data/gqa_dataset/images \
+  --output_root results/ot_routing_pilot \
+  --seeds 42 \
+  --epochs 100 \
+  --batch_size 4 \
+  --gpus 1
+```
+
+Use `--gpus 2` for one two-GPU DDP training job at a time. Use `--dry_run` to print
+commands without starting training. Confirmation runs should use seeds 1105, 1106,
+and 1107 after the pilot is numerically sound.
+
+Summarize completed runs and paired OT-minus-softmax differences:
+
+```bash
+python scripts/summarize_ot_routing.py --root results/ot_routing_pilot
+```
+
+The softmax and OT routing models have the same evidence, slots, reasoning updates,
+decoder, and parameter layout. A performance difference between native Cross-Attention
+and OT does not isolate OT; the matched softmax comparison does.
 
 ## Feature cache
 
-Precompute frozen features once:
+Precompute frozen features for each split:
 
 ```bash
 python precompute_features.py \
@@ -128,50 +155,67 @@ python precompute_features.py \
   --output data/gqa_cache/dev
 ```
 
-Then add `--feature_cache data/gqa_cache` to either training command. A complete cache
-root must contain valid `train/` and `dev/` manifests; an empty directory is rejected.
+Add `--feature_cache data/gqa_cache` to a training command. Cache manifests include
+the visual source shape, patch-grid geometry, prefix-token count, encoder identities,
+preprocessing, and CSV fingerprint. Existing valid version-1 caches remain readable;
+the model also checks the spatial token count against encoder grid metadata.
 
-## Evaluation and prediction
+## Evaluation, prediction, and diagnosis
 
 ```bash
 python test.py \
-  --checkpoint results/cross_attention/best.pt \
+  --checkpoint results/ot_evidence_routing/seed_42/best.pt \
   --dev_csv_path data/gqa_dataset/val.csv \
   --img_path data/gqa_dataset/images \
   --split dev --diagnostics
 
 python predict.py \
-  --checkpoint results/cross_attention/best.pt \
+  --checkpoint results/ot_evidence_routing/seed_42/best.pt \
   --image path/to/image.jpg \
-  --question "What color is the cup?" \
+  --question "What is happening in this image?" \
   --diagnostics
+
+python diagnose_training.py \
+  --checkpoint results/ot_evidence_routing/seed_42/best.pt \
+  --dev_csv_path data/gqa_dataset/val.csv \
+  --dev_img_path data/gqa_dataset/images
 ```
 
-Diagnostics report Cross-Attention entropy, memory statistics, latency, prediction
-diversity, and majority-answer rate. Runtime transport maps no longer exist.
+Routing diagnostics include normalized row entropy, slot similarity, null fraction,
+visual-marginal KL, row and fixed-point residuals, finite/convergence rates, cost
+statistics, iterations, and evidence coverage. Evaluation also reports generated
+EM/F1, loss, latency, peak CUDA memory, prediction diversity, and majority rate.
 
 ## Checkpoints
 
-- Version 3: deployable Cross-Attention student and ordinary training state.
-- Version 4: resumable staged state containing the student, OT teacher, negative queue,
-  optimizer, scheduler, RNG state, and current stage.
-- `best.pt` from an OT-distillation run is version 3 and contains only the student.
-- Legacy fusion and pre-simplification checkpoints intentionally fail with a clear
-  retraining message.
+- Cross-Attention checkpoints use `architecture=cross_attention_only_v1`.
+- OT and matched-softmax checkpoints use `architecture=ot_evidence_routing_v1`.
+- Version 3 stores deployable model and standard training state.
+- Version 4 remains reserved for the older training-only alignment teacher workflow.
+- Strict loading rejects architecture/configuration mismatches.
+- A routing initialization may be copied between OT and softmax controls when every
+  architecture field except routing mode matches.
 
-## Verification
+## Historical training-only OT teacher
+
+`--fusion cross_attention --alignment_mode ot_contrastive_distill` remains available
+for reproducing the earlier contrastive-teacher experiment. It is incompatible with
+the evidence-routing architectures. The recorded teacher failed its validation gate,
+so it provides no demonstrated OT performance gain.
+
+## Verification and evidence boundary
 
 ```bash
+python -m compileall -q configs model utils scripts train.py test.py predict.py tests
 python -m unittest discover -s tests -q
 ```
 
-The focused suite covers native fusion shapes/masks/gradients, autoregressive generation,
-raw/cached feature agreement, checkpoint export/resume contracts, Sinkhorn numerics,
-contrastive teacher gradients, collapse detection, the decision gate, and attention
-distillation.
+Tests verify the hard slot marginal, padding, finite gradients, exact `tau=0` limit,
+router integration, cached/online agreement, checkpoints, generation, and the existing
+baseline and teacher contracts. Passing tests establishes software behavior, not VQA
+accuracy. Use the matched multi-seed experiment and held-out test split before claiming
+that OT improves performance.
 
-See [architecture_and_pipeline.md](docs/architecture_and_pipeline.md) for the source
-walkthrough, [ot_contrastive_distillation_plan.md](docs/ot_contrastive_distillation_plan.md)
-for the remaining OT research plan, and
-[optimal_transport_vqa_architecture.html](docs/optimal_transport_vqa_architecture.html)
-for the visual architecture guide.
+See [the implementation plan](docs/ot_evidence_routing_plan.md),
+[the source architecture](docs/architecture_and_pipeline.md), and
+[the HTML architecture guide](docs/optimal_transport_vqa_architecture.html).

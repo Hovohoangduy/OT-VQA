@@ -1,207 +1,175 @@
-# Simplified OT-VQA Architecture and Source Pipeline
+# OT-VQA Architecture and Source Pipeline
 
-## Scope
+## Active architectures
 
-The active repository contains one deployable VQA architecture: native
-Cross-Attention. Optimal Transport is a training-only research component. No transport
-plan, OT projection, or Sinkhorn iteration executes in `test.py` or `predict.py`.
-
-The following were removed because they were either ineffective in the recorded
-experiments or irrelevant to the next OT-teacher investigation:
-
-- SAN and OT-SAN;
-- BAN and MUTAN;
-- Q-Former;
-- gated OT-aligned Cross-Attention;
-- runtime Balanced OT/UOT fusion and log-attention priors;
-- transport visualization and hardware OT profiles;
-- the 15-configuration fusion benchmark runner;
-- legacy fusion checkpoint migration.
-
-This is an intentional compatibility break. Only checkpoints written by the simplified
-`cross_attention_only_v1` architecture load.
-
-## Deployed VQA graph
+The runtime supports native Cross-Attention and a general evidence-routing family.
+Evidence routing operates on ViT spatial patches plus learned global and null tokens;
+it does not require object detections or scene graphs.
 
 ```text
-image [B,3,H,W]
-  └─ frozen ViT/DeiT
-       └─ remove CLS/distillation prefix
-            └─ visual patches V [B,N,Dv]
-
-question strings
-  └─ frozen English BERT
-       └─ remove PAD and special tokens through mask
-            └─ question tokens Q [B,M,Dq]
-
-V ───────────────────────────────┐
-                                 ├─ CrossAttentionFusion
-Q ── query projection ───────────┘     Q queries; V keys/values
-                                            │
-                                            ▼
-                                  decoder memory H [B,M,d]
-                                            │
-answer prefix [BOS,y1,...] ─ embeddings ─ causal Transformer decoder
-                                            │
-                                            ▼
-                                      next-token logits
+image -> frozen ViT -> spatial patches -> evidence bank --------+
+                                                               |
+question -> frozen BERT -> question tokens -> reasoning slots   |
+                                      |                        |
+                                      +-> routing costs <-------+
+                                               |
+                              semi-relaxed OT or softmax control
+                                               |
+                                      weighted evidence readout
+                                               |
+                                   slot/question/slot reasoning
+                                               |
+                                          repeat T steps
+                                               |
+                                    K decoder-memory tokens
+                                               |
+                                    autoregressive answer decoder
 ```
 
-### Cross-Attention
+All visual input to an evidence-routing decoder passes through its allocation plan.
+Question information enters through slot initialization and slot-to-question attention.
 
-For every head:
+## Evidence bank
+
+`ImageEmbedding.spatial_tokens()` removes the ViT/DeiT prefix tokens. The router:
+
+1. Projects spatial patches to `routing_dim`.
+2. Adds checked two-dimensional patch positions and a spatial type embedding.
+3. Computes a masked global token from the spatial evidence.
+4. Appends a learned null token.
+
+Patch-grid geometry comes from the image-encoder configuration. A mismatch between the
+configured grid and the number of cached spatial tokens raises an error. Newly written
+cache manifests also record grid size and prefix-token count.
+
+## Question-conditioned slots and cost
+
+For pooled question representation `q` and learned slot identity `e_i`:
 
 ```text
-Qh = Wq Q
-Kh = Wk V
-Vh = Wv V
-A  = softmax(Qh Khᵀ / sqrt(d_head))
-Z  = A Vh
+S_i(0) = LayerNorm(e_i + Wq q)
 ```
 
-The layer applies residual projection, LayerNorm, a feed-forward network, another
-residual, and another LayerNorm. Padded visual patches are blocked before softmax.
-Padded question positions are zeroed after attention and after the feed-forward update.
-
-`FusionOutput` contains:
-
-- `memory`: contextual question tokens consumed by the answer decoder;
-- `memory_padding_mask`: valid decoder-memory positions;
-- optional final-layer attention `[B, heads, question, visual]` for diagnostics or OT
-  distillation;
-- optional attention entropy and memory statistics.
-
-## Training-only OT teacher
-
-The teacher is not a fusion method. It is an auxiliary model used only when
-`--alignment_mode ot_contrastive_distill` is enabled.
-
-### Stage 1: contrastive alignment
-
-1. `extract_alignment_features()` obtains frozen ViT patches and BERT question tokens.
-2. Independent trainable adapters apply `Linear → GELU → LayerNorm → L2 normalization`.
-3. Pairwise cosine cost is `Cij = 1 - cosine(vi, qj)`.
-4. Uniform masked marginals and float32 log-domain UOT produce plan `P`.
-5. Hard mismatched pairs are selected with pooled adapter similarity.
-6. Symmetric InfoNCE trains image-to-question and question-to-image ranking.
-7. A detached FIFO queue supplies candidates for small batches.
-
-The current pair score is:
+At each reasoning step, normalized slot queries and evidence keys produce the bounded
+cosine cost:
 
 ```text
-score(V,Q) = -sum(P * C) / max(sum(P), minimum_mass)
+C_ij = -cos(Ws S_i, Wv V_j)
 ```
 
-This score is the principal remaining research weakness: normalizing away matched mass
-can allow an unrelated pair to obtain a competitive score using a small amount of
-low-cost transport. The next improvement should replace it with a global-to-local
-objective and a complete regularized UOT energy; that work is deliberately not hidden
-inside this cleanup.
+The question-conditioned visual preference is smoothed with a uniform distribution over
+valid non-null evidence. The predicted null preference is bounded by configuration.
+A `uniform` preference option provides an ablation.
 
-### Validation gate
+## Semi-relaxed OT
 
-The teacher may supervise VQA only when:
-
-- mean positive score exceeds the hardest-negative score;
-- I2Q retrieval exceeds `1 / candidate_count`;
-- Q2I retrieval exceeds `1 / candidate_count`;
-- transport diagnostics and feature variances are finite and non-collapsed.
-
-If the gate fails:
-
-- `error` stops immediately;
-- `fallback` trains native Cross-Attention with KL and OT weight equal to zero.
-
-A fallback result is a native result, not an OT result.
-
-### Stage 2: attention distillation
-
-After a successful gate, the teacher is frozen. Its positive plan is normalized over
-visual patches for each valid question token and detached. The student minimizes:
+For slot marginal `a`, evidence preference `b`, and plan `P`, the core engine solves:
 
 ```text
-Ltotal = Lanswer + lambda(epoch) * KL(stopgrad(Pword→patch) || mean_heads(A))
+min  <P,C> + epsilon * sum(P * (log(P)-1)) + tau * KL(P^T 1 || b)
+ P
+s.t. P >= 0 and P 1 = a
 ```
 
-The answer loss remains primary. `lambda(epoch)` warms up from zero to
-`--ot_distill_weight`.
+The row constraint gives each slot a fixed evidence budget. The column marginal is soft,
+so irrelevant patches need not receive a prescribed amount. The null column represents
+unsupported requests without renormalizing uncertainty away.
 
-## Answer training and generation
+The solver uses fixed-count log-domain iterations in float32. It recomputes the final row
+dual so returned plans respect the hard marginal. Masked evidence uses a finite internal
+log floor to keep backward gradients finite, and its returned plan entries are exactly
+zero.
 
-Training uses shifted targets:
+At `tau=0`, the implementation calls the exact independent entropy-regularized row
+softmax. `softmax_evidence_routing` uses this same control directly.
 
-```text
-decoder input  = [BOS, y1, y2, ...]
-target         = [y1,  y2, EOS, ...]
-```
+## Iterative readout
 
-The decoder uses causal self-attention and cross-attention to fused memory. Training
-cross-entropy ignores PAD and may use label smoothing. Checkpoints are selected with
-autoregressively generated validation F1, using validation loss as a tie-breaker.
+Each slot receives appearance, spatial moments, and spatial/global/null mass from its
+transport row. A recurrent update is followed by slot self-attention, question attention,
+and a feed-forward update. The starting configuration shares these weights over two
+reasoning steps. Final slots are projected to decoder width and become unmasked decoder
+memory.
 
-Inference begins with BOS, greedily appends a token, stops each row at EOS, and pads
-finished rows independently. It never receives the reference answer.
+The training objective is ordinary shifted autoregressive answer cross-entropy. No
+retrieval teacher or distillation loss is active for routing models. Gradients pass
+through every unrolled transport iteration into cost, visual-preference, evidence, and
+slot modules.
 
-## Cached and online feature paths
+## Controls and interpretation
 
-- Online mode runs frozen ViT and BERT inside the model.
-- Cached mode loads float16 encoder tokens and bypasses both backbones during training.
-- The cache manifest verifies CSV fingerprint, encoder identity, split, and preprocessing.
-- `VQAModel.encode_from_features()` and the online path share the same fusion and decoder.
+| Model | Purpose |
+| --- | --- |
+| `cross_attention` | Existing architecture/performance reference |
+| `softmax_evidence_routing` | Same evidence and slot reasoner, independent routing |
+| `ot_evidence_routing` | Semi-relaxed column-coupled routing |
+| OT with `routing_tau=0` | Exact mathematical independent-routing limit |
 
-## Single and two-GPU execution
+Only the softmax/OT pair isolates the transport constraint. A difference from native
+Cross-Attention also includes the effect of the slot-reasoning architecture.
 
-Single GPU uses `python train.py`. Two GPUs use:
+## Diagnostics
+
+When enabled, each reasoning step measures normalized row entropy, slot-assignment
+similarity, null fraction, generalized column KL, hard-row error, fixed-point residual,
+finite-plan and convergence rates, iteration count, cost mean/std, and evidence coverage.
+The interface reports averages across steps and the final-step value separately.
+
+Evaluation adds generated EM/F1, validation loss, latency, CUDA peak memory, unique
+predictions, and top-answer fraction. `diagnose_training.py` works with either routing or
+Cross-Attention diagnostics and measures image/question shuffle sensitivity.
+
+## Cached, online, and mixed-precision paths
+
+Online and cached features enter the same `VQAModel._fuse()` path. Frozen encoders remain
+in evaluation mode. CUDA mixed precision is opt-in with `--mixed_precision`; the router,
+reasoning modules, and decoder can use float16 while the OT solver explicitly disables
+autocast and computes in float32.
+
+## Single GPU and DDP
+
+Single GPU runs `python train.py`. Two-GPU training uses:
 
 ```bash
 torchrun --standalone --nproc_per_node=2 train.py ...
 ```
 
-DDP behavior:
-
-- one process and model replica per GPU;
-- `DistributedSampler` creates non-overlapping training shards;
-- student and teacher gradients are all-reduced;
-- scalar training metrics are reduced;
-- rank zero evaluates the complete development split and writes checkpoints;
-- gate, fallback, and early-stop decisions are broadcast;
-- process groups are destroyed during normal completion and exceptions.
+DDP uses one replica per GPU, a distributed training sampler, synchronized gradients and
+scalar metrics, rank-zero validation/checkpointing, broadcast early-stop decisions, and
+clean process-group shutdown. The softmax control keeps matched preference parameters in
+the DDP graph with exact zero gradients.
 
 ## Checkpoints
 
-Every new checkpoint contains `architecture=cross_attention_only_v1`.
-
-| File | Format | Contents |
+| Family | Architecture marker | Format |
 | --- | --- | --- |
-| Native `last.pt` / `best.pt` | v3 | student, architecture, optimizer/scheduler, progress, RNG |
-| OT run `last_training.pt` | v4 | v3 fields plus teacher, queue, alignment config and stage |
-| OT run `best.pt` | v3 | deployable student only |
+| Cross-Attention | `cross_attention_only_v1` | v3 |
+| OT/softmax evidence routing | `ot_evidence_routing_v1` | v3 |
+| Historical teacher resume | Cross-Attention marker | v4 |
 
-Legacy fusion and pre-cleanup state layouts are rejected explicitly.
+Complete fusion/routing configuration is stored in `model_config`. Strict loading checks
+that the marker matches the selected fusion. Cached-feature exports may omit frozen
+encoder weights and reload them from recorded model identifiers at deployment.
 
 ## Source map
 
 | Path | Responsibility |
 | --- | --- |
-| `configs/arg_parser.py` | One fusion choice plus training-only OT arguments |
-| `model/features_extraction.py` | Frozen ViT/BERT features and answer embeddings |
-| `model/fusion_methods.py` | Cross-Attention configuration, masks, layers and diagnostics |
-| `model/vqa_model.py` | Feature routing, fusion, decoding and generation |
-| `model/optimal_transport.py` | Minimal float32 Sinkhorn kernel used only by the teacher |
-| `model/ot_alignment.py` | Adapters, negative queue, UOT contrastive teacher and KL target |
-| `utils/ot_alignment_training.py` | Warm-up, validation gate and distillation epochs |
-| `utils/distributed.py` | DDP initialization, reductions, broadcasts and cleanup |
-| `utils/checkpoint.py` | v3/v4 persistence and architecture compatibility checks |
-| `train.py` | Native or staged training orchestration |
-| `test.py` | Generated EM/F1, loss, latency and output diversity |
-| `predict.py` | Single-example answer generation and attention diagnostics |
-| `diagnose_training.py` | Modality shuffles, output collapse and attention entropy |
+| `model/ot_routing.py` | Routing config, semi-relaxed solver, evidence bank, slot reasoner, diagnostics |
+| `model/vqa_model.py` | Architecture construction, shared feature paths, decoder and generation |
+| `model/fusion_methods.py` | Native Cross-Attention baseline |
+| `model/features_extraction.py` | Frozen encoders, patch grid, answer embeddings |
+| `configs/arg_parser.py` | Architecture and routing CLI |
+| `train.py` | Direct-answer training, DDP, mixed precision, model selection |
+| `utils/checkpoint.py` | Strict architecture-aware persistence |
+| `scripts/run_ot_routing_experiment.py` | Matched pilot and confirmation runner |
+| `scripts/summarize_ot_routing.py` | Per-seed and paired OT/softmax result summary |
+| `test.py`, `predict.py`, `diagnose_training.py` | Evaluation, inference, and reliance diagnostics |
+| `tests/test_ot_routing.py` | Solver and router numerical contracts |
 
 ## Evidence boundary
 
-The failed teacher log supplied on 2026-09-23 ended with margin `-0.0421`, I2Q `0.246`,
-and Q2I `0.219` for four candidates. It correctly activated fallback; every VQA epoch
-used `KL=0` and weight `0`. Its best F1 of `0.3323` is therefore not an OT result.
-
-No accuracy improvement is claimed by this cleanup. It establishes a smaller, auditable
-baseline for the next teacher redesign.
+The code is implemented and unit-tested. No training result currently demonstrates that
+evidence-routing OT improves VQA performance. The required evidence is a paired
+multi-seed improvement over the matched softmax model followed by held-out test
+confirmation and a measured latency comparison.

@@ -18,23 +18,24 @@ from model.features_extraction import (
 from model.fusion_methods import (
     CrossAttentionFusion, CrossAttentionFusionConfig, FusionInput, FusionOutput,
 )
+from model.ot_routing import OTEvidenceRouter, OTEvidenceRoutingConfig
 
 
 @dataclass
 class EncoderOutput:
     memory: torch.Tensor
     memory_padding_mask: torch.Tensor
-    fusion_output: FusionOutput
+    fusion_output: object
 
 
 @dataclass
 class GenerationOutput:
     generated_ids: torch.Tensor
-    fusion_output: Optional[FusionOutput] = None
+    fusion_output: Optional[object] = None
 
 
 class VQAModel(nn.Module):
-    """Frozen ViT/BERT features, native Cross-Attention, and answer decoder."""
+    """Frozen ViT/BERT features, selectable evidence integration, and decoder."""
 
     def __init__(
         self,
@@ -48,6 +49,7 @@ class VQAModel(nn.Module):
         image_model=Config.image_model,
         fusion="cross_attention",
         fusion_config=None,
+        routing_config=None,
         freeze_answer_embeddings=False,
         skip_encoders=False,
         shared_text_encoder=None,
@@ -56,23 +58,34 @@ class VQAModel(nn.Module):
         embeddings_path=None,
     ):
         super().__init__()
-        if fusion != "cross_attention":
+        supported = {
+            "cross_attention", "ot_evidence_routing", "softmax_evidence_routing",
+        }
+        if fusion not in supported:
             raise ValueError(
-                "Only fusion='cross_attention' is supported; legacy fusion methods were removed"
+                f"Unsupported fusion {fusion!r}; choose one of {sorted(supported)}"
             )
         validate_english_text_model(text_model)
-        self.fusion_type = "cross_attention"
+        self.fusion_type = fusion
         self.text_model_name = str(text_model)
         self.image_model_name = str(image_model)
-        parsed_fusion = CrossAttentionFusionConfig.from_dict(fusion_config)
+        parsed_fusion = (
+            CrossAttentionFusionConfig.from_dict(fusion_config)
+            if fusion == "cross_attention" else None
+        )
+        parsed_routing = (
+            OTEvidenceRoutingConfig.from_dict(routing_config)
+            if fusion != "cross_attention" else None
+        )
         self.model_config = {
             "d_model": d_model,
             "num_heads": num_heads,
             "ffn_hidden": ffn_hidden,
             "drop_prob": drop_prob,
             "num_layers": num_layers,
-            "fusion": "cross_attention",
-            "fusion_config": parsed_fusion.to_dict(),
+            "fusion": fusion,
+            "fusion_config": parsed_fusion.to_dict() if parsed_fusion else None,
+            "routing_config": parsed_routing.to_dict() if parsed_routing else None,
             "freeze_answer_embeddings": freeze_answer_embeddings,
         }
         self.skip_encoders = skip_encoders
@@ -135,9 +148,18 @@ class VQAModel(nn.Module):
         self.answer_projection = (
             nn.Identity() if answer_dim == d_model else nn.Linear(answer_dim, d_model)
         )
-        self.fusion_module = CrossAttentionFusion(
-            image_dim, question_dim, d_model, parsed_fusion
-        )
+        if fusion == "cross_attention":
+            self.fusion_module = CrossAttentionFusion(
+                image_dim, question_dim, d_model, parsed_fusion
+            )
+        else:
+            self.fusion_module = OTEvidenceRouter(
+                image_dim,
+                question_dim,
+                d_model,
+                parsed_routing,
+                routing_mode="ot" if fusion == "ot_evidence_routing" else "softmax",
+            )
         self.decoder = Decoder(d_model, ffn_hidden, num_heads, drop_prob, num_layers)
         actual_vocab = self.answer_embedding.token_embeddings.word_embeddings.num_embeddings
         if vocab_size is not None and vocab_size != actual_vocab:
@@ -163,13 +185,23 @@ class VQAModel(nn.Module):
         self, visual_tokens, question_tokens, visual_padding_mask,
         question_padding_mask, return_diagnostics=False,
     ) -> EncoderOutput:
-        output = self.fusion_module(
-            self._fusion_input(
-                visual_tokens, question_tokens, visual_padding_mask,
-                question_padding_mask,
-            ),
-            return_diagnostics=return_diagnostics,
+        inputs = self._fusion_input(
+            visual_tokens, question_tokens, visual_padding_mask,
+            question_padding_mask,
         )
+        if self.fusion_type == "cross_attention":
+            output = self.fusion_module(
+                inputs, return_diagnostics=return_diagnostics,
+            )
+        else:
+            output = self.fusion_module(
+                inputs.visual_tokens,
+                inputs.question_tokens,
+                inputs.visual_padding_mask,
+                inputs.question_padding_mask,
+                grid_size=self.image_model.patch_grid_size,
+                return_diagnostics=return_diagnostics,
+            )
         if return_diagnostics:
             valid = ~output.memory_padding_mask
             normalizer = valid.sum(1).clamp_min(1)
@@ -280,6 +312,8 @@ class VQAModel(nn.Module):
             memory_padding_mask=encoded.memory_padding_mask,
         )
         if return_attention_weights:
+            if encoded.fusion_output.attention_weights is None:
+                raise RuntimeError("Requested routing/attention weights were not produced")
             return logits, ids[:, 1:], encoded.fusion_output.attention_weights
         if return_diagnostics:
             return logits, ids[:, 1:], encoded.fusion_output

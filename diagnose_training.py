@@ -106,7 +106,7 @@ def _reliance_report(model, dataset, samples: int, batch_size: int,
     image_shuffled_predictions: list[str] = []
     question_shuffled_predictions: list[str] = []
     answers: list[str] = []
-    attention_rows = []
+    fusion_rows = []
     for start in range(0, count, batch_size):
         batch = records[start:start + batch_size]
         if len(batch) == 1:
@@ -133,11 +133,12 @@ def _reliance_report(model, dataset, samples: int, batch_size: int,
         question_shuffled_predictions.extend(model.answers_from_ids(question_shuffled))
         if (original.fusion_output is not None and
                 original.fusion_output.diagnostics is not None):
-            attention_rows.append({
+            fusion_rows.append({
                 "count": len(batch),
-                "attention_entropy": original.fusion_output.diagnostics[
-                    "attention_entropy"
-                ].mean().item(),
+                **{
+                    key: value.detach().float().mean().item()
+                    for key, value in original.fusion_output.diagnostics.items()
+                },
             })
     result = {
         "samples": count,
@@ -151,12 +152,15 @@ def _reliance_report(model, dataset, samples: int, batch_size: int,
                 original_predictions, question_shuffled_predictions)) / count,
         },
     }
-    if attention_rows:
-        total = sum(row["count"] for row in attention_rows)
-        result["cross_attention"] = {
-            "attention_entropy": sum(
-                row["attention_entropy"] * row["count"] for row in attention_rows
-            ) / total
+    if fusion_rows:
+        total = sum(row["count"] for row in fusion_rows)
+        keys = [key for key in fusion_rows[0] if key != "count"]
+        result["fusion"] = {
+            "type": model.fusion_type,
+            **{
+                key: sum(row[key] * row["count"] for row in fusion_rows) / total
+                for key in keys
+            },
         }
     return result
 

@@ -27,8 +27,10 @@ class ImageEmbedding(nn.Module):
                 self.hidden_size = getattr(cfg, "hidden_size", 768)
                 model_type = str(getattr(cfg, "model_type", "")).lower()
                 self.num_prefix_tokens = 2 if model_type == "deit" else 1
+                self.patch_grid_size = self._grid_size_from_config(cfg)
             except Exception:
                 self.hidden_size = 768
+                self.patch_grid_size = None
         else:
             self.process = process or AutoImageProcessor.from_pretrained(model_name)
             self.model = model or AutoModel.from_pretrained(model_name)
@@ -41,8 +43,23 @@ class ImageEmbedding(nn.Module):
                 )
             # ViT has one CLS token. Distilled DeiT has CLS and distillation tokens.
             self.num_prefix_tokens = 2 if model_type == "deit" else 1
+            self.patch_grid_size = self._grid_size_from_config(self.model.config)
             self.model.requires_grad_(False)
             self.model.eval()
+
+    @staticmethod
+    def _grid_size_from_config(config):
+        image_size = getattr(config, "image_size", None)
+        patch_size = getattr(config, "patch_size", None)
+        if image_size is None or patch_size is None:
+            return None
+        image = image_size if isinstance(image_size, (tuple, list)) else (image_size, image_size)
+        patch = patch_size if isinstance(patch_size, (tuple, list)) else (patch_size, patch_size)
+        if len(image) != 2 or len(patch) != 2 or min(*image, *patch) <= 0:
+            return None
+        if image[0] % patch[0] or image[1] % patch[1]:
+            return None
+        return (int(image[0] // patch[0]), int(image[1] // patch[1]))
 
     def train(self, mode=True):
         super().train(mode)

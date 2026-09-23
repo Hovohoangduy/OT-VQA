@@ -1,4 +1,4 @@
-"""Train the Cross-Attention VQA student and select by generated F1."""
+"""Train Cross-Attention or OT evidence-routing VQA and select by generated F1."""
 
 from __future__ import annotations
 
@@ -54,9 +54,21 @@ def _forward_batch(model, batch, device, diagnostics=False):
     return result, answers
 
 
+def _module_gradient_norm(module):
+    squares = [
+        parameter.grad.detach().float().square().sum()
+        for parameter in module.parameters()
+        if parameter.grad is not None
+    ]
+    if not squares:
+        return 0.0
+    return torch.stack(squares).sum().sqrt().item()
+
+
 def train(model, train_loader, num_epochs, optimizer, scheduler, criterion,
           vocab_swap=None, device=None, diagnostics=False, epoch_offset=0,
-          total_epochs=None, gradient_clip=None, distributed=None):
+          total_epochs=None, gradient_clip=None, distributed=None,
+          grad_scaler=None):
     """Run teacher-forced optimization; generation is reserved for validation."""
     device = device or next(model.parameters()).device
     base_model = unwrap_model(model)
@@ -71,27 +83,52 @@ def train(model, train_loader, num_epochs, optimizer, scheduler, criterion,
         examples = tokens = 0
         diagnostic_rows = []
         for batch_idx, batch in enumerate(train_loader):
-            result, answers = _forward_batch(model, batch, device, diagnostics)
-            if diagnostics:
-                logits, targets, fusion_output = result
-                if fusion_output.diagnostics:
-                    diagnostic_rows.append({
-                        key: value.detach().float().mean().item()
-                        for key, value in fusion_output.diagnostics.items()
-                    })
-            else:
-                logits, targets = result
-            loss = criterion(logits.transpose(1, 2), targets)
+            amp_enabled = grad_scaler is not None and grad_scaler.is_enabled()
+            with torch.autocast(
+                device_type=device.type,
+                dtype=torch.float16 if device.type == "cuda" else None,
+                enabled=amp_enabled,
+            ):
+                result, answers = _forward_batch(model, batch, device, diagnostics)
+                if diagnostics:
+                    logits, targets, fusion_output = result
+                    if fusion_output.diagnostics:
+                        diagnostic_rows.append({
+                            key: value.detach().float().mean().item()
+                            for key, value in fusion_output.diagnostics.items()
+                        })
+                else:
+                    logits, targets = result
+                loss = criterion(logits.transpose(1, 2), targets)
             if not torch.isfinite(loss):
                 raise FloatingPointError("Training loss is NaN or infinity")
             optimizer.zero_grad(set_to_none=True)
-            loss.backward()
+            if grad_scaler is not None:
+                grad_scaler.scale(loss).backward()
+                grad_scaler.unscale_(optimizer)
+            else:
+                loss.backward()
+            if diagnostics and diagnostic_rows:
+                diagnostic_rows[-1]["fusion_gradient_norm"] = _module_gradient_norm(
+                    base_model.fusion_module
+                )
+                if base_model.fusion_type != "cross_attention":
+                    diagnostic_rows[-1]["routing_cost_gradient_norm"] = (
+                        _module_gradient_norm(base_model.fusion_module.cost_query)
+                    )
+                    diagnostic_rows[-1]["routing_preference_gradient_norm"] = (
+                        _module_gradient_norm(base_model.fusion_module.preference_score)
+                    )
             if gradient_clip:
                 torch.nn.utils.clip_grad_norm_(
                     (parameter for parameter in model.parameters() if parameter.requires_grad),
                     gradient_clip,
                 )
-            optimizer.step()
+            if grad_scaler is not None:
+                grad_scaler.step(optimizer)
+                grad_scaler.update()
+            else:
+                optimizer.step()
             scheduler.step()
             batch_tokens = targets.ne(base_model.pad_token_id).sum().item()
             total_loss += loss.item() * batch_tokens
@@ -175,6 +212,25 @@ def _fusion_config_from_args(args):
         "heads": args.num_heads,
         "ffn_hidden": args.ffn_hidden,
         "dropout": args.fusion_dropout,
+    }
+
+
+def _routing_config_from_args(args):
+    return {
+        "slots": args.routing_slots,
+        "reasoning_steps": args.routing_steps,
+        "routing_dim": args.routing_dim,
+        "heads": args.num_heads,
+        "dropout": args.fusion_dropout,
+        "epsilon": args.routing_epsilon,
+        "tau": args.routing_tau,
+        "sinkhorn_iterations": args.routing_iterations,
+        "diagnostic_tolerance": args.routing_tolerance,
+        "preference_smoothing": args.routing_preference_smoothing,
+        "null_min": args.routing_null_min,
+        "null_max": args.routing_null_max,
+        "shared_step_weights": True,
+        "visual_preference": args.routing_visual_preference,
     }
 
 
@@ -659,6 +715,29 @@ def main():
             raise ValueError("OT distillation weight cannot be negative")
         if args.ot_distill_warmup_epochs < 0:
             raise ValueError("OT distillation warm-up cannot be negative")
+        if args.mixed_precision:
+            raise ValueError(
+                "Mixed precision is currently supported by direct VQA training only"
+            )
+    if args.fusion != "cross_attention":
+        if args.alignment_mode != "none":
+            raise ValueError(
+                "OT evidence routing is trained directly from the VQA loss; "
+                "use --alignment_mode none"
+            )
+        if min(
+            args.routing_slots, args.routing_steps, args.routing_dim,
+            args.routing_iterations,
+        ) < 1:
+            raise ValueError("Routing slots, steps, dimension, and iterations must be positive")
+        if args.routing_dim % args.num_heads:
+            raise ValueError("routing_dim must be divisible by num_heads")
+        if args.routing_epsilon <= 0 or args.routing_tau < 0 or args.routing_tolerance <= 0:
+            raise ValueError("Routing epsilon/tolerance must be positive and tau nonnegative")
+        if not 0 <= args.routing_preference_smoothing < 1:
+            raise ValueError("routing_preference_smoothing must be in [0, 1)")
+        if not 0 < args.routing_null_min < args.routing_null_max < 1:
+            raise ValueError("Routing null bounds must satisfy 0 < min < max < 1")
     seed_everything(args.seed)
     distributed = initialize_distributed(args.device)
     device = distributed.device
@@ -704,6 +783,10 @@ def main():
                          freeze_answer_embeddings=args.freeze_answer_embeddings,
                          fusion=args.fusion,
                          fusion_config=_fusion_config_from_args(args),
+                         routing_config=(
+                             _routing_config_from_args(args)
+                             if args.fusion != "cross_attention" else None
+                         ),
                          skip_encoders=bool(args.feature_cache),
                          embeddings_path=embeddings_file).to(device)
         if args.student_init_checkpoint:
@@ -776,6 +859,12 @@ def main():
         lr=args.lr if args.lr is not None else Config.lr,
         weight_decay=args.weight_decay,
     )
+    grad_scaler = (
+        torch.amp.GradScaler("cuda")
+        if args.mixed_precision and device.type == "cuda" else None
+    )
+    if args.mixed_precision and device.type != "cuda" and distributed.is_main:
+        print("Mixed precision requested but disabled because the selected device is not CUDA.")
     if distributed.is_main:
         print(
             f"Parameters: total={total_parameter_count:,}, "
@@ -789,7 +878,7 @@ def main():
     epochs_without_improvement = 0
     if resume is not None:
         start_epoch, global_step, best_metric = restore_training_state(
-            resume, base_model, optimizer, scheduler
+            resume, base_model, optimizer, scheduler, grad_scaler
         )
         epochs_without_improvement = int(resume.get("epochs_without_improvement", 0))
     if start_epoch >= args.epochs:
@@ -826,6 +915,7 @@ def main():
             epoch_offset=epoch, total_epochs=args.epochs,
             gradient_clip=args.gradient_clip or None,
             distributed=distributed,
+            grad_scaler=grad_scaler,
         )
         global_step += len(train_loader)
         distributed.barrier()
@@ -849,7 +939,7 @@ def main():
             epochs_without_improvement += 1
         checkpoint_args = dict(
             model=model, text_model=text_model, image_model=image_model,
-            optimizer=optimizer, scheduler=scheduler,
+            optimizer=optimizer, scheduler=scheduler, grad_scaler=grad_scaler,
             epoch=epoch + 1, global_step=global_step, best_metric=best_metric,
             epochs_without_improvement=epochs_without_improvement,
         )
@@ -879,7 +969,8 @@ def main():
                     "Validation diagnostics: "
                     f"unique predictions={val_diagnostics.get('unique_predictions', 0):g}, "
                     f"top prediction fraction={val_diagnostics.get('top_prediction_fraction', 0):.3f}, "
-                    f"attention entropy={val_diagnostics.get('fusion_attention_entropy', 0):.3f}, "
+                    f"routing/attention entropy="
+                    f"{val_diagnostics.get('fusion_routing_entropy', val_diagnostics.get('fusion_attention_entropy', 0)):.3f}, "
                     f"latency={val_diagnostics.get('latency_ms_per_example', 0):.2f} ms/example"
                 )
         distributed.barrier()

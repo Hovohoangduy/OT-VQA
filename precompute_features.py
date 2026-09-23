@@ -89,6 +89,11 @@ def main():
             "removed in fusion"
         ),
         "visual_source_shape": list(samples[0]["image_features"].shape) if samples else None,
+        "spatial_grid_size": (
+            list(image_encoder.patch_grid_size)
+            if image_encoder.patch_grid_size is not None else None
+        ),
+        "visual_prefix_tokens": image_encoder.num_prefix_tokens,
         "question_hidden_size": samples[0]["question_features"].shape[-1] if samples else None,
         "annotation_ids": [str(sample["anno_id"]) for sample in samples],
     }
