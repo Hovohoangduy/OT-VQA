@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>OT-VQA | Architecture and optimal transport guide</title>
+  <style>
+    :root{--ink:#182538;--muted:#53647a;--line:#dce5ea;--paper:#f6f8fa;--white:#fff;--blue:#155fa0;--teal:#087e76;--orange:#b4661c;--violet:#6751a4;--code:#102033;--soft-blue:#e7f1fa;--soft-teal:#e6f5f1;--soft-orange:#fff2e2;--shadow:0 12px 36px rgba(23,42,65,.08)}
+    *{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:var(--paper);color:var(--ink);font:16px/1.65 system-ui,-apple-system,"Segoe UI",sans-serif}a{color:var(--blue)}a:hover{text-decoration-thickness:2px}code,pre,.mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}code{font-size:.9em;background:#eaf0f4;padding:.1em .28em;border-radius:4px}pre{overflow:auto;background:var(--code);color:#e9f1fa;padding:18px 20px;border-radius:12px;font-size:.88rem;line-height:1.55}pre code{background:none;padding:0;color:inherit;font-size:inherit}
+    .page{display:grid;grid-template-columns:250px minmax(0,1fr);min-height:100vh}.side{position:sticky;top:0;height:100vh;overflow:auto;background:#10263b;color:#e2edf5;padding:28px 18px}.brand{font-size:1.12rem;font-weight:800;letter-spacing:.04em;margin:0 10px 4px}.side small{display:block;color:#a9c0d1;margin:0 10px 25px}.side nav a{display:block;color:#c8dce9;text-decoration:none;padding:8px 10px;border-radius:8px;font-size:.9rem}.side nav a:hover,.side nav a:focus-visible{background:#21405b;color:white}.side .side-foot{border-top:1px solid #36516a;margin-top:25px;padding:18px 10px 0;font-size:.82rem;color:#a9c0d1}.side .side-foot a{color:#bde5ff}
+    main{max-width:1240px;padding:0 44px 80px;width:100%;margin:auto}.hero{background:linear-gradient(125deg,#122e47,#173b55 60%,#087e76);color:white;border-radius:0 0 24px 24px;padding:54px 54px 48px;margin:0 -44px 42px}.eyebrow{text-transform:uppercase;letter-spacing:.15em;font-size:.72rem;font-weight:800;color:#93e1d3}.hero h1{font-size:clamp(2rem,4vw,3.35rem);line-height:1.12;margin:12px 0 16px;max-width:780px}.hero p{max-width:790px;color:#d7e7ef;font-size:1.08rem;margin:0}.hero .chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:25px}.chip{border:1px solid #8ab8c0;border-radius:999px;padding:5px 11px;font-size:.8rem;background:rgba(255,255,255,.08)}
+    section{scroll-margin-top:22px;margin-bottom:48px}h2{font-size:1.72rem;line-height:1.25;margin:0 0 12px}h3{font-size:1.15rem;margin:26px 0 9px}p{margin:9px 0 15px}.lead{font-size:1.04rem;color:var(--muted);max-width:850px}.kicker{text-transform:uppercase;letter-spacing:.13em;color:var(--teal);font-size:.73rem;font-weight:800;margin:0 0 6px}.grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}.grid.two{grid-template-columns:repeat(2,minmax(0,1fr))}.card,.panel,.diagram,.callout{background:var(--white);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow)}.card{padding:20px}.card h3{margin:0 0 6px;font-size:1rem}.card p{font-size:.92rem;color:var(--muted);margin:0}.card .number{font-size:.75rem;font-weight:800;color:var(--teal);letter-spacing:.11em;margin-bottom:8px}.panel{padding:24px}.callout{padding:15px 19px;border-left:5px solid var(--teal);box-shadow:none}.callout.warn{border-left-color:var(--orange);background:#fffbf5}.callout strong{display:block;margin-bottom:3px}.callout p{margin:0}.diagram{padding:20px;overflow:auto}.flow{display:flex;align-items:stretch;gap:9px;min-width:730px}.node{flex:1;background:var(--soft-blue);border:1px solid #b9d8ed;border-radius:10px;padding:12px 10px;text-align:center;line-height:1.35;font-size:.86rem}.node strong{display:block;font-size:.93rem}.node.teal{background:var(--soft-teal);border-color:#a9d9cf}.node.orange{background:var(--soft-orange);border-color:#edcba8}.arrow{align-self:center;color:#68839b;font-size:1.5rem;font-weight:700}.fork{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:14px 0}.fork .node{text-align:left}.caption{font-size:.83rem;color:var(--muted);margin:12px 0 0}.tag{display:inline-block;font-size:.73rem;font-weight:700;padding:3px 8px;border-radius:6px;background:var(--soft-teal);color:#07685f}
+    .table-wrap{overflow:auto;border:1px solid var(--line);border-radius:12px;background:white}table{border-collapse:collapse;width:100%;font-size:.91rem}th,td{text-align:left;vertical-align:top;padding:12px 14px;border-bottom:1px solid var(--line)}th{background:#edf3f6;font-weight:750}tr:last-child td{border-bottom:0}td code{white-space:nowrap}.equation{font:1rem/1.55 ui-monospace,SFMono-Regular,Consolas,monospace;background:#eaf2f6;border-left:4px solid var(--blue);border-radius:8px;padding:13px 16px;overflow:auto;margin:15px 0}.steps{counter-reset:step;list-style:none;padding:0;margin:18px 0}.steps li{counter-increment:step;position:relative;padding:0 0 20px 44px;border-left:2px solid #bedbdc;margin-left:13px}.steps li:last-child{border-left-color:transparent;padding-bottom:0}.steps li:before{content:counter(step);position:absolute;left:-15px;top:0;width:27px;height:27px;display:grid;place-items:center;background:var(--teal);color:white;border-radius:50%;font-size:.8rem;font-weight:800}.steps strong{display:block}.steps p{margin:3px 0 0;color:var(--muted)}
+    .matrix-shell{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(240px,.8fr);gap:18px;align-items:start}.controls{display:flex;gap:20px;flex-wrap:wrap;padding:14px 0}.controls label{display:block;min-width:220px;font-size:.9rem;font-weight:700}.controls input{display:block;width:100%;accent-color:var(--teal);margin-top:6px}.heatmap th,.heatmap td{text-align:center;padding:7px 8px;min-width:74px}.heatmap th{font-size:.78rem}.heatmap td{font-variant-numeric:tabular-nums;font-weight:750;border:1px solid white}.heatmap .axis{background:#eaf0f4;text-align:left}.heatmap .sum{background:#eaf0f4;font-weight:650}.heatmap .dust{outline:2px solid #c9954d;outline-offset:-2px}.stat{display:flex;justify-content:space-between;gap:8px;padding:8px 0;border-bottom:1px solid var(--line);font-size:.86rem}.stat:last-child{border-bottom:0}.stat b{font-variant-numeric:tabular-nums}.legend{height:10px;background:linear-gradient(90deg,#eef4fb,#a7d8d1,#128174);border-radius:99px;margin-top:14px}.tiny{font-size:.82rem;color:var(--muted)}.footer{border-top:1px solid var(--line);padding-top:22px;color:var(--muted);font-size:.86rem}details{background:white;border:1px solid var(--line);border-radius:10px;margin:10px 0;padding:12px 16px}summary{cursor:pointer;font-weight:700}details p{margin-bottom:3px}kbd{font:inherit;font-size:.8em;padding:2px 5px;border:1px solid #cbd8e1;border-radius:4px;background:white}
+    @media(max-width:1000px){.page{grid-template-columns:1fr}.side{position:static;height:auto;padding:15px}.side nav{display:flex;overflow:auto;gap:4px}.side nav a{white-space:nowrap}.side small,.side-foot{display:none!important}main{padding:0 22px 60px}.hero{margin:0 -22px 34px;padding:42px 26px}.grid{grid-template-columns:1fr 1fr}}@media(max-width:680px){.grid,.grid.two,.fork,.matrix-shell{grid-template-columns:1fr}.panel{padding:18px}.hero h1{font-size:2rem}.side nav a{font-size:.8rem}}@media print{body{background:white}.page{display:block}.side,.controls{display:none}main{max-width:none;padding:0}.hero{margin:0 0 24px;border-radius:0;color:var(--ink);background:none;padding:0}.hero p{color:var(--muted)}.eyebrow{color:var(--teal)}.chip{color:var(--ink);border-color:#ccc}.card,.panel,.diagram{box-shadow:none;break-inside:avoid}section{break-inside:avoid-page}a{color:inherit}}
+  </style>
+</head>
+<body>
+<div class="page">
+  <aside class="side" aria-label="Guide navigation">
+    <div class="brand">OT-VQA</div><small>Source and architecture guide</small>
+    <nav>
+      <a href="#overview">Overview</a><a href="#pipeline">End-to-end pipeline</a>
+      <a href="#shapes">Tensor shapes</a><a href="#ot">Optimal transport core</a>
+      <a href="#sinkhorn">Sinkhorn solver</a><a href="#explorer">Interactive plan</a>
+      <a href="#memory">Decoder memory</a><a href="#training">Training and inference</a>
+      <a href="#source-map">Source map</a><a href="#paper">Paper vs. implementation</a>
+      <a href="#diagnostics">Validation and limits</a>
+    </nav>
+    <div class="side-foot">Local document. No web connection is needed to view diagrams or the transport explorer.<br><a href="../README.md">README</a> · <a href="2603.14349v1.pdf">Paper PDF</a></div>
+  </aside>
+  <main>
+    <header class="hero">
+      <div class="eyebrow">Implementation guide · source snapshot</div>
+      <h1>How optimal transport drives this VQA model</h1>
+      <p>A code-grounded tour from GQA image and question to an answer. The central operation is a differentiable, partial transport plan between ViT patches and BERT question tokens.</p>
+      <div class="chips"><span class="chip">ViT patches</span><span class="chip">BERT tokens</span><span class="chip">Log-domain Sinkhorn</span><span class="chip">Dustbin matching</span><span class="chip">Autoregressive decoder</span></div>
+    </header>
+
+    <section id="overview">
+      <div class="kicker">01 · What the code does</div><h2>One image, one question, one generated answer</h2>
+      <p class="lead">The OT path keeps local visual and language features separate until it solves a constrained matching problem. The resulting plan weights the visual evidence delivered to each question token; a Transformer decoder then generates answer tokens.</p>
+      <div class="grid">
+        <div class="card"><div class="number">INPUT</div><h3>GQA-style row</h3><p><code>image</code>, <code>question</code>, <code>answer</code>, and optional <code>anno_id</code>. The dataset returns one answer for each row.</p></div>
+        <div class="card"><div class="number">FUSION</div><h3>Partial transport</h3><p>Each image patch and valid question token receives prescribed mass. Global-feature dustbins absorb some unmatched content.</p></div>
+        <div class="card"><div class="number">OUTPUT</div><h3>Answer generation</h3><p>Decoder cross-attention reads grounded question-token memory and produces a sequence from <code>[CLS]</code> to <code>[SEP]</code>.</p></div>
+      </div>
+      <div class="callout warn" style="margin-top:16px"><strong>Evidence boundary</strong><p>The source paper reports image-text <em>retrieval</em> results. This repository adapts its matching idea to <em>VQA generation</em>; a VQA accuracy gain still requires controlled SAN-versus-OT experiments.</p></div>
+    </section>
+
+    <section id="pipeline">
+      <div class="kicker">02 · Process</div><h2>End-to-end data and model flow</h2>
+      <div class="diagram">
+        <div class="flow"><div class="node"><strong>CSV + image</strong>GQA row, RGB file</div><span class="arrow">→</span><div class="node"><strong>Dataset</strong>resize 224×224, tensor</div><span class="arrow">→</span><div class="node teal"><strong>Two encoders</strong>frozen ViT + trainable BERT</div><span class="arrow">→</span><div class="node teal"><strong>OT fusion</strong>cost → Sinkhorn → memory</div><span class="arrow">→</span><div class="node orange"><strong>Decoder</strong>answer-token logits</div></div>
+        <p class="caption">Entry points: <a href="../train.py">train.py</a> for optimization, <a href="../test.py">test.py</a> for validation, and <a href="../predict.py">predict.py</a> for a single example.</p>
+      </div>
+      <div class="fork">
+        <div class="node"><strong>Image branch</strong><a href="../configs/config.py">Config.transforms</a> resizes to 224×224 and converts to float RGB. <a href="../model/features_extraction.py">ImageEmbedding</a> normalizes on device and runs frozen <code>google/vit-base-patch16-224-in21k</code>. The ViT CLS token is excluded from OT; 196 patch tokens remain.</div>
+        <div class="node teal"><strong>Question branch</strong><a href="../model/features_extraction.py">QuestionEmbedding.encode_tokens</a> runs <code>bert-base-uncased</code>, truncates to 28 tokens, and marks PAD/CLS/SEP as blocked for matching. Its contextual token vectors feed OT; BERT CLS separately supplies a global question vector.</div>
+      </div>
+      <ol class="steps">
+        <li><strong>Load and validate rows</strong><p><a href="../utils/data_processing.py">load_dataframe</a> checks required columns and normalizes whitespace. <a href="../utils/vqa_dataset.py">VQADataset</a> resolves image paths and returns image tensors plus strings.</p></li>
+        <li><strong>Encode local features</strong><p><a href="../model/vqa_model.py">VQAModel.encode</a> projects ViT features to <code>d_model</code> and sends patch tokens, BERT tokens, and the content-token mask to <code>PartialTransportFusion</code>.</p></li>
+        <li><strong>Align through OT</strong><p>The fusion module builds a cosine-cost matrix with dustbins, solves for a mass-constrained plan, and uses its local block to ground each valid question token.</p></li>
+        <li><strong>Decode an answer</strong><p>The decoder uses causal self-attention over answer tokens and cross-attention over OT memory. Padding memory positions are blocked.</p></li>
+      </ol>
+    </section>
+
+    <section id="shapes">
+      <div class="kicker">03 · Dimensions</div><h2>Tensor shape ledger</h2>
+      <p>Let <code>B</code> be batch size, <code>K</code> patch count, <code>L</code> padded BERT sequence length, <code>N</code> valid content tokens, <code>D</code> model width, and <code>A</code> answer length. Under the default image and model settings, <code>K=196</code>, <code>D=384</code>, <code>L≤28</code>, and usually <code>N≤26</code>.</p>
+      <div class="table-wrap"><table><thead><tr><th>Value</th><th>Shape</th><th>Meaning</th></tr></thead><tbody>
+        <tr><td>Input image</td><td><code>[B,3,224,224]</code></td><td>RGB tensor from the dataset.</td></tr>
+        <tr><td>ViT output</td><td><code>[B,197,768]</code></td><td>CLS plus 14×14 patches for the default ViT.</td></tr>
+        <tr><td>Projected patches</td><td><code>[B,196,384]</code></td><td>CLS removed; image projection applied.</td></tr>
+        <tr><td>BERT states and valid mask</td><td><code>[B,L,768]</code>, <code>[B,L]</code></td><td>Content tokens are <code>True</code> in the mask passed to OT.</td></tr>
+        <tr><td>Extended cost and plan</td><td><code>[B,K+1,L+1]</code></td><td>Last row and column are the two dustbins.</td></tr>
+        <tr><td>Decoder memory</td><td><code>[B,1+L,D]</code></td><td>One global token, then one position per BERT token; invalid positions are masked.</td></tr>
+        <tr><td>Teacher-forced logits</td><td><code>[B,A−1,V]</code></td><td><code>V</code> is the BERT tokenizer vocabulary size.</td></tr>
+      </tbody></table></div>
+      <p class="tiny">The shown ViT dimensions depend on the configured pretrained image encoder. The model accepts other compatible encoder dimensions through projection layers.</p>
+    </section>
+
+    <section id="ot">
+      <div class="kicker">04 · Core engine</div><h2>Optimal partial transport, step by step</h2>
+      <p class="lead">The code in <a href="../model/optimal_transport.py">model/optimal_transport.py</a> performs the actual alignment. “Mass” is an abstract nonnegative weight; it is not a pixel count or a probability that an object exists.</p>
+      <h3>1. Project values, normalize only for cost</h3>
+      <p>The image projection has already produced patch vectors <code>vᵢ ∈ Rᴰ</code>. A learned linear layer maps BERT states to <code>tⱼ ∈ Rᴰ</code>. The code L2-normalizes FP32 copies to compute costs, while retaining the unnormalized vectors for decoder values.</p>
+      <div class="equation">Cᵢⱼ = 1 − cosine(vᵢ, tⱼ) = 1 − (vᵢ/‖vᵢ‖) · (tⱼ/‖tⱼ‖)</div>
+      <p>A low cost indicates high embedding similarity. The cost is approximately in <code>[0,2]</code>. For unit vectors, <code>1 − cosine</code> equals half the <em>squared</em> Euclidean distance.</p>
+      <h3>2. Add global-feature dustbins</h3>
+      <p>The last <em>column</em> is a global question vector (projected BERT CLS): an image patch can send mass there. The last <em>row</em> is the mean image-patch vector: a question token can receive mass from it. Each cross-dustbin cost is again <code>1 − cosine</code>. The bottom-right dustbin-to-dustbin cost is a configurable constant, default <code>1.0</code>.</p>
+      <div class="table-wrap"><table><thead><tr><th></th><th>Valid question tokens</th><th>Question dustbin</th></tr></thead><tbody>
+        <tr><th>Image patches</th><td><strong>Local ↔ local</strong><br>The block used for visual grounding.</td><td><strong>Image → dustbin</strong><br>Patch mass not matched to a particular question token.</td></tr>
+        <tr><th>Image dustbin</th><td><strong>Dustbin → question</strong><br>Question-token mass not supplied by a particular patch.</td><td><strong>Dustbin ↔ dustbin</strong><br>Balances unused dustbin capacity.</td></tr>
+      </tbody></table></div>
+      <h3>3. Prescribe row and column mass</h3>
+      <p>With <code>ρ = --ot_dustbin_mass</code>, all valid patches share <code>1−ρ</code> equally, all valid content tokens share <code>1−ρ</code> equally, and each dustbin has mass <code>ρ</code>. Padded or special question tokens have zero column mass.</p>
+      <div class="equation">αᵢ = (1−ρ)/K for each patch; αdust = ρ<br>βⱼ = (1−ρ)/N for each valid token; βinvalid = 0; βdust = ρ<br>Σᵢ αᵢ = Σⱼ βⱼ = 1</div>
+      <p>The solver seeks a nonnegative plan <code>P</code> whose row sums approximate <code>α</code> and column sums approximate <code>β</code>, while preferring low-cost matches. This is an <em>extended balanced</em> transport problem: partial local matching is represented by the dustbin row and column.</p>
+      <div class="callout"><strong>What ρ=0.2 actually means</strong><p>It is 20% capacity on <em>each</em> dustbin, not a guarantee that exactly 20% of local content is discarded. If <code>d=P[dust,dust]</code>, then local-to-local mass is <code>1−2ρ+d</code>; image-to-dustbin and dustbin-to-question mass each equal <code>ρ−d</code> when marginals are exact. At ρ=0.2, local match mass can lie between 0.6 and 0.8.</p></div>
+      <h3>4. Solve entropic OT</h3>
+      <div class="equation">P* = argmin<sub>P≥0; P1=α; Pᵀ1=β</sub> ⟨P,C⟩ − ε H(P)<br>H(P) = −Σᵢⱼ Pᵢⱼ(log Pᵢⱼ − 1)</div>
+      <p>The entropy term makes the plan smoother and enables Sinkhorn scaling. The code default is <code>ε=0.05</code> and <code>20</code> iterations. These are repository defaults to tune on GQA validation data, not the paper’s selected VQA settings.</p>
+    </section>
+
+    <section id="sinkhorn">
+      <div class="kicker">05 · Numerical method</div><h2>How log-domain Sinkhorn is implemented</h2>
+      <p>The separate <a href="../model/optimal_transport.py">log_sinkhorn</a> function checks shapes, nonnegative marginals, and equal total row/column mass. It casts the cost and marginals to FP32 before solving, even if model values came from half precision.</p>
+      <pre><code>logK = −C / ε
+logu = log α − logsumexp(logK + logv, columns)
+logv = log β − logsumexp(logK + logu, rows)
+P    = exp(logK + logu + logv)</code></pre>
+      <p>It alternates the two updates for the requested iteration count. Invalid rows and columns have zero marginal; their pair costs are masked and their dual variables become <code>−∞</code>. The final plan explicitly zeros those entries. This avoids matching PAD, CLS, or SEP positions.</p>
+      <div class="grid two">
+        <div class="card"><div class="number">WHY LOG SPACE?</div><h3>Numerical range</h3><p>Directly exponentiating <code>−C/ε</code> can underflow for small ε. Log-sum-exp scaling handles tiny kernel values more safely.</p></div>
+        <div class="card"><div class="number">CONVERGENCE</div><h3>Finite iteration result</h3><p>Twenty iterations do not mathematically guarantee exact marginals. The code reports maximum row and column residuals so the approximation can be checked.</p></div>
+      </div>
+      <p class="tiny">Approximate solver work scales as <code>O(B·(K+1)·(L+1)·iterations)</code>; the plan itself stores <code>O(B·(K+1)·(L+1))</code> values. Autograd through the iterations adds training memory.</p>
+    </section>
+
+    <section id="explorer">
+      <div class="kicker">06 · Interactive explanation</div><h2>Explore a small transport plan</h2>
+      <p>This browser-only toy uses three imagined image patches and three question tokens. Its fixed costs are illustrative; it does not run the trained model. Change dustbin mass and entropy to see how constrained matching changes the plan.</p>
+      <div class="panel">
+        <div class="controls"><label>Dustbin mass ρ: <output id="rho-value">0.20</output><input id="rho" type="range" min="0" max="0.4" step="0.01" value="0.2"></label><label>Entropy ε: <output id="eps-value">0.08</output><input id="eps" type="range" min="0.02" max="0.2" step="0.01" value="0.08"></label></div>
+        <div class="matrix-shell"><div class="table-wrap"><table class="heatmap" id="plan-table" aria-label="Illustrative optimal transport plan"></table></div><div><h3 style="margin-top:0">Mass accounting</h3><div id="plan-stats" aria-live="polite"></div><div class="legend" aria-hidden="true"></div><p class="tiny">Darker cells carry more mass. Orange outlines mark dustbin interactions. Row and column targets are enforced by the same log-domain updates used conceptually in Python.</p></div></div>
+      </div>
+      <p class="tiny">Toy labels: image patches = red hood, wheel, sky; question tokens = red, car, where. Costs are manually chosen so the sky and the abstract word “where” prefer dustbin routes.</p>
+    </section>
+
+    <section id="memory">
+      <div class="kicker">07 · OT to language generation</div><h2>The plan becomes decoder memory</h2>
+      <p>The decoder does not receive the full transport matrix as attention weights. The code first extracts only the local-to-local block <code>P<sub>LL</sub></code>, excluding every dustbin interaction from patch alignment.</p>
+      <div class="equation">mⱼ = Σᵢ Pᵢⱼ &nbsp; (local patch mass for token j)<br>aⱼ = (Σᵢ Pᵢⱼ vᵢ) / max(mⱼ, 10⁻⁸)<br>gⱼ = clamp(mⱼ / βⱼ, 0, 1)<br>memoryⱼ = LayerNorm(tⱼ + gⱼ · W<sub>ground</sub>aⱼ)</div>
+      <p><code>aⱼ</code> is a weighted patch value for token <code>j</code>. <code>gⱼ</code> is the fraction of that token’s assigned mass supplied by real patches. A token mostly served by the image dustbin gets a small visual contribution. Invalid token memory is zeroed and masked from decoder cross-attention.</p>
+      <p>A separate global memory token is <code>LayerNorm(W<sub>global</sub>[mean(image patches); projected BERT CLS])</code>. It remains available even when individual local matches are weak. The final memory length is <code>1+L</code>.</p>
+      <div class="callout warn"><strong>Interpret the plan carefully</strong><p>High transport mass means the learned embedding cost and marginal constraints favored a pairing. It is useful for diagnosis, but it is not proof of causal grounding or a calibrated explanation of the answer.</p></div>
+    </section>
+
+    <section id="training">
+      <div class="kicker">08 · Optimization and use</div><h2>Training, validation, and inference</h2>
+      <div class="grid two">
+        <div class="card"><div class="number">TRAIN</div><h3>Teacher-forced cross-entropy</h3><p><a href="../train.py">train.py</a> shifts answer IDs by one position, ignores PAD in the loss, applies label smoothing, and updates trainable modules with AdamW. The ViT stays frozen; the BERT question encoder, projections, OT fusion, decoder, and output head can learn. Answer embeddings are frozen by default in the CLI.</p></div>
+        <div class="card"><div class="number">SELECT</div><h3>Generated validation F1</h3><p>After each epoch, <a href="../test.py">evaluation</a> computes generated exact match and token F1. The best generated F1 selects <code>best.pt</code>; validation loss breaks ties. The run also saves <code>last.pt</code>, metrics, a plot, and a configuration manifest.</p></div>
+      </div>
+      <div class="diagram" style="margin-top:16px"><div class="flow"><div class="node"><strong>Answer IDs</strong>[CLS], wordpieces, [SEP]</div><span class="arrow">→</span><div class="node teal"><strong>Training input</strong>all IDs except last</div><span class="arrow">→</span><div class="node teal"><strong>Causal decoder</strong>cross-attend to OT memory</div><span class="arrow">→</span><div class="node orange"><strong>Loss targets</strong>all IDs except first</div></div><p class="caption">At inference, generation starts with <code>[CLS]</code>, repeatedly chooses the highest-logit next token, and stops at <code>[SEP]</code> or the maximum length.</p></div>
+      <h3>Run commands</h3>
+      <pre><code>python train.py --fusion ot --device cuda --train_csv_path data/gqa_dataset/train.csv --dev_csv_path data/gqa_dataset/val.csv --img_path data/gqa_dataset/images --model_path data/gqa_model
+python test.py --checkpoint data/gqa_model/best.pt --split dev --device cuda
+python predict.py --checkpoint data/gqa_model/best.pt --image path/to/image.jpg --question "What color is the car?" --device cuda</code></pre>
+      <p><code>--device cuda</code> requires a CUDA-enabled PyTorch installation. New runs default to OT; the explicit flag makes the architecture clear. Use <code>--fusion san</code> and a separate output path for the baseline. The code also accepts existing CSV/image layouts through path flags.</p>
+    </section>
+
+    <section id="source-map">
+      <div class="kicker">09 · Navigate the repository</div><h2>Source map</h2>
+      <div class="table-wrap"><table><thead><tr><th>File</th><th>Role and useful entry point</th></tr></thead><tbody>
+        <tr><td><a href="../configs/config.py">configs/config.py</a></td><td>Encoder names, resize transform, length limits, base learning rate.</td></tr>
+        <tr><td><a href="../configs/arg_parser.py">configs/arg_parser.py</a></td><td>CLI configuration: model dimensions, fusion, OT settings, device, paths.</td></tr>
+        <tr><td><a href="../utils/download_gqa.py">utils/download_gqa.py</a></td><td>Optional GQA subset materialization; first question/answer per selected image.</td></tr>
+        <tr><td><a href="../utils/data_processing.py">utils/data_processing.py</a> + <a href="../utils/vqa_dataset.py">utils/vqa_dataset.py</a></td><td>CSV validation, image-root resolution, image loading, row tuple.</td></tr>
+        <tr><td><a href="../model/features_extraction.py">model/features_extraction.py</a></td><td>Frozen ViT; BERT token encoding and mask; answer-token embedding.</td></tr>
+        <tr><td><a href="../model/optimal_transport.py">model/optimal_transport.py</a></td><td><code>log_sinkhorn</code>, <code>PartialTransportFusion.forward</code>, plan diagnostics.</td></tr>
+        <tr><td><a href="../model/vqa_model.py">model/vqa_model.py</a></td><td>Architecture switch, encode/decode/generate, memory masking.</td></tr>
+        <tr><td><a href="../model/decoder_model.py">model/decoder_model.py</a> + <a href="../model/sans.py">model/sans.py</a></td><td>Autoregressive Transformer decoder and SAN comparison path.</td></tr>
+        <tr><td><a href="../train.py">train.py</a> + <a href="../test.py">test.py</a> + <a href="../predict.py">predict.py</a></td><td>Optimization, generated-answer evaluation, single-image inference.</td></tr>
+        <tr><td><a href="../utils/checkpoint.py">utils/checkpoint.py</a></td><td>Version-4 config/state serialization and strict model reconstruction.</td></tr>
+        <tr><td><a href="../diagnose_training.py">diagnose_training.py</a> + <a href="../utils/compare_predictions.py">utils/compare_predictions.py</a></td><td>Transport/reliance diagnostics and paired SAN-versus-OT comparison.</td></tr>
+        <tr><td><a href="../tests/test_optimal_transport.py">tests/test_optimal_transport.py</a></td><td>Marginals, masking, gradients, FP32 solve, integration, checkpoint, tiny learning test.</td></tr>
+      </tbody></table></div>
+    </section>
+
+    <section id="paper">
+      <div class="kicker">10 · Research adaptation</div><h2>What comes from the paper, and what changes here</h2>
+      <p>The reference is Pan et al., <a href="https://arxiv.org/html/2603.14349v1">Learning Image-Text Matching with Optimal Partial Transport</a> (OMIT, arXiv v1). The local copy is <a href="2603.14349v1.pdf">2603.14349v1.pdf</a>. Its Section 3 introduces local image/text cost, entropic OT, global-feature dustbins, and local-match-only similarity.</p>
+      <div class="table-wrap"><table><thead><tr><th>Concept</th><th>OMIT paper</th><th>This repository</th></tr></thead><tbody>
+        <tr><td>Task</td><td>Rank matching image-caption pairs for retrieval.</td><td>Generate a short answer conditioned on an image and question.</td></tr>
+        <tr><td>Local features</td><td>Visual regions/grid features and caption fragments, with multiple encoder settings.</td><td>Frozen ViT patch states and contextual BERT question states.</td></tr>
+        <tr><td>Transport output</td><td>Use local matched mass to compute an image-text similarity score.</td><td>Use local matched mass to build grounded decoder memory.</td></tr>
+        <tr><td>Training objective</td><td>Retrieval ranking/contrastive learning with negatives.</td><td>Teacher-forced answer-token cross-entropy; no retrieval ranking loss.</td></tr>
+        <tr><td>Settings</td><td>Paper reports its own retrieval settings, including entropy λ=0.02.</td><td>VQA defaults ε=0.05, 20 iterations, ρ=0.2, dustbin-to-dustbin cost=1.0; validate these on GQA.</td></tr>
+      </tbody></table></div>
+      <p class="tiny">The paper’s retrieval results do not establish GQA performance. Its qualitative appendix also reports difficulty with relational words and distinguishing entities; these are relevant risks for VQA.</p>
+    </section>
+
+    <section id="diagnostics">
+      <div class="kicker">11 · Checking behavior</div><h2>What to measure before claiming improvement</h2>
+      <div class="grid two">
+        <div class="card"><div class="number">TRANSPORT HEALTH</div><h3>Plan and solver</h3><p><a href="../diagnose_training.py">diagnose_training.py</a> averages local matched mass and the three dustbin flows, and records maximum marginal residuals. Inspect these values by question type as well as overall.</p></div>
+        <div class="card"><div class="number">VQA QUALITY</div><h3>Generated answers</h3><p><a href="../test.py">test.py</a> reports generated exact match, token F1, throughput, latency, and peak CUDA memory. <a href="../utils/compare_predictions.py">compare_predictions.py</a> pairs SAN and OT outputs by <code>anno_id</code> and bootstraps score differences.</p></div>
+      </div>
+      <details><summary>What does a large dustbin flow imply?</summary><p>The learned costs favor leaving more patch/token mass unmatched within the allowed capacity. It may reflect irrelevant regions, weak embeddings, or poor hyperparameters. Compare answer accuracy and examples before interpreting it as useful filtering.</p></details>
+      <details><summary>Why can a low residual still produce a bad answer?</summary><p>Residuals measure whether the transport constraints were approximately met. They do not measure whether costs capture the right semantics, whether visual features resolve objects/relations, or whether the decoder uses the image.</p></details>
+      <details><summary>How can image reliance be checked?</summary><p>The diagnostics script generates answers after shuffling images or questions within a small batch. If predictions barely change when images change, the model may be relying mainly on question or answer priors.</p></details>
+      <div class="callout warn" style="margin-top:16px"><strong>Current scope</strong><p>The repository contains implementation and tests, but this guide does not claim a measured GQA accuracy gain. Compare the same held-out examples and matched training settings, and keep the final test split separate from tuning.</p></div>
+    </section>
+
+    <footer class="footer">Architecture guide for the current OT-VQA source. Equations describe the implemented fusion, with finite-iteration Sinkhorn marginals understood as approximate. <a href="optimal_transport_vqa_plan.md">Implementation plan</a> · <a href="../README.md">README</a></footer>
+  </main>
+</div>
+<script>
+(() => {
+  const rhoInput = document.getElementById('rho');
+  const epsInput = document.getElementById('eps');
+  const table = document.getElementById('plan-table');
+  const stats = document.getElementById('plan-stats');
+  // Fixed illustrative costs: three patches × three words, plus both dustbins.
+  const cost = [[.12,.75,.85,.90],[.65,.10,.70,.80],[.80,.68,.88,.15],[.90,.80,.20,1.00]];
+  const rowNames = ['Red hood','Wheel','Sky','Image dustbin'];
+  const colNames = ['red','car','where','Question dustbin'];
+  const fmt = x => x.toFixed(3);
+  function solve(rho, epsilon) {
+    const a = [(1-rho)/3,(1-rho)/3,(1-rho)/3,rho];
+    const b = [...a];
+    const valid = a.map(x => x > 0);
+    const kernel = cost.map((row,i) => row.map((c,j) => valid[i] && valid[j] ? -c/epsilon : -Infinity));
+    let u = [0,0,0,0], v = [0,0,0,0];
+    const lse = values => { const finite = values.filter(Number.isFinite); if (!finite.length) return -Infinity; const m = Math.max(...finite); return m + Math.log(finite.reduce((s,x) => s + Math.exp(x-m),0)); };
+    for (let step=0;step<120;step++) {
+      u = u.map((_,i) => valid[i] ? Math.log(a[i])-lse(kernel[i].map((x,j) => x+v[j])) : -Infinity);
+      v = v.map((_,j) => valid[j] ? Math.log(b[j])-lse(kernel.map((row,i) => row[j]+u[i])) : -Infinity);
+    }
+    const plan = kernel.map((row,i) => row.map((x,j) => Number.isFinite(x) ? Math.exp(x+u[i]+v[j]) : 0));
+    return {a,b,plan};
+  }
+  function render() {
+    const rho = Number(rhoInput.value), eps = Number(epsInput.value);
+    document.getElementById('rho-value').textContent=rho.toFixed(2);
+    document.getElementById('eps-value').textContent=eps.toFixed(2);
+    const {a,b,plan} = solve(rho,eps);
+    const rowSums=plan.map(row=>row.reduce((s,x)=>s+x,0));
+    const colSums=b.map((_,j)=>plan.reduce((s,row)=>s+row[j],0));
+    const maxVal=Math.max(...plan.flat(),.001);
+    let html='<thead><tr><th scope="col">Patch ↓ / token →</th>' + colNames.map(n=>'<th scope="col">'+n+'</th>').join('') + '<th scope="col">Row sum / target</th></tr></thead><tbody>';
+    plan.forEach((row,i)=>{html+='<tr><th scope="row" class="axis">'+rowNames[i]+'</th>';row.forEach((x,j)=>{const strength=x/maxVal;const opacity=(.08+.78*strength).toFixed(3);const color=strength>.55?'#fff':'#173047';html+='<td class="'+(i===3||j===3?'dust':'')+'" style="background:rgba(8,126,118,'+opacity+');color:'+color+'" title="Cost '+fmt(cost[i][j])+'; mass '+fmt(x)+'">'+fmt(x)+'</td>';});html+='<td class="sum">'+fmt(rowSums[i])+' / '+fmt(a[i])+'</td></tr>';});
+    html+='<tr><th scope="row" class="axis">Column sum / target</th>'+colSums.map((x,j)=>'<td class="sum">'+fmt(x)+' / '+fmt(b[j])+'</td>').join('')+'<td class="sum">1.000</td></tr></tbody>';
+    table.innerHTML=html;
+    const matched=plan.slice(0,3).reduce((s,row)=>s+row.slice(0,3).reduce((t,x)=>t+x,0),0);
+    const imageDust=plan.slice(0,3).reduce((s,row)=>s+row[3],0);
+    const questionDust=plan[3].slice(0,3).reduce((s,x)=>s+x,0);
+    const residual=Math.max(...rowSums.map((x,i)=>Math.abs(x-a[i])),...colSums.map((x,j)=>Math.abs(x-b[j])));
+    const lines=[['Local ↔ local',matched],['Image → dustbin',imageDust],['Dustbin → question',questionDust],['Dustbin ↔ dustbin',plan[3][3]],['Max marginal residual',residual]];
+    stats.innerHTML=lines.map(([name,value])=>'<div class="stat"><span>'+name+'</span><b>'+fmt(value)+'</b></div>').join('');
+  }
+  rhoInput.addEventListener('input',render);epsInput.addEventListener('input',render);render();
+})();
+</script>
+</body>
+</html>

@@ -4,6 +4,8 @@ Visual question answering with a frozen ViT image encoder, BERT question tokens,
 partial optimal transport fusion, and autoregressive answer generation. The
 original Stacked Attention Network (SAN) remains available as a baseline. See
 [the implementation and evaluation plan](docs/optimal_transport_vqa_plan.md).
+For a code-level walkthrough with diagrams and an interactive transport example,
+open [the architecture guide](docs/ot_vqa_architecture.html).
 
 ## Setup
 
