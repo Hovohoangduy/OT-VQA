@@ -9,8 +9,15 @@ from configs.config import Config
 from model.vqa_model import VQAModel
 
 
-def _adapt_deit_state_dict(state_dict, target_keys):
-    """Bridge the DeiT module-path rename across Transformers releases."""
+MODEL_CONFIG_KEYS = {
+    "vocab_size", "output_size", "d_model", "num_heads", "ffn_hidden",
+    "drop_prob", "num_layers", "num_att_layers", "mode",
+    "freeze_answer_embeddings",
+}
+
+
+def _adapt_vision_state_dict(state_dict, target_keys):
+    """Bridge the ViT module-path rename across Transformers releases."""
     target_keys = set(target_keys)
     old_marker = "image_model.model.encoder.layer."
     new_marker = "image_model.model.layers."
@@ -98,15 +105,18 @@ def read_checkpoint(checkpoint_path, device):
 
 def load_model(checkpoint_path, device):
     checkpoint = read_checkpoint(checkpoint_path, device)
-    model_config = dict(checkpoint.get("model_config", {}))
-    if checkpoint["format_version"] == 2:
-        model_config["fusion"] = "san"
-        model_config.pop("ot_config", None)
+    stored_config = dict(checkpoint.get("model_config", {}))
+    fusion = stored_config.pop("fusion", "san")
+    if fusion != "san":
+        raise ValueError("This checkpoint uses a removed fusion architecture; use a SAN checkpoint")
+    model_config = {
+        key: value for key, value in stored_config.items() if key in MODEL_CONFIG_KEYS
+    }
     model = VQAModel(
         text_model=checkpoint["text_model"], image_model=checkpoint["image_model"],
         **model_config,
     )
-    state = _adapt_deit_state_dict(checkpoint["model_state_dict"], model.state_dict())
+    state = _adapt_vision_state_dict(checkpoint["model_state_dict"], model.state_dict())
     state = _adapt_legacy_text_keys(state)
     model.load_state_dict(state, strict=True)
     model = model.to(device)
@@ -136,7 +146,7 @@ def _adapt_legacy_text_keys(state_dict):
 def restore_training_state(checkpoint, model, optimizer, scheduler):
     if checkpoint.get("format_version") != 3:
         raise ValueError("Only version-3 checkpoints contain resumable training state")
-    state = _adapt_deit_state_dict(checkpoint["model_state_dict"], model.state_dict())
+    state = _adapt_vision_state_dict(checkpoint["model_state_dict"], model.state_dict())
     state = _adapt_legacy_text_keys(state)
     model.load_state_dict(state, strict=True)
     if checkpoint.get("optimizer_state_dict") is not None:

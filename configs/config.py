@@ -4,7 +4,7 @@ import torchvision.transforms as transforms
 class Config:
     lr = 0.00001
     text_model = "bert-base-uncased"
-    image_model = 'facebook/deit-base-distilled-patch16-224'
+    image_model = "google/vit-base-patch16-224-in21k"
     SEED = 1105
     MAX_LEN = 64
     MAX_LEN_QUES = 28

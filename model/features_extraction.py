@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 from torch.nn.utils.rnn import pack_padded_sequence
-from transformers import AutoModel, AutoTokenizer, AutoImageProcessor, DeiTModel
+from transformers import AutoImageProcessor, BertModel, BertTokenizer, ViTModel
 
 from configs.config import Config
 
@@ -16,7 +16,7 @@ class ImageEmbedding(nn.Module):
     def __init__(self, model_name=Config.image_model):
         super().__init__()
         self.process = AutoImageProcessor.from_pretrained(model_name)
-        self.model = DeiTModel.from_pretrained(model_name)
+        self.model = ViTModel.from_pretrained(model_name)
         self.model.requires_grad_(False)
         self.model.eval()
 
@@ -33,33 +33,13 @@ class ImageEmbedding(nn.Module):
             outputs = self.model(**inputs.to(device))
         return outputs.last_hidden_state, image_ids
 
-    @staticmethod
-    def spatial_tokens(hidden_states):
-        """Remove DeiT's class and distillation tokens, retaining patch tokens."""
-        if hidden_states.size(1) <= 2:
-            raise ValueError("DeiT output does not contain spatial patch tokens")
-        return hidden_states[:, 2:]
-
-
 class QuestionEmbedding(nn.Module):
     def __init__(self, input_size=None, output_size=768, model_name=Config.text_model):
         super().__init__()
         validate_english_text_model(model_name)
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.text_encoder = AutoModel.from_pretrained(model_name)
+        self.tokenizer = BertTokenizer.from_pretrained(model_name)
+        self.text_encoder = BertModel.from_pretrained(model_name)
         self.lstm = nn.LSTM(input_size or self.text_encoder.config.hidden_size, output_size, batch_first=True)
-        self.encoder_frozen = False
-
-    def freeze_encoder(self):
-        self.encoder_frozen = True
-        self.text_encoder.requires_grad_(False)
-        self.text_encoder.eval()
-
-    def train(self, mode=True):
-        super().train(mode)
-        if self.encoder_frozen:
-            self.text_encoder.eval()
-        return self
 
     def encode_tokens(self, questions):
         tokens = self.tokenizer(
@@ -70,11 +50,7 @@ class QuestionEmbedding(nn.Module):
         special_mask = tokens.pop('special_tokens_mask').bool()
         tokens = tokens.to(next(self.text_encoder.parameters()).device)
         special_mask = special_mask.to(tokens['input_ids'].device)
-        if self.encoder_frozen:
-            with torch.no_grad():
-                embeddings = self.text_encoder(**tokens).last_hidden_state
-        else:
-            embeddings = self.text_encoder(**tokens).last_hidden_state
+        embeddings = self.text_encoder(**tokens).last_hidden_state
         padding_mask = tokens['attention_mask'].eq(0) | special_mask
         return embeddings, padding_mask, tokens['input_ids']
 
@@ -92,8 +68,8 @@ class AnswerEmbedding(nn.Module):
     def __init__(self, input_size=768, model_name=Config.text_model):
         super().__init__()
         validate_english_text_model(model_name)
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.token_embeddings = AutoModel.from_pretrained(model_name).embeddings
+        self.tokenizer = BertTokenizer.from_pretrained(model_name)
+        self.token_embeddings = BertModel.from_pretrained(model_name).embeddings
         self.embedding_frozen = False
 
     def freeze(self):

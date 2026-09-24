@@ -1,80 +1,34 @@
-"""SAN and Optimal-Transport VQA models with autoregressive generation."""
+"""Stacked-attention VQA model with autoregressive answer generation."""
 
 from __future__ import annotations
-
-from dataclasses import dataclass, replace
-from typing import Optional
 
 import torch
 from torch import nn
 
 from configs.config import Config
 from model.decoder_model import Decoder
-from model.features_extraction import (
-    AnswerEmbedding, ImageEmbedding, QuestionEmbedding,
-    validate_english_text_model,
-)
-from model.optimal_transport import OTConfig, OptimalTransportFusion, TransportOutput
-from model.ot_san import OTSAN, OTSANConfig, OTSANOutput
+from model.features_extraction import AnswerEmbedding, ImageEmbedding, QuestionEmbedding, validate_english_text_model
 from model.sans import StackAttention
 
 
-@dataclass
-class EncoderOutput:
-    memory: torch.Tensor
-    memory_padding_mask: torch.Tensor
-    transport: Optional[TransportOutput] = None
-    ot_san: Optional[OTSANOutput] = None
-
-
-@dataclass
-class GenerationOutput:
-    generated_ids: torch.Tensor
-    transport: Optional[TransportOutput] = None
-    ot_san: Optional[OTSANOutput] = None
-
-
 class VQAModel(nn.Module):
-    """VQA generator with selectable SAN, OT, or OT-SAN fusion."""
+    """Generate answers from image features fused with a question by SAN."""
 
-    def __init__(
-        self, vocab_size=None, output_size=768, d_model=768, num_heads=4,
-        ffn_hidden=2048, drop_prob=0.1, num_layers=4, num_att_layers=2,
-        mode='train', text_model=Config.text_model, image_model=Config.image_model,
-        fusion='san', ot_config=None, ot_san_config=None,
-        freeze_answer_embeddings=False,
-    ):
+    def __init__(self, vocab_size=None, output_size=768, d_model=768, num_heads=4,
+                 ffn_hidden=2048, drop_prob=0.1, num_layers=4, num_att_layers=2,
+                 mode='train', text_model=Config.text_model, image_model=Config.image_model,
+                 freeze_answer_embeddings=False):
         super().__init__()
         if output_size != d_model or num_att_layers < 1:
             raise ValueError('output_size must equal d_model and at least one attention layer is needed')
-        valid_fusions = {'san', 'balanced_ot', 'uot', 'balanced_ot_san', 'uot_san'}
-        if fusion not in valid_fusions:
-            raise ValueError(
-                "fusion must be 'san', 'balanced_ot', 'uot', "
-                "'balanced_ot_san', or 'uot_san'"
-            )
         validate_english_text_model(text_model)
         self.mode = mode
-        self.fusion_type = fusion
         self.text_model_name = str(text_model)
         self.image_model_name = str(image_model)
-        parsed_ot = ot_config if isinstance(ot_config, OTConfig) else OTConfig.from_dict(ot_config)
-        if fusion in {'balanced_ot', 'balanced_ot_san'}:
-            parsed_ot = replace(parsed_ot, transport_type='balanced')
-        elif fusion in {'uot', 'uot_san'}:
-            parsed_ot = replace(parsed_ot, transport_type='unbalanced')
-        parsed_ot_san = (
-            ot_san_config if isinstance(ot_san_config, OTSANConfig)
-            else OTSANConfig.from_dict(ot_san_config)
-        )
-        uses_ot_san = fusion in {'balanced_ot_san', 'uot_san'}
-        self.ot_config = parsed_ot
         self.model_config = dict(
             output_size=output_size, d_model=d_model, num_heads=num_heads,
             ffn_hidden=ffn_hidden, drop_prob=drop_prob, num_layers=num_layers,
-            num_att_layers=num_att_layers, fusion=fusion,
-            ot_config=parsed_ot.to_dict() if fusion != 'san' else None,
-            ot_san_config=parsed_ot_san.to_dict() if uses_ot_san else None,
+            num_att_layers=num_att_layers,
             freeze_answer_embeddings=freeze_answer_embeddings,
         )
         self.image_model = ImageEmbedding(image_model)
@@ -92,21 +46,12 @@ class VQAModel(nn.Module):
             raise ValueError('Tokenizer needs PAD, BOS/CLS and EOS/SEP tokens')
 
         image_dim = self.image_model.model.config.hidden_size
-        question_dim = self.question_encoder.text_encoder.config.hidden_size
         answer_dim = self.answer_embedding.token_embeddings.word_embeddings.embedding_dim
-        # Preserve original SAN names so version-2 checkpoints load strictly.
         self.image_projection = nn.Identity() if image_dim == d_model else nn.Linear(image_dim, d_model)
         self.answer_projection = nn.Identity() if answer_dim == d_model else nn.Linear(answer_dim, d_model)
         self.san_model = nn.ModuleList(
             [StackAttention(d=d_model, k=512) for _ in range(num_att_layers)]
         )
-        self.ot_fusion = None if fusion == 'san' else OptimalTransportFusion(
-            visual_dim=image_dim, question_dim=question_dim, model_dim=d_model,
-            config=parsed_ot,
-        )
-        self.ot_san = OTSAN(d_model, parsed_ot_san) if uses_ot_san else None
-        if self.ot_fusion is not None:
-            self.question_encoder.freeze_encoder()
         self.decoder = Decoder(d_model, ffn_hidden, num_heads, drop_prob, num_layers)
         actual_vocab = self.answer_embedding.token_embeddings.word_embeddings.num_embeddings
         if vocab_size is not None and vocab_size != actual_vocab:
@@ -116,69 +61,15 @@ class VQAModel(nn.Module):
             nn.Linear(d_model, actual_vocab),
         )
 
-    def encode_from_features(
-        self, image_embeddings, question_embeddings, question_padding_mask,
-        return_diagnostics=False,
-    ):
-        if self.ot_fusion is None:
-            raise ValueError('Precomputed token features are supported only for OT fusion')
-        reference = next(self.ot_fusion.parameters())
-        image_embeddings = image_embeddings.to(device=reference.device, dtype=reference.dtype)
-        question_embeddings = question_embeddings.to(device=reference.device, dtype=reference.dtype)
-        question_padding_mask = question_padding_mask.to(reference.device, dtype=torch.bool)
-        visual_tokens = self.image_model.spatial_tokens(image_embeddings)
-        visual_padding_mask = torch.zeros(
-            visual_tokens.shape[:2], dtype=torch.bool, device=visual_tokens.device
-        )
-        transport = self.ot_fusion(
-            visual_tokens, question_embeddings, visual_padding_mask,
-            question_padding_mask, return_diagnostics=return_diagnostics,
-        )
-        memory = transport.fused_tokens
-        memory_padding_mask = transport.memory_padding_mask
-        ot_san = None
-        if self.ot_san is not None:
-            ot_san = self.ot_san(
-                memory, memory_padding_mask,
-                return_diagnostics=return_diagnostics,
-            )
-            memory = ot_san.memory
-            memory_padding_mask = ot_san.memory_padding_mask
-            transport.ot_san = ot_san
-        return EncoderOutput(
-            memory=memory,
-            memory_padding_mask=memory_padding_mask,
-            transport=transport,
-            ot_san=ot_san,
-        )
-
-    def encode(self, images, questions, anno_ids=None, return_diagnostics=False):
+    def encode(self, images, questions, anno_ids=None):
         image_embeddings, _ = self.image_model(images, image_ids=anno_ids)
-        if self.ot_fusion is None:
-            projected_images = self.image_projection(image_embeddings)
-            context = self.question_encoder(questions)
-            for layer in self.san_model:
-                context = layer(projected_images, context.unsqueeze(1))
-            memory = context.unsqueeze(1)
-            return EncoderOutput(
-                memory=memory,
-                memory_padding_mask=torch.zeros(
-                    memory.shape[:2], dtype=torch.bool, device=memory.device
-                ),
-            )
-        question_embeddings, question_mask, _ = self.question_encoder.encode_tokens(questions)
-        return self.encode_from_features(
-            image_embeddings, question_embeddings, question_mask, return_diagnostics
-        )
+        projected_images = self.image_projection(image_embeddings)
+        context = self.question_encoder(questions)
+        for layer in self.san_model:
+            context = layer(projected_images, context.unsqueeze(1))
+        return context.unsqueeze(1)
 
-    @staticmethod
-    def _unpack_encoder_output(encoded):
-        # Accept tensors for older callers and lightweight test mocks.
-        if isinstance(encoded, torch.Tensor):
-            return encoded, None, None
-        return encoded.memory, encoded.memory_padding_mask, encoded.transport
-
-    def decode(self, input_ids, memory, causal=True, memory_padding_mask=None):
+    def decode(self, input_ids, memory, causal=True):
         target = self.answer_projection(self.answer_embedding.embed_ids(input_ids))
         target_length = input_ids.size(1)
         blocked = input_ids.eq(self.pad_token_id)[:, None, None, :].expand(
@@ -189,123 +80,42 @@ class VQAModel(nn.Module):
                 torch.ones(target_length, target_length, dtype=torch.bool,
                             device=input_ids.device), diagonal=1
             )
-        cross_mask = None
-        if memory_padding_mask is not None:
-            if memory_padding_mask.shape != memory.shape[:2]:
-                raise ValueError('memory_padding_mask must match memory batch and length')
-            cross_mask = memory_padding_mask[:, None, None, :].expand(
-                -1, 1, target_length, -1
-            )
-        return self.mlp(self.decoder(memory, target, blocked, cross_mask))
+        return self.mlp(self.decoder(memory, target, blocked, None))
 
-    def forward(
-        self, images, questions, answers=None, anno_ids=None, mask=True, mode='train',
-        max_len=Config.MAX_LEN_ANS, return_diagnostics=False,
-    ):
+    def forward(self, images, questions, answers=None, anno_ids=None, mask=True,
+                mode='train', max_len=Config.MAX_LEN_ANS):
         if mode not in {'train', 'eval', 'test', 'infer', 'generate'}:
             raise ValueError(f'Unknown mode: {mode}')
         if mode in {'test', 'infer', 'generate'} or answers is None:
-            return self.generate(
-                images, questions, anno_ids, max_len,
-                return_diagnostics=return_diagnostics,
-            )
-        encoded = self.encode(images, questions, anno_ids, return_diagnostics)
-        memory, memory_mask, transport = self._unpack_encoder_output(encoded)
+            return self.generate(images, questions, anno_ids, max_len)
+        memory = self.encode(images, questions, anno_ids)
         ids = self.answer_embedding.tokenize(answers, max_len)
-        logits = self.decode(ids[:, :-1], memory, causal=mask,
-                             memory_padding_mask=memory_mask)
-        if return_diagnostics:
-            return logits, ids[:, 1:], transport
-        return logits, ids[:, 1:]
-
-    def forward_from_features(
-        self, image_embeddings, question_embeddings, question_padding_mask,
-        answers, max_len=Config.MAX_LEN_ANS, mask=True, return_diagnostics=False,
-    ):
-        """Train from cached frozen-encoder outputs using the normal OT decoder path."""
-        encoded = self.encode_from_features(
-            image_embeddings, question_embeddings, question_padding_mask,
-            return_diagnostics,
-        )
-        memory, memory_mask, transport = self._unpack_encoder_output(encoded)
-        ids = self.answer_embedding.tokenize(answers, max_len)
-        logits = self.decode(ids[:, :-1], memory, causal=mask,
-                             memory_padding_mask=memory_mask)
-        if return_diagnostics:
-            return logits, ids[:, 1:], transport
-        return logits, ids[:, 1:]
+        return self.decode(ids[:, :-1], memory, causal=mask), ids[:, 1:]
 
     @torch.no_grad()
-    def generate(
-        self, images, questions, anno_ids=None, max_len=Config.MAX_LEN_ANS,
-        return_diagnostics=False,
-    ):
+    def generate(self, images, questions, anno_ids=None, max_len=Config.MAX_LEN_ANS):
         if not 2 <= max_len <= Config.MAX_LEN_ANS:
             raise ValueError(f'max_len must be between 2 and {Config.MAX_LEN_ANS}')
         was_training = self.training
         self.eval()
         try:
-            encoded = self.encode(images, questions, anno_ids, return_diagnostics)
-            memory, memory_mask, transport = self._unpack_encoder_output(encoded)
-            generated = self._generate_from_memory(memory, memory_mask, max_len)
-            if return_diagnostics:
-                return GenerationOutput(
-                    generated_ids=generated,
-                    transport=transport,
-                    ot_san=getattr(encoded, 'ot_san', None),
-                )
-            return generated
-        finally:
-            self.train(was_training)
-
-    def _generate_from_memory(self, memory, memory_padding_mask, max_len):
-        batch_size = memory.size(0)
-        ids = torch.full(
-            (batch_size, 1), self.bos_token_id, dtype=torch.long,
-            device=memory.device,
-        )
-        finished = torch.zeros(batch_size, dtype=torch.bool, device=memory.device)
-        for _ in range(max_len - 1):
-            logits = self.decode(
-                ids, memory, memory_padding_mask=memory_padding_mask
-            )[:, -1, :]
-            logits[:, [self.pad_token_id, self.bos_token_id]] = float('-inf')
-            next_ids = logits.argmax(-1).masked_fill(finished, self.pad_token_id)
-            ids = torch.cat([ids, next_ids.unsqueeze(1)], dim=1)
-            finished |= next_ids.eq(self.eos_token_id)
-            if bool(finished.all()):
-                break
-        return ids[:, 1:]
-
-    @torch.no_grad()
-    def generate_from_features(
-        self, image_embeddings, question_embeddings, question_padding_mask,
-        max_len=Config.MAX_LEN_ANS, return_diagnostics=False,
-    ):
-        if not 2 <= max_len <= Config.MAX_LEN_ANS:
-            raise ValueError(f'max_len must be between 2 and {Config.MAX_LEN_ANS}')
-        was_training = self.training
-        self.eval()
-        try:
-            encoded = self.encode_from_features(
-                image_embeddings, question_embeddings, question_padding_mask,
-                return_diagnostics,
-            )
-            memory, memory_mask, transport = self._unpack_encoder_output(encoded)
-            generated = self._generate_from_memory(memory, memory_mask, max_len)
-            if return_diagnostics:
-                return GenerationOutput(
-                    generated_ids=generated,
-                    transport=transport,
-                    ot_san=getattr(encoded, 'ot_san', None),
-                )
-            return generated
+            memory = self.encode(images, questions, anno_ids)
+            ids = torch.full((memory.size(0), 1), self.bos_token_id, dtype=torch.long,
+                             device=memory.device)
+            finished = torch.zeros(memory.size(0), dtype=torch.bool, device=memory.device)
+            for _ in range(max_len - 1):
+                logits = self.decode(ids, memory)[:, -1, :]
+                logits[:, [self.pad_token_id, self.bos_token_id]] = float('-inf')
+                next_ids = logits.argmax(-1).masked_fill(finished, self.pad_token_id)
+                ids = torch.cat([ids, next_ids.unsqueeze(1)], dim=1)
+                finished |= next_ids.eq(self.eos_token_id)
+                if bool(finished.all()):
+                    break
+            return ids[:, 1:]
         finally:
             self.train(was_training)
 
     def answers_from_ids(self, ids):
-        if isinstance(ids, GenerationOutput):
-            ids = ids.generated_ids
         rows = []
         for row in ids.detach().cpu().tolist():
             if self.eos_token_id in row:

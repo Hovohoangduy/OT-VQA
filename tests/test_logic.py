@@ -12,12 +12,10 @@ from PIL import Image
 import torch
 from torch import nn
 from torch.utils.data import DataLoader
-from transformers import BertConfig, BertModel, BertTokenizer, DeiTConfig, DeiTModel, DeiTImageProcessor
+from transformers import BertConfig, BertModel, BertTokenizer, ViTConfig, ViTImageProcessor, ViTModel
 
 from configs.config import Config
 from model.vqa_model import VQAModel
-from model.optimal_transport import OTConfig
-from model.ot_san import OTSANConfig
 from model.decoder_model import MultiHeadAttention, MultiHeadCrossAttention, scaled_dot_product
 from model.sans import StackAttention
 from utils.data_processing import process_dataframe
@@ -45,9 +43,9 @@ class ModelLogicTests(unittest.TestCase):
                              num_attention_heads=4, intermediate_size=32,
                              hidden_dropout_prob=0, attention_probs_dropout_prob=0)).save_pretrained(cls.text)
         cls.visual = cls.root / 'visual'
-        DeiTModel(DeiTConfig(hidden_size=16, num_hidden_layers=1, num_attention_heads=4,
-                             intermediate_size=32, image_size=32, patch_size=16)).save_pretrained(cls.visual)
-        DeiTImageProcessor(size={'height': 32, 'width': 32}, crop_size={'height': 32, 'width': 32}).save_pretrained(cls.visual)
+        ViTModel(ViTConfig(hidden_size=16, num_hidden_layers=1, num_attention_heads=4,
+                           intermediate_size=32, image_size=32, patch_size=16)).save_pretrained(cls.visual)
+        ViTImageProcessor(size={'height': 32, 'width': 32}, crop_size={'height': 32, 'width': 32}).save_pretrained(cls.visual)
 
     @classmethod
     def tearDownClass(cls):
@@ -56,15 +54,6 @@ class ModelLogicTests(unittest.TestCase):
     def make_model(self):
         return VQAModel(text_model=str(self.text), image_model=str(self.visual),
                         output_size=16, d_model=16, ffn_hidden=32, num_layers=2, drop_prob=0)
-
-    def make_ot_model(self, fusion='uot'):
-        return VQAModel(
-            text_model=str(self.text), image_model=str(self.visual),
-            output_size=16, d_model=16, ffn_hidden=32, num_layers=1,
-            drop_prob=0, fusion=fusion,
-            ot_config=OTConfig(ot_dim=8, epsilon=0.1, max_iterations=30),
-            ot_san_config=OTSANConfig(hidden_dim=8, num_layers=1, dropout=0),
-        )
 
     def test_shifted_targets_and_backward_for_single_image(self):
         model = self.make_model()
@@ -117,9 +106,9 @@ class ModelLogicTests(unittest.TestCase):
         with torch.no_grad():
             actual, _ = model.image_model(images)
             direct = model.image_model.model(**expected).last_hidden_state
-        self.assertEqual(actual.shape, (1, 6, 16))
+        self.assertEqual(actual.shape, (1, 5, 16))
         torch.testing.assert_close(actual, direct)
-        # White pixels normalized using DeiT mean/std are approximately +1.
+        # White pixels normalized using ViT mean/std are approximately +1.
         self.assertGreater(expected['pixel_values'].mean().item(), 0.9)
 
     def test_generation_prefix_eos_and_per_sample_padding(self):
@@ -225,123 +214,6 @@ class ModelLogicTests(unittest.TestCase):
         cross = MultiHeadCrossAttention(16, 4)
         self.assertEqual(cross(torch.randn(2, 3, 16), x).shape, (2, 5, 16))
         self.assertEqual(StackAttention(16, 8, dropout=False)(x, torch.randn(2, 1, 16)).shape, (2, 16))
-
-    def test_ot_online_cached_path_checkpoint_and_diagnostics(self):
-        model = self.make_ot_model().eval()
-        images = torch.rand(2, 3, 32, 32)
-        questions = ['what color ?', 'color ?']
-        with torch.no_grad():
-            online = model.encode(images, questions, return_diagnostics=True)
-            image_features, _ = model.image_model(images)
-            question_features, question_mask, _ = model.question_encoder.encode_tokens(questions)
-            cached = model.encode_from_features(
-                image_features.half(), question_features.half(), question_mask, True
-            )
-        torch.testing.assert_close(online.memory, cached.memory, atol=2e-3, rtol=2e-3)
-        self.assertEqual(cached.memory_padding_mask.tolist(), question_mask.tolist())
-        self.assertTrue(torch.isfinite(cached.transport.plan).all())
-        generated = model.generate_from_features(
-            image_features, question_features, question_mask,
-            max_len=5, return_diagnostics=True,
-        )
-        self.assertEqual(generated.generated_ids.size(0), 2)
-        path = self.root / 'ot-v3.pt'
-        save_checkpoint(
-            path, model=model, text_model=str(self.text), image_model=str(self.visual),
-            epoch=1, global_step=2,
-        )
-        restored = load_model(path, torch.device('cpu'))
-        self.assertEqual(restored.fusion_type, 'uot')
-        with torch.no_grad():
-            expected = model.generate(images, questions, max_len=5)
-            actual = restored.generate(images, questions, max_len=5)
-        torch.testing.assert_close(actual, expected)
-
-    def test_ot_san_online_cached_checkpoint_gradients_and_diagnostics(self):
-        torch.manual_seed(13)
-        model = self.make_ot_model(fusion='uot_san').eval()
-        images = torch.rand(2, 3, 32, 32)
-        questions = ['what color ?', 'color ?']
-        online = model.encode(images, questions, return_diagnostics=True)
-        image_features, _ = model.image_model(images)
-        question_features, question_mask, _ = model.question_encoder.encode_tokens(questions)
-        cached = model.encode_from_features(
-            image_features.half(), question_features.half(), question_mask, True
-        )
-        self.assertEqual(online.memory.shape[1], question_mask.shape[1] + 1)
-        self.assertEqual(online.memory_padding_mask.shape[1], question_mask.shape[1] + 1)
-        self.assertFalse(online.memory_padding_mask[:, 0].any())
-        self.assertIsNotNone(online.ot_san)
-        self.assertEqual(online.ot_san.attention_weights.shape[:2], (2, 1))
-        torch.testing.assert_close(online.memory, cached.memory, atol=2e-3, rtol=2e-3)
-
-        model.train()
-        logits, targets, transport = model(
-            images, questions, ['red', 'blue'], max_len=6,
-            return_diagnostics=True,
-        )
-        loss = nn.functional.cross_entropy(
-            logits.transpose(1, 2), targets, ignore_index=model.pad_token_id
-        )
-        loss.backward()
-        self.assertIsNotNone(transport.ot_san)
-        self.assertIsNotNone(model.ot_san.gate_logit.grad)
-        self.assertIsNotNone(model.ot_fusion.fusion[0].weight.grad)
-
-        path = self.root / 'ot-san-v3.pt'
-        save_checkpoint(
-            path, model=model, text_model=str(self.text), image_model=str(self.visual),
-            epoch=1, global_step=2,
-        )
-        restored = load_model(path, torch.device('cpu'))
-        self.assertEqual(restored.fusion_type, 'uot_san')
-        self.assertEqual(restored.model_config['ot_san_config']['hidden_dim'], 8)
-        model.eval()
-        with torch.no_grad():
-            expected = model.generate(images, questions, max_len=5)
-            actual = restored.generate(images, questions, max_len=5)
-        torch.testing.assert_close(actual, expected)
-
-    def test_balanced_ot_san_selects_balanced_transport(self):
-        model = self.make_ot_model(fusion='balanced_ot_san')
-        self.assertEqual(model.ot_config.transport_type, 'balanced')
-        self.assertIsNotNone(model.ot_san)
-
-    def test_uot_tiny_batch_learns_and_generates_without_reference(self):
-        torch.manual_seed(8)
-        model = self.make_ot_model()
-        optimizer = torch.optim.Adam(
-            (parameter for parameter in model.parameters() if parameter.requires_grad),
-            lr=0.02,
-        )
-        images = torch.rand(1, 3, 32, 32)
-        first_loss = None
-        for _ in range(60):
-            logits, targets = model(
-                images, ['what color ?'], ['red'], max_len=6
-            )
-            loss = nn.functional.cross_entropy(
-                logits.transpose(1, 2), targets, ignore_index=model.pad_token_id
-            )
-            first_loss = loss.item() if first_loss is None else first_loss
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-        self.assertLess(loss.item(), first_loss * 0.1)
-        generated = model.generate(images, ['what color ?'], max_len=6)
-        self.assertEqual(model.answers_from_ids(generated), ['red'])
-
-    def test_decoder_ignores_padded_ot_memory_tokens(self):
-        model = self.make_ot_model().eval()
-        ids = torch.tensor([[2, 5]])
-        memory = torch.randn(1, 3, 16)
-        changed = memory.clone()
-        changed[:, 2] = 1000
-        mask = torch.tensor([[False, False, True]])
-        with torch.no_grad():
-            first = model.decode(ids, memory, memory_padding_mask=mask)
-            second = model.decode(ids, changed, memory_padding_mask=mask)
-        torch.testing.assert_close(first, second)
 
 class DataLogicTests(unittest.TestCase):
     def test_metrics_count_repeated_words_and_empty_answers(self):

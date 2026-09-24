@@ -104,7 +104,6 @@ def _reliance_report(model, dataset, samples: int, batch_size: int,
     image_shuffled_predictions: list[str] = []
     question_shuffled_predictions: list[str] = []
     answers: list[str] = []
-    transport_rows = []
     for start in range(0, count, batch_size):
         batch = records[start:start + batch_size]
         if len(batch) == 1:
@@ -121,23 +120,12 @@ def _reliance_report(model, dataset, samples: int, batch_size: int,
         shuffled_questions = [row[2] for row in question_source]
         answers.extend(row[3] for row in batch)
         with torch.no_grad():
-            original = model.generate(
-                images, questions, anno_ids, return_diagnostics=True
-            )
+            original = model.generate(images, questions, anno_ids)
             image_shuffled = model.generate(shuffled_images, questions, anno_ids)
             question_shuffled = model.generate(images, shuffled_questions, anno_ids)
         original_predictions.extend(model.answers_from_ids(original))
         image_shuffled_predictions.extend(model.answers_from_ids(image_shuffled))
         question_shuffled_predictions.extend(model.answers_from_ids(question_shuffled))
-        if original.transport is not None:
-            transport = original.transport
-            transport_rows.append({
-                "count": len(batch),
-                "matched_mass": transport.matched_mass.mean().item(),
-                "residual": transport.residual.mean().item(),
-                "convergence_rate": transport.converged.float().mean().item(),
-                "iterations": transport.iterations.float().mean().item(),
-            })
     result = {
         "samples": count,
         "original": _prediction_summary(answers, original_predictions),
@@ -150,12 +138,6 @@ def _reliance_report(model, dataset, samples: int, batch_size: int,
                 original_predictions, question_shuffled_predictions)) / count,
         },
     }
-    if transport_rows:
-        total = sum(row["count"] for row in transport_rows)
-        result["ot"] = {
-            key: sum(row[key] * row["count"] for row in transport_rows) / total
-            for key in ("matched_mass", "residual", "convergence_rate", "iterations")
-        }
     return result
 
 

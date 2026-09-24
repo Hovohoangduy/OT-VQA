@@ -1,4 +1,4 @@
-"""Train SAN or Optimal-Transport VQA and select checkpoints by generated F1."""
+"""Train the stacked-attention VQA model and select checkpoints by generated F1."""
 
 from __future__ import annotations
 
@@ -13,35 +13,21 @@ from transformers import get_linear_schedule_with_warmup
 
 from configs.arg_parser import get_args
 from configs.config import Config
-from model.optimal_transport import OTConfig
-from model.ot_san import OTSANConfig
 from model.vqa_model import VQAModel
-from utils.checkpoint import read_checkpoint, restore_training_state, save_checkpoint
+from utils.checkpoint import MODEL_CONFIG_KEYS, read_checkpoint, restore_training_state, save_checkpoint
 from utils.data_processing import load_dataframe
 from utils.device import resolve_device, seed_everything
-from utils.feature_cache import FeatureCacheDataset, collate_feature_cache
 from utils.metrics import compute_em_and_f1
 from utils.vqa_dataset import VQADataset, resolve_image_root
 
 
-def _forward_batch(model, batch, device, diagnostics=False):
-    if isinstance(batch, dict):
-        answers = batch["answers"]
-        result = model.forward_from_features(
-            batch["image_features"].to(device),
-            batch["question_features"].to(device),
-            batch["question_padding_mask"].to(device),
-            answers, return_diagnostics=diagnostics,
-        )
-    else:
-        anno_ids, images, questions, answers = batch
-        result = model(images.to(device), questions, answers, anno_ids,
-                       return_diagnostics=diagnostics)
-    return result, answers
+def _forward_batch(model, batch, device):
+    anno_ids, images, questions, answers = batch
+    return model(images.to(device), questions, answers, anno_ids), answers
 
 
 def train(model, train_loader, num_epochs, optimizer, scheduler, criterion,
-          vocab_swap=None, device=None, diagnostics=False, epoch_offset=0,
+          vocab_swap=None, device=None, epoch_offset=0,
           total_epochs=None, gradient_clip=None):
     """Run teacher-forced optimization; generation is reserved for validation."""
     device = device or next(model.parameters()).device
@@ -54,32 +40,8 @@ def train(model, train_loader, num_epochs, optimizer, scheduler, criterion,
         model.train()
         total_loss = total_em = total_f1 = 0.0
         examples = tokens = 0
-        diagnostic_rows = []
         for batch_idx, batch in enumerate(train_loader):
-            result, answers = _forward_batch(model, batch, device, diagnostics)
-            if diagnostics:
-                logits, targets, transport = result
-                if transport is not None:
-                    row = {
-                        "matched_mass": transport.matched_mass.detach().mean().item(),
-                        "entropy": transport.entropy.detach().mean().item(),
-                        "residual": transport.residual.detach().mean().item(),
-                        "iterations": transport.iterations.float().mean().item(),
-                        "convergence": transport.converged.float().mean().item(),
-                    }
-                    if transport.ot_san is not None:
-                        row.update({
-                            "ot_san_gate": transport.ot_san.gate.detach().item(),
-                            "ot_san_summary_norm": (
-                                transport.ot_san.summary_norm.detach().mean().item()
-                            ),
-                            "ot_san_attention_entropy": (
-                                transport.ot_san.attention_entropy.detach().mean().item()
-                            ),
-                        })
-                    diagnostic_rows.append(row)
-            else:
-                logits, targets = result
+            (logits, targets), answers = _forward_batch(model, batch, device)
             loss = criterion(logits.transpose(1, 2), targets)
             if not torch.isfinite(loss):
                 raise FloatingPointError("Training loss is NaN or infinity")
@@ -109,22 +71,12 @@ def train(model, train_loader, num_epochs, optimizer, scheduler, criterion,
         message = (f"Epoch {displayed_epoch}/{displayed_total}: "
                    f"loss={total_loss / max(tokens, 1):.4f}, "
                    f"teacher-forced EM={em_scores[-1]:.4f}, F1={f1_scores[-1]:.4f}")
-        if diagnostic_rows:
-            means = {key: sum(row[key] for row in diagnostic_rows) / len(diagnostic_rows)
-                     for key in diagnostic_rows[0]}
-            message += ", OT " + ", ".join(f"{key}={value:.4g}" for key, value in means.items())
         print(message)
     return losses, em_scores, f1_scores
 
 
 def _make_loader(args, split, shuffle, text_model, image_model):
     csv_path = getattr(args, f"{split}_csv_path")
-    if args.feature_cache:
-        candidate = Path(args.feature_cache) / split
-        cache_path = candidate if (candidate / "manifest.json").is_file() else Path(args.feature_cache)
-        cache = FeatureCacheDataset(cache_path, csv_path, text_model, image_model)
-        return DataLoader(cache, batch_size=args.batch_size, shuffle=shuffle,
-                          collate_fn=collate_feature_cache)
     frame = load_dataframe(csv_path)
     image_path = resolve_image_root(
         frame,
@@ -154,12 +106,6 @@ def main():
         raise ValueError("weight_decay cannot be negative")
     if args.gradient_clip < 0:
         raise ValueError("gradient_clip cannot be negative")
-    ot_san_config = OTSANConfig(
-        hidden_dim=args.ot_san_hidden_dim,
-        num_layers=args.ot_san_layers,
-        dropout=args.ot_san_dropout,
-        gate_init=args.ot_san_gate_init,
-    )
     seed_everything(args.seed)
     device = resolve_device(args.device)
     print(f"Training on device: {device}")
@@ -169,20 +115,22 @@ def main():
         if resume["format_version"] != 3:
             raise ValueError("Training can resume only from a version-3 checkpoint")
         text_model, image_model = resume["text_model"], resume["image_model"]
+        stored_config = dict(resume["model_config"])
+        fusion = stored_config.pop("fusion", "san")
+        if fusion != "san":
+            raise ValueError("Cannot resume a checkpoint from a removed fusion architecture")
+        model_config = {
+            key: value for key, value in stored_config.items() if key in MODEL_CONFIG_KEYS
+        }
         model = VQAModel(text_model=text_model, image_model=image_model,
-                         **resume["model_config"]).to(device)
+                         **model_config).to(device)
     else:
         text_model, image_model = args.text_model, args.image_model
-        ot_config = OTConfig.from_json(args.ot_profile) if args.ot_profile else OTConfig()
         model = VQAModel(text_model=text_model, image_model=image_model,
                          output_size=args.d_model, d_model=args.d_model,
                          ffn_hidden=args.ffn_hidden, num_layers=args.num_layers,
                          num_heads=args.num_heads, drop_prob=args.drop_prob,
-                         freeze_answer_embeddings=args.freeze_answer_embeddings,
-                         fusion=args.fusion, ot_config=ot_config,
-                         ot_san_config=ot_san_config).to(device)
-    if args.feature_cache and model.fusion_type == "san":
-        raise ValueError("Feature caches contain token features and require OT fusion")
+                         freeze_answer_embeddings=args.freeze_answer_embeddings).to(device)
 
     train_loader = _make_loader(args, "train", True, text_model, image_model)
     dev_loader = _make_loader(args, "dev", False, text_model, image_model)
@@ -238,17 +186,15 @@ def main():
     for epoch in range(start_epoch, args.epochs):
         losses, train_em, train_f1 = train(
             model, train_loader, 1, optimizer, scheduler, train_criterion,
-            device=device, diagnostics=args.diagnostics and model.fusion_type != "san",
+            device=device,
             epoch_offset=epoch, total_epochs=args.epochs,
             gradient_clip=args.gradient_clip or None,
         )
         global_step += len(train_loader)
         validation = evaluation(
             model, dev_loader, validation_criterion, device=device,
-            diagnostics=args.diagnostics and model.fusion_type != "san",
         )
         val_loss, val_em, val_f1 = validation[:3]
-        val_diagnostics = validation[3] if len(validation) > 3 else {}
         current = {"f1": val_f1, "loss": val_loss, "epoch": epoch + 1}
         improved = (best_metric is None or val_f1 > best_metric["f1"] or
                     (val_f1 == best_metric["f1"] and val_loss < best_metric["loss"]))
@@ -272,21 +218,12 @@ def main():
                "learning_rate": scheduler.get_last_lr()[0],
                "improved": improved,
                "epochs_without_improvement": epochs_without_improvement}
-        row.update({f"val_ot_{key}": value for key, value in val_diagnostics.items()})
         history.append(row)
         with metrics_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(row) + "\n")
         print(f"Validation: loss={val_loss:.4f}, generated EM={val_em:.4f}, "
               f"F1={val_f1:.4f}, best epoch={best_metric['epoch']}, "
               f"patience={epochs_without_improvement}/{args.early_stopping_patience or 'off'}")
-        if val_diagnostics:
-            print(
-                "Validation diagnostics: "
-                f"unique predictions={val_diagnostics.get('unique_predictions', 0):g}, "
-                f"top prediction fraction={val_diagnostics.get('top_prediction_fraction', 0):.3f}, "
-                f"OT convergence={val_diagnostics.get('convergence_rate', 0):.3f}, "
-                f"residual={val_diagnostics.get('residual', 0):.5f}"
-            )
         if (args.early_stopping_patience and
                 epochs_without_improvement >= args.early_stopping_patience):
             print(f"Early stopping at epoch {epoch + 1}; best checkpoint is epoch "

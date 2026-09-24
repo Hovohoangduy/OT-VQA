@@ -18,19 +18,8 @@ def get_args(argv=None):
     
     parser.add_argument("--text_model", default="bert-base-uncased",
                         help="English Hugging Face tokenizer and text encoder")
-    parser.add_argument("--image_model", default="facebook/deit-base-distilled-patch16-224")
+    parser.add_argument("--image_model", default="google/vit-base-patch16-224-in21k")
     parser.add_argument("--split", choices=["dev", "test"], default="dev")
-    parser.add_argument(
-        "--fusion",
-        choices=["san", "balanced_ot", "uot", "balanced_ot_san", "uot_san"],
-        default="san",
-    )
-    parser.add_argument("--ot_profile", default=None, help="JSON file containing OTConfig fields")
-    parser.add_argument("--ot_san_hidden_dim", type=int, default=128)
-    parser.add_argument("--ot_san_layers", type=int, default=1, choices=[1, 2])
-    parser.add_argument("--ot_san_dropout", type=float, default=0.2)
-    parser.add_argument("--ot_san_gate_init", type=float, default=-2.0)
-    parser.add_argument("--feature_cache", default=None, help="Optional precomputed feature-cache folder")
     parser.add_argument("--resume", default=None, help="Version-3 training checkpoint to resume")
     parser.add_argument("--seed", type=int, default=1105)
     parser.add_argument("--lr", type=float, default=None)
@@ -62,7 +51,6 @@ def get_args(argv=None):
         help="Freeze pretrained answer-token embeddings (default: enabled)",
     )
     parser.add_argument("--checkpoint", default=None, help="Explicit evaluation checkpoint")
-    parser.add_argument("--diagnostics", action="store_true", help="Print OT inference diagnostics")
     parser.add_argument(
         "--device", choices=["auto", "cpu", "cuda", "mps"], default="auto",
         help="Compute device; auto prefers CUDA, then Apple MPS, then CPU",
