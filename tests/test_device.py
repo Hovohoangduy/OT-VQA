@@ -22,6 +22,9 @@ class DeviceSelectionTests(unittest.TestCase):
         self.assertEqual(args.weight_decay, 0.05)
         self.assertEqual(args.gradient_clip, 1.0)
         self.assertTrue(args.freeze_answer_embeddings)
+        self.assertIsNone(args.freeze_text_encoder)
+        self.assertTrue(get_args(["--freeze_text_encoder"]).freeze_text_encoder)
+        self.assertFalse(get_args(["--no-freeze_text_encoder"]).freeze_text_encoder)
         self.assertFalse(
             get_args(["--no-freeze_answer_embeddings"]).freeze_answer_embeddings
         )

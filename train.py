@@ -9,7 +9,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import torch
 from torch import nn, optim
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 from transformers import get_linear_schedule_with_warmup
 
 from configs.arg_parser import get_args
@@ -115,6 +115,8 @@ def main():
         raise ValueError("weight_decay cannot be negative")
     if args.gradient_clip < 0:
         raise ValueError("gradient_clip cannot be negative")
+    if args.train_eval_samples < 0:
+        raise ValueError("train_eval_samples cannot be negative")
     seed_everything(args.seed)
     device = resolve_device(args.device)
     print(f"Training on device: {device}")
@@ -128,6 +130,9 @@ def main():
         fusion = stored_config.get("fusion", "san")
         if args.fusion is not None and args.fusion != fusion:
             raise ValueError("--fusion does not match the resume checkpoint")
+        if (args.freeze_text_encoder is not None and
+                args.freeze_text_encoder != stored_config.get("freeze_text_encoder", False)):
+            raise ValueError("--freeze_text_encoder does not match the resume checkpoint")
         ot_defaults = {"ot_epsilon": 0.05, "ot_iterations": 20,
                        "ot_dustbin_mass": 0.2, "ot_dustbin_cost": 1.0}
         for name, default in ot_defaults.items():
@@ -146,6 +151,7 @@ def main():
                          ffn_hidden=args.ffn_hidden, num_layers=args.num_layers,
                          num_heads=args.num_heads, drop_prob=args.drop_prob,
                          freeze_answer_embeddings=args.freeze_answer_embeddings,
+                         freeze_text_encoder=bool(args.freeze_text_encoder),
                          fusion=args.fusion or "ot",
                          ot_epsilon=args.ot_epsilon if args.ot_epsilon is not None else 0.05,
                          ot_iterations=args.ot_iterations if args.ot_iterations is not None else 20,
@@ -158,6 +164,16 @@ def main():
     dev_loader = _make_loader(args, "dev", False, text_model, image_model)
     if not len(train_loader) or not len(dev_loader):
         raise ValueError("Training and development datasets must be non-empty")
+    train_eval_loader = None
+    if args.train_eval_samples:
+        sample_count = min(args.train_eval_samples, len(train_loader.dataset))
+        generator = torch.Generator().manual_seed(args.seed)
+        indices = torch.randperm(len(train_loader.dataset), generator=generator)[:sample_count].tolist()
+        train_eval_loader = DataLoader(
+            Subset(train_loader.dataset, indices), batch_size=args.batch_size,
+            shuffle=False, generator=torch.Generator().manual_seed(args.seed),
+        )
+        print(f"Generated training evaluation: {sample_count} fixed examples")
     train_criterion = nn.CrossEntropyLoss(
         ignore_index=model.pad_token_id, label_smoothing=args.label_smoothing
     )
@@ -226,6 +242,9 @@ def main():
             gradient_clip=args.gradient_clip or None,
         )
         global_step += len(train_loader)
+        train_generated = (evaluation(
+            model, train_eval_loader, validation_criterion, device=device,
+        ) if train_eval_loader is not None else None)
         validation = evaluation(
             model, dev_loader, validation_criterion, device=device,
         )
@@ -253,12 +272,20 @@ def main():
                "learning_rate": scheduler.get_last_lr()[0],
                "improved": improved,
                "epochs_without_improvement": epochs_without_improvement}
+        if train_generated is not None:
+            row.update(train_generated_em=train_generated[1],
+                       train_generated_f1=train_generated[2],
+                       train_eval_examples=len(train_eval_loader.dataset))
         history.append(row)
         with metrics_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(row) + "\n")
         print(f"Validation: loss={val_loss:.4f}, generated EM={val_em:.4f}, "
               f"F1={val_f1:.4f}, best epoch={best_metric['epoch']}, "
               f"patience={epochs_without_improvement}/{args.early_stopping_patience or 'off'}")
+        if train_generated is not None:
+            print(f"Train generated ({len(train_eval_loader.dataset)} fixed examples): "
+                  f"EM={train_generated[1]:.4f}, F1={train_generated[2]:.4f}; "
+                  f"generated F1 gap={train_generated[2] - val_f1:.4f}")
         if (args.early_stopping_patience and
                 epochs_without_improvement >= args.early_stopping_patience):
             print(f"Early stopping at epoch {epoch + 1}; best checkpoint is epoch "
@@ -268,6 +295,10 @@ def main():
     plt.figure(figsize=(10, 6))
     plt.plot([row["epoch"] for row in history], [row["val_em"] for row in history], label="Generated EM")
     plt.plot([row["epoch"] for row in history], [row["val_f1"] for row in history], label="Generated F1")
+    if train_eval_loader is not None:
+        plt.plot([row["epoch"] for row in history],
+                 [row["train_generated_f1"] for row in history],
+                 label="Train generated F1 (fixed subset)")
     plt.xlabel("Epoch")
     plt.ylabel("Score")
     plt.legend()

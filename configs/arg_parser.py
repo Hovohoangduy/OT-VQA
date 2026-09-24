@@ -60,6 +60,16 @@ def get_args(argv=None):
         default=True,
         help="Freeze pretrained answer-token embeddings (default: enabled)",
     )
+    parser.add_argument(
+        "--freeze_text_encoder",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Freeze pretrained BERT question encoder (new runs default to trainable)",
+    )
+    parser.add_argument(
+        "--train_eval_samples", type=int, default=256,
+        help="Fixed training examples scored by free generation after each epoch; 0 disables",
+    )
     parser.add_argument("--checkpoint", default=None, help="Explicit evaluation checkpoint")
     parser.add_argument("--predictions_csv", default=None,
                         help="Evaluation output with each generated answer")
