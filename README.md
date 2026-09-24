@@ -31,6 +31,57 @@ reuse completed pages. If rate limiting persists, set `HF_TOKEN` in your shell
 and try `--metadata-workers 1 --request-interval 2`. `--workers` controls image
 downloads separately.
 
+To download 5,000 PlantExpertVQA training question–answer pairs and 1,000
+validation pairs, with their images:
+
+```bash
+python -m utils.download_plantexpert
+```
+
+The output is `data/plantexpert_dataset/train.csv`, `val.csv`, and `images/`.
+The script streams the source train and validation CSVs once and samples
+reproducible groups of question–answer rows (`--seed 42` by default). It does
+not use the rate-limited dataset viewer API. The image downloader reads only
+the required files from the source ZIP archives. You can change the counts
+with `--train-pairs` and `--val-pairs`. Selected rows are cached in
+`<output>/.selection_cache`, and rerunning with the same output reuses them
+and any downloaded images. Set `HF_TOKEN` in your shell if you have a Hugging
+Face token.
+For training, pass `--train_csv_path data/plantexpert_dataset/train.csv`,
+`--dev_csv_path data/plantexpert_dataset/val.csv`, and
+`--img_path data/plantexpert_dataset/images` to `train.py`.
+
+To train the OT model on this PlantExpertVQA subset:
+
+```bash
+python train.py --fusion ot --device auto --batch_size 2 \
+  --max_answer_tokens 128 \
+  --train_csv_path data/plantexpert_dataset/train.csv \
+  --dev_csv_path data/plantexpert_dataset/val.csv \
+  --img_path data/plantexpert_dataset/images \
+  --model_path data/plantexpert_model
+```
+
+The run uses the training default of 10 epochs. The 128-token answer limit
+covers all answers in the downloaded subset; the model's 38-token default
+would truncate many of them. It saves
+`best.pt`, `last.pt`, and `metrics.jsonl` in `data/plantexpert_model`. Use
+`--resume data/plantexpert_model/last.pt` to continue an interrupted run, with
+`--epochs` set to the desired total epoch count. `--device auto` chooses CUDA,
+then Apple MPS, then CPU. To choose explicitly, replace it with `--device cpu`
+or `--device cuda` (NVIDIA GPU), or `--device mps` (Apple GPU). The current
+`ot-vqa` environment reports CPU only.
+
+After training, evaluate the PlantExpert validation split with:
+
+```bash
+python test.py --checkpoint data/plantexpert_model/best.pt --split dev \
+  --dev_csv_path data/plantexpert_dataset/val.csv \
+  --img_path data/plantexpert_dataset/images \
+  --predictions_csv data/plantexpert_model/val_predictions.csv \
+  --report_json data/plantexpert_model/val_report.json
+```
+
 ## Train
 
 For NVIDIA GPU training on Windows, install a CUDA-enabled `torch` and matching
@@ -55,7 +106,7 @@ stops with an error instead of training on CPU. Reduce `--batch_size` from its
 default of 4 if the GPU runs out of memory. `--device auto` also uses CUDA when
 available, but can fall back to another device.
 
-Training writes `last.pt`, the best generated-F1 checkpoint as `best.pt`, a JSONL
+Training writes `last.pt`, the lowest-validation-loss checkpoint as `best.pt`, a JSONL
 metric history, an evaluation plot, and `run_config.json` with dataset hashes.
 Resume with `--resume path/to/last.pt`.
 New runs default to OT. For a matched SAN baseline, run the same command with
@@ -72,8 +123,20 @@ python test.py --checkpoint data/gqa_model/best.pt --split dev \
   --report_json data/gqa_model/dev_report.json
 ```
 
-Evaluation reports generated exact match, token F1, examples per second, and
-peak CUDA memory. If your CSV has a `question_type` column, the prediction export
+Evaluation reports the six PlantExpertVQA paper metrics: case-insensitive exact
+match, SQuAD-style token F1, BLEU-1, BLEU-2, ROUGE-L F1, and BERTScore-F1.
+Scores are fractions; baseline-rescaled BERTScore can be negative. BLEU uses
+unsmoothed per-answer modified precision and a brevity penalty. The default
+BERTScore setup is `bert-base-uncased`, English baseline rescaling, and CPU;
+change it with `--bertscore_model`, `--no-bertscore_rescale`, or
+`--bertscore_device`. The evaluation report records the model hash. The paper
+does not define empty-answer scoring; this implementation assigns BERTScore 1
+when both answers are empty and 0 when only one is empty. The paper does not
+specify every tokenizer and BERTScore setting, so these scores should
+not be treated as numerically identical to its published results. The local
+5,000/1,000 train/validation subset also differs from the paper's full test
+set. Throughput and peak CUDA memory describe VQA generation and loss only.
+If your CSV has a `question_type` column, the prediction export
 includes it. After evaluating SAN and OT on the *same* held-out examples, compare
 their prediction files with paired bootstrap intervals:
 

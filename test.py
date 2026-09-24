@@ -14,16 +14,17 @@ from configs.config import Config
 from utils.checkpoint import load_model
 from utils.data_processing import load_dataframe
 from utils.device import resolve_device
-from utils.metrics import compute_em_and_f1
+from utils.metrics import PAPER_METRICS, build_bertscore_scorer, mean_scores, score_pairs
 from utils.vqa_dataset import VQADataset, resolve_image_root
 
 
 def evaluation(model, test_loader, criterion, vocab_swap=None, device=None,
-               measure_performance=False, predictions=None):
+               measure_performance=False, predictions=None, bert_scorer=None):
     model.eval()
     device = device or next(model.parameters()).device
-    total_loss = total_em = total_f1 = 0.0
+    total_loss = 0.0
     examples = tokens = 0
+    references, generated, annotations, question_texts = [], [], [], []
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats(device)
         torch.cuda.synchronize(device)
@@ -38,39 +39,43 @@ def evaluation(model, test_loader, criterion, vocab_swap=None, device=None,
             total_loss += loss.item() * count_tokens
             tokens += count_tokens
             hypotheses = model.answers_from_ids(ids)
-            em, f1 = compute_em_and_f1(answers, hypotheses)
+            references.extend(answers)
+            generated.extend(hypotheses)
             if predictions is not None:
                 annotation_values = (anno_ids.tolist() if torch.is_tensor(anno_ids)
                                      else anno_ids)
-                for annotation, question, reference, hypothesis in zip(
-                        annotation_values, questions, answers, hypotheses):
-                    row_em, row_f1 = compute_em_and_f1([reference], [hypothesis])
-                    predictions.append({
-                        "anno_id": str(annotation), "question": question,
-                        "reference": reference, "prediction": hypothesis,
-                        "em": row_em, "f1": row_f1,
-                    })
+                annotations.extend(annotation_values)
+                question_texts.extend(questions)
             count = len(answers)
             examples += count
-            total_em += em * count
-            total_f1 += f1 * count
     if not examples:
         raise ValueError("Evaluation dataset is empty")
     if device.type == "cuda":
         torch.cuda.synchronize(device)
-    elapsed = perf_counter() - started
-    scores = (total_loss / max(tokens, 1), total_em / examples, total_f1 / examples)
-    if not measure_performance:
-        return scores
-    performance = {
-        "examples": examples,
-        "elapsed_seconds": elapsed,
-        "examples_per_second": examples / elapsed,
-        "milliseconds_per_example": 1000 * elapsed / examples,
-        "peak_cuda_bytes": (torch.cuda.max_memory_allocated(device)
-                            if device.type == "cuda" else None),
-    }
-    return (*scores, performance)
+    model_elapsed = perf_counter() - started
+    if bert_scorer is None:
+        bert_scorer = build_bertscore_scorer()
+    rows = score_pairs(references, generated, bert_scorer)
+    scores = mean_scores(rows)
+    if predictions is not None:
+        for annotation, question, reference, hypothesis, row in zip(
+                annotations, question_texts, references, generated, rows):
+            predictions.append({
+                "anno_id": str(annotation), "question": question,
+                "reference": reference, "prediction": hypothesis, **row,
+            })
+    result = {"loss": total_loss / max(tokens, 1), "metrics": scores,
+              "examples": examples}
+    if measure_performance:
+        result["performance"] = {
+            "examples": examples,
+            "elapsed_seconds": model_elapsed,
+            "examples_per_second": examples / model_elapsed,
+            "milliseconds_per_example": 1000 * model_elapsed / examples,
+            "peak_cuda_bytes": (torch.cuda.max_memory_allocated(device)
+                                if device.type == "cuda" else None),
+        }
+    return result
 
 
 def main():
@@ -89,11 +94,18 @@ def main():
     dataset = VQADataset(frame, transform=Config.transforms, img_path=split_image_path)
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False)
     predictions = [] if args.predictions_csv else None
+    scorer = build_bertscore_scorer(
+        model_type=args.bertscore_model,
+        device=str(resolve_device(args.bertscore_device)),
+        batch_size=args.bertscore_batch_size,
+        rescale_with_baseline=args.bertscore_rescale,
+    )
     result = evaluation(model, loader, nn.CrossEntropyLoss(ignore_index=model.pad_token_id),
-                        device=device, measure_performance=True, predictions=predictions)
-    loss, em, f1 = result[:3]
-    print(f"{args.split} loss: {loss:.4f}, generated EM: {em:.4f}, F1: {f1:.4f}")
-    performance = result[3]
+                        device=device, measure_performance=True, predictions=predictions,
+                        bert_scorer=scorer)
+    print(f"{args.split} loss: {result['loss']:.4f}, " + ", ".join(
+        f"{name}={result['metrics'][name]:.4f}" for name in PAPER_METRICS))
+    performance = result["performance"]
     print(f"Throughput: {performance['examples_per_second']:.2f} examples/s; "
           f"latency: {performance['milliseconds_per_example']:.1f} ms/example; "
           f"peak CUDA memory: {performance['peak_cuda_bytes']}")
@@ -110,7 +122,10 @@ def main():
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(json.dumps({
             "checkpoint": str(checkpoint), "fusion": model.fusion, "split": args.split,
-            "loss": loss, "generated_em": em, "generated_f1": f1,
+            "loss": result["loss"], "generated_metrics": result["metrics"],
+            "bertscore": {"model": args.bertscore_model, "model_hash": scorer.hash,
+                          "rescale_with_baseline": args.bertscore_rescale,
+                          "device": str(resolve_device(args.bertscore_device))},
             "performance": performance,
         }, indent=2) + "\n", encoding="utf-8")
         print(f"Wrote evaluation report to {output}")

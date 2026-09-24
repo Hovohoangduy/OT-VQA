@@ -9,10 +9,12 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from utils.metrics import PAPER_METRICS
+
 
 def _read(path):
     frame = pd.read_csv(path, keep_default_na=False, dtype={"anno_id": str})
-    required = {"anno_id", "question", "reference", "em", "f1"}
+    required = {"anno_id", "question", "reference", *PAPER_METRICS}
     missing = required.difference(frame.columns)
     if missing:
         raise ValueError(f"{path} is missing columns: {sorted(missing)}")
@@ -27,7 +29,7 @@ def compare_runs(baseline_paths, ot_paths, bootstrap_samples=5000, seed=1105):
     if bootstrap_samples < 1:
         raise ValueError("bootstrap_samples must be positive")
     per_seed = []
-    example_differences = {"em": [], "f1": []}
+    example_differences = {metric: [] for metric in PAPER_METRICS}
     reference_index = reference_questions = reference_answers = None
     question_types = None
     for baseline_path, ot_path in zip(baseline_paths, ot_paths):
@@ -50,7 +52,7 @@ def compare_runs(baseline_paths, ot_paths, bootstrap_samples=5000, seed=1105):
                                            not question_types.equals(baseline["question_type"])):
             raise ValueError("Question types differ across seed files")
         row = {"baseline": str(baseline_path), "ot": str(ot_path)}
-        for metric in ("em", "f1"):
+        for metric in PAPER_METRICS:
             base = baseline[metric].to_numpy(dtype=float)
             candidate = ot[metric].to_numpy(dtype=float)
             row[f"san_{metric}"] = float(base.mean())
@@ -63,7 +65,7 @@ def compare_runs(baseline_paths, ot_paths, bootstrap_samples=5000, seed=1105):
     if not count:
         raise ValueError("Prediction files are empty")
     summary = {"examples": count, "seeds": len(per_seed), "per_seed": per_seed}
-    for metric in ("em", "f1"):
+    for metric in PAPER_METRICS:
         differences = np.mean(np.stack(example_differences[metric]), axis=0)
         samples = np.empty(bootstrap_samples)
         for sample_index in range(bootstrap_samples):
@@ -76,12 +78,14 @@ def compare_runs(baseline_paths, ot_paths, bootstrap_samples=5000, seed=1105):
             "paired_bootstrap_95_ci": [float(value) for value in np.quantile(samples, [0.025, 0.975])],
         }
     if question_types is not None:
-        em_differences = np.mean(np.stack(example_differences["em"]), axis=0)
-        summary["question_type_em_delta"] = {
-            str(kind): {"examples": int((question_types.to_numpy() == kind).sum()),
-                        "delta": float(em_differences[question_types.to_numpy() == kind].mean())}
-            for kind in sorted(question_types.unique())
-        }
+        summary["question_type_deltas"] = {}
+        for kind in sorted(question_types.unique()):
+            selected = question_types.to_numpy() == kind
+            summary["question_type_deltas"][str(kind)] = {
+                "examples": int(selected.sum()),
+                **{metric: float(np.mean(np.stack(example_differences[metric]), axis=0)[selected].mean())
+                   for metric in PAPER_METRICS},
+            }
     return summary
 
 

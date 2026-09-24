@@ -37,13 +37,15 @@ def get_args(argv=None):
     )
     parser.add_argument(
         "--early_stopping_patience", type=int, default=8,
-        help="Stop after this many epochs without better generated validation F1; 0 disables",
+        help="Stop after this many epochs without lower validation loss; 0 disables",
     )
     parser.add_argument("--d_model", type=int, default=384)
     parser.add_argument("--ffn_hidden", type=int, default=1024)
     parser.add_argument("--num_layers", type=int, default=2)
     parser.add_argument("--num_heads", type=int, default=4)
     parser.add_argument("--drop_prob", type=float, default=0.2)
+    parser.add_argument("--max_answer_tokens", type=int, default=None,
+                        help="Answer length including start/end tokens; default 38, use 128 for PlantExpertVQA")
     parser.add_argument("--fusion", choices=["san", "ot"], default=None,
                         help="Fusion architecture; new runs default to ot, resume uses checkpoint value")
     parser.add_argument("--ot_epsilon", type=float, default=None,
@@ -65,6 +67,13 @@ def get_args(argv=None):
                         help="Evaluation output with each generated answer")
     parser.add_argument("--report_json", default=None,
                         help="Evaluation output with accuracy and runtime summary")
+    parser.add_argument("--bertscore_model", default="bert-base-uncased",
+                        help="BERTScore encoder; default uses the English baseline")
+    parser.add_argument("--bertscore_device", choices=["auto", "cpu", "cuda", "mps"],
+                        default="cpu", help="Device for BERTScore, separate from VQA model")
+    parser.add_argument("--bertscore_batch_size", type=int, default=16)
+    parser.add_argument("--bertscore_rescale", action=argparse.BooleanOptionalAction,
+                        default=True, help="Rescale BERTScore with its English baseline")
     parser.add_argument(
         "--device", choices=["auto", "cpu", "cuda", "mps"], default="auto",
         help="Compute device; auto prefers CUDA, then Apple MPS, then CPU",

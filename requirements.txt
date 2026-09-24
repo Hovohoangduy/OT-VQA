@@ -2,6 +2,7 @@ numpy
 pandas
 matplotlib
 rouge-score
+bert-score==0.3.13
 pycocoevalcap
 pillow
 torch

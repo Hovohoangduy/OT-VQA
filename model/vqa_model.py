@@ -19,15 +19,19 @@ class VQAModel(nn.Module):
                  ffn_hidden=2048, drop_prob=0.1, num_layers=4, num_att_layers=2,
                  mode='train', text_model=Config.text_model, image_model=Config.image_model,
                  freeze_answer_embeddings=False, fusion='san', ot_epsilon=0.05,
-                 ot_iterations=20, ot_dustbin_mass=0.2, ot_dustbin_cost=1.0):
+                 ot_iterations=20, ot_dustbin_mass=0.2, ot_dustbin_cost=1.0,
+                 max_answer_tokens=Config.MAX_LEN_ANS):
         super().__init__()
         if output_size != d_model or num_att_layers < 1:
             raise ValueError('output_size must equal d_model and at least one attention layer is needed')
         if fusion not in {'san', 'ot'}:
             raise ValueError('fusion must be san or ot')
+        if max_answer_tokens < 2:
+            raise ValueError('max_answer_tokens must be at least 2')
         validate_english_text_model(text_model)
         self.mode = mode
         self.fusion = fusion
+        self.max_answer_tokens = max_answer_tokens
         self.text_model_name = str(text_model)
         self.image_model_name = str(image_model)
         self.model_config = dict(
@@ -37,6 +41,7 @@ class VQAModel(nn.Module):
             freeze_answer_embeddings=freeze_answer_embeddings,
             fusion=fusion, ot_epsilon=ot_epsilon, ot_iterations=ot_iterations,
             ot_dustbin_mass=ot_dustbin_mass, ot_dustbin_cost=ot_dustbin_cost,
+            max_answer_tokens=max_answer_tokens,
         )
         self.image_model = ImageEmbedding(image_model)
         self.question_encoder = QuestionEmbedding(output_size=output_size, model_name=text_model,
@@ -108,9 +113,10 @@ class VQAModel(nn.Module):
         return self.mlp(self.decoder(memory, target, blocked, cross_mask))
 
     def forward(self, images, questions, answers=None, anno_ids=None, mask=True,
-                mode='train', max_len=Config.MAX_LEN_ANS):
+                mode='train', max_len=None):
         if mode not in {'train', 'eval', 'test', 'infer', 'generate'}:
             raise ValueError(f'Unknown mode: {mode}')
+        max_len = self.max_answer_tokens if max_len is None else max_len
         if mode in {'test', 'infer', 'generate'} or answers is None:
             return self.generate(images, questions, anno_ids, max_len)
         memory, memory_blocked = self.encode(images, questions, anno_ids)
@@ -120,8 +126,9 @@ class VQAModel(nn.Module):
 
     @torch.no_grad()
     def evaluate_batch(self, images, questions, answers, anno_ids=None,
-                       max_len=Config.MAX_LEN_ANS):
+                       max_len=None):
         """Compute teacher-forced logits and generated answers from one encoding."""
+        max_len = self.max_answer_tokens if max_len is None else max_len
         memory, memory_blocked = self.encode(images, questions, anno_ids)
         ids = self.answer_embedding.tokenize(answers, max_len)
         logits = self.decode(ids[:, :-1], memory, memory_blocked=memory_blocked)
@@ -143,9 +150,10 @@ class VQAModel(nn.Module):
         return ids[:, 1:]
 
     @torch.no_grad()
-    def generate(self, images, questions, anno_ids=None, max_len=Config.MAX_LEN_ANS):
-        if not 2 <= max_len <= Config.MAX_LEN_ANS:
-            raise ValueError(f'max_len must be between 2 and {Config.MAX_LEN_ANS}')
+    def generate(self, images, questions, anno_ids=None, max_len=None):
+        max_len = self.max_answer_tokens if max_len is None else max_len
+        if not 2 <= max_len <= self.max_answer_tokens:
+            raise ValueError(f'max_len must be between 2 and {self.max_answer_tokens}')
         was_training = self.training
         self.eval()
         try:

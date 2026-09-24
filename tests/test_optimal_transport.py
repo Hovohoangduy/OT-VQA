@@ -173,7 +173,14 @@ class OTVQATests(unittest.TestCase):
             "--batch_size", "1", "--epochs", "1", "--fusion", "ot",
             "--device", "cpu",
         ])
-        with patch.object(training_script, "get_args", return_value=args):
+        class ConstantScorer:
+            hash = "test-scorer"
+
+            def score(self, candidates, references):
+                return None, None, torch.ones(len(candidates))
+
+        with patch.object(training_script, "get_args", return_value=args), \
+             patch.object(training_script, "build_bertscore_scorer", return_value=ConstantScorer()):
             training_script.main()
         self.assertTrue((output / "run_config.json").is_file())
         self.assertTrue((output / "best.pt").is_file())

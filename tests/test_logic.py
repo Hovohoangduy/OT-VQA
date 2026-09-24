@@ -21,11 +21,12 @@ from model.sans import StackAttention
 from utils.data_processing import process_dataframe
 from utils.data_processing import preprocess_text
 from utils.vqa_dataset import VQADataset, resolve_image_root
-from utils.metrics import compute_em_and_f1
+from utils.metrics import PAPER_METRICS, compute_em_and_f1, lexical_scores, score_pairs, mean_scores
 from utils.json_to_csv import convert_json_folder
 from utils.checkpoint import load_model, save_checkpoint
 from train import train
 from test import evaluation
+from diagnose_training import _history_report
 
 
 class ModelLogicTests(unittest.TestCase):
@@ -149,16 +150,23 @@ class ModelLogicTests(unittest.TestCase):
         self.assertEqual(len(losses), 2)
         self.assertIn('Epoch 5/50:', output.getvalue())
         predictions = []
+        class ConstantScorer:
+            def score(self, candidates, references):
+                return None, None, torch.ones(len(candidates))
         with patch.object(model, '_generate_from_memory',
                           side_effect=lambda memory, blocked, max_len: torch.tensor([[5, 3]] * memory.size(0))) as generation, \
              patch.object(model, 'encode', wraps=model.encode) as encoding:
-            loss, em, f1 = evaluation(model, loader, criterion, predictions=predictions)
+            result = evaluation(model, loader, criterion, predictions=predictions,
+                                bert_scorer=ConstantScorer())
         self.assertEqual(generation.call_count, 2)
         self.assertEqual(encoding.call_count, 2)
         self.assertEqual(len(predictions), 3)
         self.assertEqual(predictions[0]['prediction'], 'red')
-        self.assertEqual((em, f1), (1.0, 1.0))
-        self.assertGreater(loss, 0)
+        self.assertEqual(result['metrics']['em'], 1.0)
+        self.assertEqual(result['metrics']['token_f1'], 1.0)
+        self.assertEqual(result['metrics']['bertscore_f1'], 1.0)
+        self.assertEqual(set(PAPER_METRICS), set(result['metrics']))
+        self.assertGreater(result['loss'], 0)
 
     def test_checkpoint_round_trip_and_legacy_rejection(self):
         model = self.make_model().eval()
@@ -182,6 +190,21 @@ class ModelLogicTests(unittest.TestCase):
         torch.save(model.state_dict(), path)
         with self.assertRaisesRegex(ValueError, 'Retrain'):
             load_model(path, torch.device('cpu'))
+
+    def test_answer_length_is_saved_with_checkpoint(self):
+        model = VQAModel(
+            text_model=str(self.text), image_model=str(self.visual),
+            output_size=16, d_model=16, ffn_hidden=32, num_layers=1,
+            max_answer_tokens=10,
+        )
+        logits, targets = model(torch.rand(1, 3, 32, 32), ['what color ?'], ['red'])
+        self.assertEqual(logits.shape, (1, 9, 12))
+        self.assertEqual(targets.shape, (1, 9))
+        path = self.root / 'long-answer-checkpoint.pt'
+        save_checkpoint(path, model=model, text_model=str(self.text), image_model=str(self.visual))
+        restored = load_model(path, torch.device('cpu'))
+        self.assertEqual(restored.max_answer_tokens, 10)
+        self.assertEqual(restored.model_config['max_answer_tokens'], 10)
 
     def test_answer_embeddings_can_be_frozen(self):
         model = VQAModel(
@@ -227,9 +250,39 @@ class DataLogicTests(unittest.TestCase):
         self.assertEqual(em, 0)
         self.assertAlmostEqual(f1, 2 / 3)
         self.assertEqual(compute_em_and_f1([''], ['']), (1.0, 1.0))
-        self.assertEqual(compute_em_and_f1(['Blue car'], ['blue   car']), (1.0, 1.0))
+        self.assertEqual(compute_em_and_f1(['Blue car'], ['blue   car']), (0.0, 1.0))
         with self.assertRaises(ValueError):
             compute_em_and_f1(['a'], [])
+
+    def test_paper_lexical_metrics_and_aggregation(self):
+        exact = lexical_scores('red leaf', 'red leaf')
+        self.assertEqual(exact, {'em': 1.0, 'token_f1': 1.0, 'bleu_1': 1.0,
+                                 'bleu_2': 1.0, 'rouge_l': 1.0})
+        changed = lexical_scores('red leaf', 'leaf red')
+        self.assertEqual(changed['em'], 0.0)
+        self.assertEqual(changed['token_f1'], 1.0)
+        self.assertEqual(changed['bleu_1'], 1.0)
+        self.assertEqual(changed['bleu_2'], 0.0)
+        self.assertEqual(changed['rouge_l'], 0.5)
+        class ConstantScorer:
+            def score(self, candidates, references):
+                self.candidates, self.references = candidates, references
+                return None, None, torch.tensor([0.8, 0.4])
+        scorer = ConstantScorer()
+        rows = score_pairs(['red leaf', 'red leaf'], ['red leaf', 'leaf red'], scorer)
+        self.assertEqual(scorer.candidates, ['red leaf', 'leaf red'])
+        self.assertAlmostEqual(mean_scores(rows)['bertscore_f1'], 0.6)
+        empty_rows = score_pairs(['', 'leaf', ''], ['', '', 'leaf'], scorer)
+        self.assertEqual([row['bertscore_f1'] for row in empty_rows], [1.0, 0.0, 0.0])
+
+    def test_diagnostics_select_lowest_validation_loss(self):
+        rows = [
+            {'epoch': 1, 'val_loss': 0.4, 'val_token_f1': 0.2, 'train_f1': 0.3},
+            {'epoch': 2, 'val_loss': 0.5, 'val_token_f1': 0.9, 'train_f1': 0.95},
+        ]
+        report = _history_report(rows)
+        self.assertEqual(report['best_epoch'], 1)
+        self.assertAlmostEqual(report['best_val_loss'], 0.4)
 
     def test_data_question_column_and_optional_annotations(self):
         frame = pd.DataFrame({'image': ['train/a.jpg'], 'question': [' what  color ? '], 'answer': ['red']})

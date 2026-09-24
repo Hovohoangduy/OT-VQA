@@ -13,7 +13,7 @@ MODEL_CONFIG_KEYS = {
     "vocab_size", "output_size", "d_model", "num_heads", "ffn_hidden",
     "drop_prob", "num_layers", "num_att_layers", "mode",
     "freeze_answer_embeddings", "fusion", "ot_epsilon", "ot_iterations",
-    "ot_dustbin_mass", "ot_dustbin_cost",
+    "ot_dustbin_mass", "ot_dustbin_cost", "max_answer_tokens",
 }
 
 
@@ -65,7 +65,7 @@ def checkpoint_payload(
         },
         "preprocessing": {
             "max_question_length": Config.MAX_LEN_QUES,
-            "max_answer_length": Config.MAX_LEN_ANS,
+            "max_answer_length": getattr(model, "max_answer_tokens", Config.MAX_LEN_ANS),
         },
         "optimizer_state_dict": optimizer.state_dict() if optimizer is not None else None,
         "scheduler_state_dict": scheduler.state_dict() if scheduler is not None else None,

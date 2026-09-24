@@ -13,7 +13,7 @@ from configs.config import Config
 from utils.checkpoint import load_model
 from utils.data_processing import load_dataframe
 from utils.device import resolve_device, seed_everything
-from utils.metrics import compute_em_and_f1, normalize_text
+from utils.metrics import PAPER_METRICS, compute_em_and_f1, normalize_text
 from utils.vqa_dataset import VQADataset
 
 
@@ -34,23 +34,25 @@ def _latest_run(path: Path) -> list[dict]:
 def _history_report(rows: list[dict]) -> dict:
     if not rows:
         return {}
-    best = max(rows, key=lambda row: (row["val_f1"], -row["val_loss"]))
+    best = min(rows, key=lambda row: row["val_loss"])
     last = rows[-1]
     return {
         "epochs_logged": len(rows),
         "best_epoch": best["epoch"],
-        "best_val_f1": best["val_f1"],
         "best_val_loss": best["val_loss"],
+        "best_generated_metrics": {name: best[f"val_{name}"] for name in PAPER_METRICS
+                                   if f"val_{name}" in best},
         "last_epoch": last["epoch"],
         "last_train_f1": last["train_f1"],
-        "last_val_f1": last["val_f1"],
         "last_val_loss": last["val_loss"],
-        "train_validation_f1_gap": last["train_f1"] - last["val_f1"],
+        "last_generated_metrics": {name: last[f"val_{name}"] for name in PAPER_METRICS
+                                   if f"val_{name}" in last},
+        "train_validation_f1_gap": (last["train_f1"] - last.get("val_token_f1", last.get("val_f1", 0))),
         "val_loss_increase_after_best": last["val_loss"] - best["val_loss"],
         "overfitting_detected": (
             last["epoch"] > best["epoch"] and
             last["train_f1"] > best.get("train_f1", 0) and
-            last["val_f1"] <= best["val_f1"]
+            last["val_loss"] >= best["val_loss"]
         ),
     }
 

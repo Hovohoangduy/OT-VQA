@@ -1,4 +1,4 @@
-"""Train SAN or OT VQA and select checkpoints by generated F1."""
+"""Train SAN or OT VQA and select checkpoints by validation loss."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from model.vqa_model import VQAModel
 from utils.checkpoint import MODEL_CONFIG_KEYS, read_checkpoint, restore_training_state, save_checkpoint
 from utils.data_processing import load_dataframe
 from utils.device import resolve_device, seed_everything
-from utils.metrics import compute_em_and_f1
+from utils.metrics import PAPER_METRICS, build_bertscore_scorer, compute_em_and_f1
 from utils.vqa_dataset import VQADataset, resolve_image_root
 
 
@@ -101,6 +101,8 @@ def main():
     args = get_args()
     if args.batch_size < 1 or args.epochs < 1:
         raise ValueError("batch_size and epochs must be positive")
+    if args.max_answer_tokens is not None and args.max_answer_tokens < 2:
+        raise ValueError("max_answer_tokens must be at least 2")
     if not 0.0 <= args.label_smoothing < 1.0:
         raise ValueError("label_smoothing must be in [0, 1)")
     if args.early_stopping_patience < 0:
@@ -115,6 +117,8 @@ def main():
         raise ValueError("weight_decay cannot be negative")
     if args.gradient_clip < 0:
         raise ValueError("gradient_clip cannot be negative")
+    if args.bertscore_batch_size < 1:
+        raise ValueError("bertscore_batch_size must be positive")
     seed_everything(args.seed)
     device = resolve_device(args.device)
     print(f"Training on device: {device}")
@@ -125,6 +129,9 @@ def main():
             raise ValueError("Training can resume only from a version-3/4 checkpoint")
         text_model, image_model = resume["text_model"], resume["image_model"]
         stored_config = dict(resume["model_config"])
+        stored_answer_length = stored_config.get("max_answer_tokens", Config.MAX_LEN_ANS)
+        if args.max_answer_tokens is not None and args.max_answer_tokens != stored_answer_length:
+            raise ValueError("--max_answer_tokens does not match the resume checkpoint")
         fusion = stored_config.get("fusion", "san")
         if args.fusion is not None and args.fusion != fusion:
             raise ValueError("--fusion does not match the resume checkpoint")
@@ -152,7 +159,9 @@ def main():
                          ot_dustbin_mass=(args.ot_dustbin_mass if args.ot_dustbin_mass is not None
                                           else 0.2),
                          ot_dustbin_cost=(args.ot_dustbin_cost if args.ot_dustbin_cost is not None
-                                          else 1.0)).to(device)
+                                          else 1.0),
+                         max_answer_tokens=(args.max_answer_tokens if args.max_answer_tokens is not None
+                                            else Config.MAX_LEN_ANS)).to(device)
 
     train_loader = _make_loader(args, "train", True, text_model, image_model)
     dev_loader = _make_loader(args, "dev", False, text_model, image_model)
@@ -162,6 +171,12 @@ def main():
         ignore_index=model.pad_token_id, label_smoothing=args.label_smoothing
     )
     validation_criterion = nn.CrossEntropyLoss(ignore_index=model.pad_token_id)
+    bert_scorer = build_bertscore_scorer(
+        model_type=args.bertscore_model,
+        device=str(resolve_device(args.bertscore_device)),
+        batch_size=args.bertscore_batch_size,
+        rescale_with_baseline=args.bertscore_rescale,
+    )
     trainable_parameters = [parameter for parameter in model.parameters()
                             if parameter.requires_grad]
     optimizer = optim.AdamW(
@@ -195,6 +210,7 @@ def main():
             "train_csv_sha256": _csv_digest(args.train_csv_path),
             "dev_csv_sha256": _csv_digest(args.dev_csv_path),
             "torch_version": torch.__version__,
+            "bertscore_hash": bert_scorer.hash,
         }
         (destination / "run_config.json").write_text(
             json.dumps(manifest, indent=2, default=str) + "\n", encoding="utf-8"
@@ -211,8 +227,7 @@ def main():
                     old_row = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if (old_row.get("val_f1") == best_metric.get("f1") and
-                        old_row.get("val_loss") == best_metric.get("loss")):
+                if old_row.get("val_loss") == best_metric.get("loss"):
                     best_metric["epoch"] = old_row.get("epoch", "unknown")
     if resume is None:
         metrics_path.write_text("", encoding="utf-8")
@@ -228,11 +243,11 @@ def main():
         global_step += len(train_loader)
         validation = evaluation(
             model, dev_loader, validation_criterion, device=device,
+            bert_scorer=bert_scorer,
         )
-        val_loss, val_em, val_f1 = validation[:3]
-        current = {"f1": val_f1, "loss": val_loss, "epoch": epoch + 1}
-        improved = (best_metric is None or val_f1 > best_metric["f1"] or
-                    (val_f1 == best_metric["f1"] and val_loss < best_metric["loss"]))
+        val_loss, val_scores = validation["loss"], validation["metrics"]
+        current = {"loss": val_loss, "epoch": epoch + 1}
+        improved = best_metric is None or val_loss < best_metric["loss"]
         if improved:
             best_metric = current
             epochs_without_improvement = 0
@@ -249,25 +264,28 @@ def main():
             save_checkpoint(destination / "best.pt", **checkpoint_args)
         row = {"epoch": epoch + 1, "train_loss": sum(losses) / len(losses),
                "train_em": train_em[-1], "train_f1": train_f1[-1],
-               "val_loss": val_loss, "val_em": val_em, "val_f1": val_f1,
+               "val_loss": val_loss,
+               **{f"val_{name}": val_scores[name] for name in PAPER_METRICS},
                "learning_rate": scheduler.get_last_lr()[0],
                "improved": improved,
                "epochs_without_improvement": epochs_without_improvement}
         history.append(row)
         with metrics_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(row) + "\n")
-        print(f"Validation: loss={val_loss:.4f}, generated EM={val_em:.4f}, "
-              f"F1={val_f1:.4f}, best epoch={best_metric['epoch']}, "
+        print(f"Validation: loss={val_loss:.4f}, " + ", ".join(
+              f"{name}={val_scores[name]:.4f}" for name in PAPER_METRICS) +
+              f", best epoch={best_metric['epoch']}, "
               f"patience={epochs_without_improvement}/{args.early_stopping_patience or 'off'}")
         if (args.early_stopping_patience and
                 epochs_without_improvement >= args.early_stopping_patience):
             print(f"Early stopping at epoch {epoch + 1}; best checkpoint is epoch "
-                  f"{best_metric['epoch']} with generated F1={best_metric['f1']:.4f}.")
+                  f"{best_metric['epoch']} with validation loss={best_metric['loss']:.4f}.")
             break
 
     plt.figure(figsize=(10, 6))
-    plt.plot([row["epoch"] for row in history], [row["val_em"] for row in history], label="Generated EM")
-    plt.plot([row["epoch"] for row in history], [row["val_f1"] for row in history], label="Generated F1")
+    for metric in PAPER_METRICS:
+        plt.plot([row["epoch"] for row in history],
+                 [row[f"val_{metric}"] for row in history], label=metric)
     plt.xlabel("Epoch")
     plt.ylabel("Score")
     plt.legend()
