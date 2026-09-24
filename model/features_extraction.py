@@ -26,20 +26,37 @@ class ImageEmbedding(nn.Module):
         return self
 
     def forward(self, image, image_ids=None):
-        # Dataset tensors are already in [0, 1]. Rescaling again divides by 255.
-        inputs = self.process(images=image.detach().cpu(), do_rescale=False, return_tensors="pt")
         device = next(self.model.parameters()).device
+        expected_size = self.model.config.image_size
+        if isinstance(expected_size, int):
+            expected_size = (expected_size, expected_size)
+        # The dataset already resizes and converts RGB images to float [0, 1].
+        # Normalize directly on the model device instead of copying to CPU and
+        # running the image processor again for every training batch.
+        if (image.ndim == 4 and image.shape[1] == 3 and image.shape[-2:] == tuple(expected_size)
+                and image.is_floating_point() and self.process.do_normalize):
+            image = image.to(device)
+            mean = image.new_tensor(self.process.image_mean).view(1, 3, 1, 1)
+            std = image.new_tensor(self.process.image_std).view(1, 3, 1, 1)
+            pixel_values = (image - mean) / std
+        else:
+            # Preserve the processor path for unusual input sizes or formats.
+            inputs = self.process(images=image.detach().cpu(), do_rescale=False,
+                                  return_tensors="pt")
+            pixel_values = inputs["pixel_values"].to(device)
         with torch.no_grad():
-            outputs = self.model(**inputs.to(device))
+            outputs = self.model(pixel_values=pixel_values)
         return outputs.last_hidden_state, image_ids
 
 class QuestionEmbedding(nn.Module):
-    def __init__(self, input_size=None, output_size=768, model_name=Config.text_model):
+    def __init__(self, input_size=None, output_size=768, model_name=Config.text_model,
+                 use_lstm=True):
         super().__init__()
         validate_english_text_model(model_name)
         self.tokenizer = BertTokenizer.from_pretrained(model_name)
         self.text_encoder = BertModel.from_pretrained(model_name)
-        self.lstm = nn.LSTM(input_size or self.text_encoder.config.hidden_size, output_size, batch_first=True)
+        self.lstm = (nn.LSTM(input_size or self.text_encoder.config.hidden_size, output_size,
+                             batch_first=True) if use_lstm else None)
 
     def encode_tokens(self, questions):
         tokens = self.tokenizer(
@@ -55,6 +72,8 @@ class QuestionEmbedding(nn.Module):
         return embeddings, padding_mask, tokens['input_ids']
 
     def forward(self, questions):
+        if self.lstm is None:
+            raise RuntimeError('LSTM summary is unavailable in OT fusion mode')
         embeddings, _, input_ids = self.encode_tokens(questions)
         # Preserve the SAN baseline contract: summarize all non-padding tokens,
         # including tokenizer boundary tokens, with the LSTM.

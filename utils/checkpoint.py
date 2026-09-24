@@ -12,7 +12,8 @@ from model.vqa_model import VQAModel
 MODEL_CONFIG_KEYS = {
     "vocab_size", "output_size", "d_model", "num_heads", "ffn_hidden",
     "drop_prob", "num_layers", "num_att_layers", "mode",
-    "freeze_answer_embeddings",
+    "freeze_answer_embeddings", "fusion", "ot_epsilon", "ot_iterations",
+    "ot_dustbin_mass", "ot_dustbin_cost",
 }
 
 
@@ -53,7 +54,7 @@ def checkpoint_payload(
     epoch=0, global_step=0, best_metric=None, epochs_without_improvement=0,
 ):
     return {
-        "format_version": 3,
+        "format_version": 4,
         "model_state_dict": model.state_dict(),
         "model_config": model.model_config,
         "text_model": text_model,
@@ -95,7 +96,7 @@ def read_checkpoint(checkpoint_path, device):
     if not isinstance(checkpoint, dict):
         raise ValueError("Checkpoint must be a dictionary")
     version = checkpoint.get("format_version")
-    if version not in {2, 3}:
+    if version not in {2, 3, 4}:
         raise ValueError(
             "Legacy checkpoint was trained with the incorrect decoder/objective. "
             "Retrain with the corrected train.py before generating answers."
@@ -106,9 +107,9 @@ def read_checkpoint(checkpoint_path, device):
 def load_model(checkpoint_path, device):
     checkpoint = read_checkpoint(checkpoint_path, device)
     stored_config = dict(checkpoint.get("model_config", {}))
-    fusion = stored_config.pop("fusion", "san")
-    if fusion != "san":
-        raise ValueError("This checkpoint uses a removed fusion architecture; use a SAN checkpoint")
+    fusion = stored_config.get("fusion", "san")
+    if fusion not in {"san", "ot"}:
+        raise ValueError(f"Unknown checkpoint fusion architecture: {fusion}")
     model_config = {
         key: value for key, value in stored_config.items() if key in MODEL_CONFIG_KEYS
     }
@@ -144,8 +145,8 @@ def _adapt_legacy_text_keys(state_dict):
 
 
 def restore_training_state(checkpoint, model, optimizer, scheduler):
-    if checkpoint.get("format_version") != 3:
-        raise ValueError("Only version-3 checkpoints contain resumable training state")
+    if checkpoint.get("format_version") not in {3, 4}:
+        raise ValueError("Only version-3/4 checkpoints contain resumable training state")
     state = _adapt_vision_state_dict(checkpoint["model_state_dict"], model.state_dict())
     state = _adapt_legacy_text_keys(state)
     model.load_state_dict(state, strict=True)

@@ -141,6 +141,30 @@ def _reliance_report(model, dataset, samples: int, batch_size: int,
     return result
 
 
+def _transport_report(model, dataset, samples: int, batch_size: int,
+                      device: torch.device) -> dict:
+    """Summarize how much mass OT assigns to local matches and dustbins."""
+    count = min(samples, len(dataset))
+    totals = {"matched_mass": 0.0, "image_to_dustbin_mass": 0.0,
+              "dustbin_to_question_mass": 0.0, "dustbin_to_dustbin_mass": 0.0}
+    max_row_residual = max_column_residual = 0.0
+    with torch.no_grad():
+        for start in range(0, count, batch_size):
+            records = [dataset[index] for index in range(start, min(start + batch_size, count))]
+            images = torch.stack([row[1] for row in records]).to(device)
+            questions = [row[2] for row in records]
+            _, _, diagnostics = model.encode(images, questions, return_transport=True)
+            for key in totals:
+                totals[key] += diagnostics[key].sum().item()
+            max_row_residual = max(max_row_residual,
+                                   diagnostics["row_residual"].max().item())
+            max_column_residual = max(max_column_residual,
+                                      diagnostics["column_residual"].max().item())
+    return {**{key: value / count for key, value in totals.items()},
+            "max_row_residual": max_row_residual,
+            "max_column_residual": max_column_residual}
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", required=True)
@@ -177,6 +201,10 @@ def main():
             model, dataset, args.samples, args.batch_size, device
         ),
     }
+    if model.fusion == "ot":
+        report["transport"] = _transport_report(
+            model, dataset, args.samples, args.batch_size, device
+        )
     if args.train_csv_path:
         train_frame = load_dataframe(args.train_csv_path)
         report["dataset"] = _dataset_report(train_frame, frame)

@@ -17,6 +17,8 @@ class DeviceSelectionTests(unittest.TestCase):
         self.assertEqual(args.ffn_hidden, 1024)
         self.assertEqual(args.num_layers, 2)
         self.assertEqual(args.drop_prob, 0.2)
+        self.assertIsNone(args.fusion)
+        self.assertEqual(get_args(["--fusion", "ot"]).fusion, "ot")
         self.assertEqual(args.weight_decay, 0.05)
         self.assertEqual(args.gradient_clip, 1.0)
         self.assertTrue(args.freeze_answer_embeddings)

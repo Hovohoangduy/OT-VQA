@@ -122,7 +122,7 @@ class ModelLogicTests(unittest.TestCase):
             for row, choice in enumerate(choices):
                 out[row, -1, choice] = 10
             return out
-        with patch.object(model, 'encode', return_value=torch.zeros(2, 1, 16)), patch.object(model, 'decode', side_effect=decode):
+        with patch.object(model, 'encode', return_value=(torch.zeros(2, 1, 16), torch.zeros(2, 1, dtype=torch.bool))), patch.object(model, 'decode', side_effect=decode):
             generated = model.generate(torch.zeros(2, 3, 32, 32), ['a', 'b'], max_len=6)
         self.assertEqual(generated.tolist(), [[3, 0], [5, 3]])
         self.assertEqual(seen[0].tolist(), [[2], [2]])
@@ -148,9 +148,15 @@ class ModelLogicTests(unittest.TestCase):
             )
         self.assertEqual(len(losses), 2)
         self.assertIn('Epoch 5/50:', output.getvalue())
-        with patch.object(model, 'generate', side_effect=lambda images, questions, ids, **kwargs: torch.tensor([[5, 3]] * len(questions))) as generation:
-            loss, em, f1 = evaluation(model, loader, criterion)
+        predictions = []
+        with patch.object(model, '_generate_from_memory',
+                          side_effect=lambda memory, blocked, max_len: torch.tensor([[5, 3]] * memory.size(0))) as generation, \
+             patch.object(model, 'encode', wraps=model.encode) as encoding:
+            loss, em, f1 = evaluation(model, loader, criterion, predictions=predictions)
         self.assertEqual(generation.call_count, 2)
+        self.assertEqual(encoding.call_count, 2)
+        self.assertEqual(len(predictions), 3)
+        self.assertEqual(predictions[0]['prediction'], 'red')
         self.assertEqual((em, f1), (1.0, 1.0))
         self.assertGreater(loss, 0)
 
@@ -273,6 +279,24 @@ class DataLogicTests(unittest.TestCase):
             self.assertEqual(
                 resolve_image_root(bare, root, 'train', override=explicit), explicit
             )
+
+    def test_gqa_question_selection_keeps_first_per_image(self):
+        from urllib.parse import parse_qs, urlsplit
+        from utils.download_gqa import fetch_first_questions
+        rows = [
+            {'row': {'imageId': 'a', 'question': 'color?', 'answer': 'red'}},
+            {'row': {'imageId': 'b', 'question': 'shape?', 'answer': 'round'}},
+            {'row': {'imageId': 'a', 'question': 'size?', 'answer': 'big'}},
+            {'row': {'imageId': 'b', 'question': 'material?', 'answer': 'wood'}},
+            {'row': {'imageId': 'a', 'question': 'ignored?', 'answer': 'yes'}},
+        ]
+        def fetch(url, cache_dir=None):
+            offset = int(parse_qs(urlsplit(url).query)['offset'][0])
+            return {'rows': rows if offset == 0 else [], 'num_rows_total': len(rows)}
+        with patch('utils.download_gqa.fetch_json', side_effect=fetch):
+            selected = fetch_first_questions('train', {'a', 'b'}, workers=1)
+        self.assertEqual(selected['a']['question'], 'color?')
+        self.assertEqual(selected['b']['question'], 'shape?')
 
 
 if __name__ == '__main__':

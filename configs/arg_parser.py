@@ -44,6 +44,16 @@ def get_args(argv=None):
     parser.add_argument("--num_layers", type=int, default=2)
     parser.add_argument("--num_heads", type=int, default=4)
     parser.add_argument("--drop_prob", type=float, default=0.2)
+    parser.add_argument("--fusion", choices=["san", "ot"], default=None,
+                        help="Fusion architecture; new runs default to ot, resume uses checkpoint value")
+    parser.add_argument("--ot_epsilon", type=float, default=None,
+                        help="Sinkhorn entropy coefficient (new OT runs default to 0.05)")
+    parser.add_argument("--ot_iterations", type=int, default=None,
+                        help="Sinkhorn iterations (new OT runs default to 20)")
+    parser.add_argument("--ot_dustbin_mass", type=float, default=None,
+                        help="Marginal mass assigned to each dustbin (new OT runs default to 0.2)")
+    parser.add_argument("--ot_dustbin_cost", type=float, default=None,
+                        help="Dustbin-to-dustbin transport cost (new OT runs default to 1.0)")
     parser.add_argument(
         "--freeze_answer_embeddings",
         action=argparse.BooleanOptionalAction,
@@ -51,6 +61,10 @@ def get_args(argv=None):
         help="Freeze pretrained answer-token embeddings (default: enabled)",
     )
     parser.add_argument("--checkpoint", default=None, help="Explicit evaluation checkpoint")
+    parser.add_argument("--predictions_csv", default=None,
+                        help="Evaluation output with each generated answer")
+    parser.add_argument("--report_json", default=None,
+                        help="Evaluation output with accuracy and runtime summary")
     parser.add_argument(
         "--device", choices=["auto", "cpu", "cuda", "mps"], default="auto",
         help="Compute device; auto prefers CUDA, then Apple MPS, then CPU",

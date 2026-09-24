@@ -1,8 +1,9 @@
-"""Train the stacked-attention VQA model and select checkpoints by generated F1."""
+"""Train SAN or OT VQA and select checkpoints by generated F1."""
 
 from __future__ import annotations
 
 import json
+import hashlib
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -88,6 +89,14 @@ def _make_loader(args, split, shuffle, text_model, image_model):
     return DataLoader(dataset, batch_size=args.batch_size, shuffle=shuffle)
 
 
+def _csv_digest(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def main():
     args = get_args()
     if args.batch_size < 1 or args.epochs < 1:
@@ -112,13 +121,19 @@ def main():
 
     resume = read_checkpoint(args.resume, device) if args.resume else None
     if resume is not None:
-        if resume["format_version"] != 3:
-            raise ValueError("Training can resume only from a version-3 checkpoint")
+        if resume["format_version"] not in {3, 4}:
+            raise ValueError("Training can resume only from a version-3/4 checkpoint")
         text_model, image_model = resume["text_model"], resume["image_model"]
         stored_config = dict(resume["model_config"])
-        fusion = stored_config.pop("fusion", "san")
-        if fusion != "san":
-            raise ValueError("Cannot resume a checkpoint from a removed fusion architecture")
+        fusion = stored_config.get("fusion", "san")
+        if args.fusion is not None and args.fusion != fusion:
+            raise ValueError("--fusion does not match the resume checkpoint")
+        ot_defaults = {"ot_epsilon": 0.05, "ot_iterations": 20,
+                       "ot_dustbin_mass": 0.2, "ot_dustbin_cost": 1.0}
+        for name, default in ot_defaults.items():
+            value = getattr(args, name)
+            if value is not None and value != stored_config.get(name, default):
+                raise ValueError(f"--{name} does not match the resume checkpoint")
         model_config = {
             key: value for key, value in stored_config.items() if key in MODEL_CONFIG_KEYS
         }
@@ -130,7 +145,14 @@ def main():
                          output_size=args.d_model, d_model=args.d_model,
                          ffn_hidden=args.ffn_hidden, num_layers=args.num_layers,
                          num_heads=args.num_heads, drop_prob=args.drop_prob,
-                         freeze_answer_embeddings=args.freeze_answer_embeddings).to(device)
+                         freeze_answer_embeddings=args.freeze_answer_embeddings,
+                         fusion=args.fusion or "ot",
+                         ot_epsilon=args.ot_epsilon if args.ot_epsilon is not None else 0.05,
+                         ot_iterations=args.ot_iterations if args.ot_iterations is not None else 20,
+                         ot_dustbin_mass=(args.ot_dustbin_mass if args.ot_dustbin_mass is not None
+                                          else 0.2),
+                         ot_dustbin_cost=(args.ot_dustbin_cost if args.ot_dustbin_cost is not None
+                                          else 1.0)).to(device)
 
     train_loader = _make_loader(args, "train", True, text_model, image_model)
     dev_loader = _make_loader(args, "dev", False, text_model, image_model)
@@ -164,6 +186,19 @@ def main():
 
     destination = Path(args.model_path)
     destination.mkdir(parents=True, exist_ok=True)
+    if resume is None:
+        manifest = {
+            "model_config": model.model_config,
+            "arguments": vars(args),
+            "train_examples": len(train_loader.dataset),
+            "dev_examples": len(dev_loader.dataset),
+            "train_csv_sha256": _csv_digest(args.train_csv_path),
+            "dev_csv_sha256": _csv_digest(args.dev_csv_path),
+            "torch_version": torch.__version__,
+        }
+        (destination / "run_config.json").write_text(
+            json.dumps(manifest, indent=2, default=str) + "\n", encoding="utf-8"
+        )
     metrics_path = destination / "metrics.jsonl"
     if best_metric is not None and "epoch" not in best_metric:
         # Version-3 checkpoints written before early stopping tracked the best

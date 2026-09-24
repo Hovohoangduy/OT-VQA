@@ -2,3 +2,4 @@ __pycache__
 .vscode
 data
 docs/secret_docs
+docs/*.pdf
