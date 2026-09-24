@@ -36,15 +36,6 @@ def _history_report(rows: list[dict]) -> dict:
         return {}
     best = max(rows, key=lambda row: (row["val_f1"], -row["val_loss"]))
     last = rows[-1]
-    generated_train = last.get("train_generated_f1")
-    generated_train_at_best = best.get("train_generated_f1")
-    overfitting = None
-    if generated_train is not None and generated_train_at_best is not None:
-        overfitting = (
-            last["epoch"] > best["epoch"] and
-            generated_train > generated_train_at_best and
-            last["val_f1"] <= best["val_f1"]
-        )
     return {
         "epochs_logged": len(rows),
         "best_epoch": best["epoch"],
@@ -52,14 +43,15 @@ def _history_report(rows: list[dict]) -> dict:
         "best_val_loss": best["val_loss"],
         "last_epoch": last["epoch"],
         "last_train_f1": last["train_f1"],
-        "last_train_generated_f1": generated_train,
         "last_val_f1": last["val_f1"],
         "last_val_loss": last["val_loss"],
-        "train_validation_generated_f1_gap": (
-            generated_train - last["val_f1"] if generated_train is not None else None
-        ),
+        "train_validation_f1_gap": last["train_f1"] - last["val_f1"],
         "val_loss_increase_after_best": last["val_loss"] - best["val_loss"],
-        "overfitting_detected": overfitting,
+        "overfitting_detected": (
+            last["epoch"] > best["epoch"] and
+            last["train_f1"] > best.get("train_f1", 0) and
+            last["val_f1"] <= best["val_f1"]
+        ),
     }
 
 

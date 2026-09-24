@@ -1,6 +1,5 @@
 """Transport solver and VQA integration tests with locally initialized encoders."""
 
-import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -179,9 +178,6 @@ class OTVQATests(unittest.TestCase):
         self.assertTrue((output / "run_config.json").is_file())
         self.assertTrue((output / "best.pt").is_file())
         self.assertEqual(load_model(output / "best.pt", torch.device("cpu")).fusion, "ot")
-        metrics = json.loads((output / "metrics.jsonl").read_text().splitlines()[0])
-        self.assertEqual(metrics["train_eval_examples"], 1)
-        self.assertIn("train_generated_f1", metrics)
 
 
 if __name__ == "__main__":

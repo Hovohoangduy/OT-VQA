@@ -58,27 +58,6 @@ available, but can fall back to another device.
 Training writes `last.pt`, the best generated-F1 checkpoint as `best.pt`, a JSONL
 metric history, an evaluation plot, and `run_config.json` with dataset hashes.
 Resume with `--resume path/to/last.pt`.
-The epoch log reports teacher-forced training F1 and generated validation F1.
-These are different tasks. It also evaluates 256 fixed training examples with
-free generation and records `train_generated_f1` in `metrics.jsonl`, which is a
-like-for-like check of the generalization gap. Use `--train_eval_samples 1000`
-for a less noisy estimate, or `0` to skip the extra evaluation.
-
-For a small dataset where validation F1 stalls while generated training F1
-keeps improving, try freezing the pretrained BERT question encoder and compare
-the best validation checkpoints from separate runs:
-
-```bash
-python train.py --fusion ot --epochs 100 --model_path data/gqa_ot_frozen_bert \
-  --freeze_text_encoder --train_eval_samples 1000
-```
-
-This keeps the image encoder and answer embeddings frozen, while training the
-fusion and answer decoder. Freezing reduces the number of fitted parameters;
-its effect on validation F1 must be measured on the same development split and
-seed. Use the held-out test split only after choosing the setup. The local
-5,000-example train split has 591 distinct answers, and 53 of the 1,000
-development answers do not occur in training, so rare answers remain difficult.
 New runs default to OT. For a matched SAN baseline, run the same command with
 `--fusion san` and a different `--model_path`. Set `--ot_dustbin_mass 0` for a
 full-OT ablation. Partial OT defaults to mass `0.2`, Sinkhorn epsilon `0.05`,

@@ -12,7 +12,7 @@ from model.vqa_model import VQAModel
 MODEL_CONFIG_KEYS = {
     "vocab_size", "output_size", "d_model", "num_heads", "ffn_hidden",
     "drop_prob", "num_layers", "num_att_layers", "mode",
-    "freeze_answer_embeddings", "freeze_text_encoder", "fusion", "ot_epsilon", "ot_iterations",
+    "freeze_answer_embeddings", "fusion", "ot_epsilon", "ot_iterations",
     "ot_dustbin_mass", "ot_dustbin_cost",
 }
 

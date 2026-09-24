@@ -15,7 +15,6 @@ from torch.utils.data import DataLoader
 from transformers import BertConfig, BertModel, BertTokenizer, ViTConfig, ViTImageProcessor, ViTModel
 
 from configs.config import Config
-from diagnose_training import _history_report
 from model.vqa_model import VQAModel
 from model.decoder_model import MultiHeadAttention, MultiHeadCrossAttention, scaled_dot_product
 from model.sans import StackAttention
@@ -198,28 +197,6 @@ class ModelLogicTests(unittest.TestCase):
         ))
         self.assertTrue(model.model_config['freeze_answer_embeddings'])
 
-    def test_text_encoder_can_be_frozen_without_freezing_fusion(self):
-        model = VQAModel(
-            text_model=str(self.text), image_model=str(self.visual),
-            output_size=16, d_model=16, ffn_hidden=32, num_layers=1,
-            freeze_text_encoder=True, fusion='ot',
-        )
-        model.train()
-        self.assertFalse(model.question_encoder.text_encoder.training)
-        self.assertFalse(any(parameter.requires_grad for parameter in
-                             model.question_encoder.text_encoder.parameters()))
-        self.assertTrue(any(parameter.requires_grad for parameter in
-                            model.ot_fusion.parameters()))
-        self.assertTrue(model.model_config['freeze_text_encoder'])
-        checkpoint = self.root / 'frozen-text.pt'
-        save_checkpoint(checkpoint, model=model, text_model=str(self.text),
-                        image_model=str(self.visual))
-        restored = load_model(checkpoint, torch.device('cpu'))
-        restored.train()
-        self.assertFalse(restored.question_encoder.text_encoder.training)
-        self.assertFalse(any(parameter.requires_grad for parameter in
-                             restored.question_encoder.text_encoder.parameters()))
-
     def test_text_preprocessing_is_english_and_whitespace_only(self):
         self.assertEqual(preprocess_text('  What   color is it?  '), 'What color is it?')
         with self.assertRaisesRegex(ValueError, 'English encoder'):
@@ -245,20 +222,6 @@ class ModelLogicTests(unittest.TestCase):
         self.assertEqual(StackAttention(16, 8, dropout=False)(x, torch.randn(2, 1, 16)).shape, (2, 16))
 
 class DataLogicTests(unittest.TestCase):
-    def test_overfitting_report_uses_generated_train_f1(self):
-        rows = [
-            {"epoch": 1, "train_f1": 0.6, "train_generated_f1": 0.4,
-             "val_f1": 0.3, "val_loss": 1.2},
-            {"epoch": 2, "train_f1": 0.8, "train_generated_f1": 0.7,
-             "val_f1": 0.2, "val_loss": 1.3},
-        ]
-        report = _history_report(rows)
-        self.assertAlmostEqual(report["train_validation_generated_f1_gap"], 0.5)
-        self.assertTrue(report["overfitting_detected"])
-        for row in rows:
-            del row["train_generated_f1"]
-        self.assertIsNone(_history_report(rows)["overfitting_detected"])
-
     def test_metrics_count_repeated_words_and_empty_answers(self):
         em, f1 = compute_em_and_f1(['a a b'], ['a b b'])
         self.assertEqual(em, 0)

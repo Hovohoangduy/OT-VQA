@@ -57,18 +57,6 @@ class QuestionEmbedding(nn.Module):
         self.text_encoder = BertModel.from_pretrained(model_name)
         self.lstm = (nn.LSTM(input_size or self.text_encoder.config.hidden_size, output_size,
                              batch_first=True) if use_lstm else None)
-        self.encoder_frozen = False
-
-    def freeze_encoder(self):
-        self.encoder_frozen = True
-        self.text_encoder.requires_grad_(False)
-        self.text_encoder.eval()
-
-    def train(self, mode=True):
-        super().train(mode)
-        if self.encoder_frozen:
-            self.text_encoder.eval()
-        return self
 
     def encode_tokens(self, questions):
         tokens = self.tokenizer(
