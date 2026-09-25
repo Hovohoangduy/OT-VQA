@@ -18,31 +18,36 @@ from model.vqa_model import VQAModel
 from utils.checkpoint import MODEL_CONFIG_KEYS, read_checkpoint, restore_training_state, save_checkpoint
 from utils.data_processing import load_dataframe
 from utils.device import resolve_device, seed_everything
-from utils.metrics import PAPER_METRICS, build_bertscore_scorer, compute_em_and_f1
+from utils.metrics import PAPER_METRICS, build_bertscore_scorer
 from utils.vqa_dataset import VQADataset, resolve_image_root
 
 
 def _forward_batch(model, batch, device):
     anno_ids, images, questions, answers = batch
-    return model(images.to(device), questions, answers, anno_ids), answers
+    return model(images.to(device), questions, answers, anno_ids)
+
+
+def _format_epoch_metrics(epoch, total_epochs, split, loss, scores):
+    metrics = ", ".join(f"{name}={scores[name]:.4f}" for name in PAPER_METRICS)
+    return f"Epoch {epoch}/{total_epochs} {split}: loss={loss:.4f}, {metrics}"
 
 
 def train(model, train_loader, num_epochs, optimizer, scheduler, criterion,
           vocab_swap=None, device=None, epoch_offset=0,
           total_epochs=None, gradient_clip=None):
-    """Run teacher-forced optimization; generation is reserved for validation."""
+    """Run teacher-forced optimization; score generated answers after this step."""
     device = device or next(model.parameters()).device
-    losses, em_scores, f1_scores = [], [], []
+    losses, epoch_losses = [], []
     if len(train_loader) == 0:
         raise ValueError("Training dataset is empty")
     for epoch in range(num_epochs):
         displayed_epoch = epoch_offset + epoch + 1
         displayed_total = total_epochs if total_epochs is not None else epoch_offset + num_epochs
         model.train()
-        total_loss = total_em = total_f1 = 0.0
-        examples = tokens = 0
+        total_loss = 0.0
+        tokens = 0
         for batch_idx, batch in enumerate(train_loader):
-            (logits, targets), answers = _forward_batch(model, batch, device)
+            logits, targets = _forward_batch(model, batch, device)
             loss = criterion(logits.transpose(1, 2), targets)
             if not torch.isfinite(loss):
                 raise FloatingPointError("Training loss is NaN or infinity")
@@ -59,21 +64,11 @@ def train(model, train_loader, num_epochs, optimizer, scheduler, criterion,
             total_loss += loss.item() * batch_tokens
             tokens += batch_tokens
             losses.append(loss.item())
-            hypotheses = model.answers_from_ids(logits.detach().argmax(-1))
-            em, f1 = compute_em_and_f1(answers, hypotheses)
-            count = len(answers)
-            total_em += em * count
-            total_f1 += f1 * count
-            examples += count
             if (batch_idx + 1) % 2000 == 0:
-                print(f"Epoch {displayed_epoch}, batch {batch_idx + 1}: loss={loss.item():.4f}")
-        em_scores.append(total_em / examples)
-        f1_scores.append(total_f1 / examples)
-        message = (f"Epoch {displayed_epoch}/{displayed_total}: "
-                   f"loss={total_loss / max(tokens, 1):.4f}, "
-                   f"teacher-forced EM={em_scores[-1]:.4f}, F1={f1_scores[-1]:.4f}")
-        print(message)
-    return losses, em_scores, f1_scores
+                print(f"Epoch {displayed_epoch}/{displayed_total}, "
+                      f"batch {batch_idx + 1}: loss={loss.item():.4f}")
+        epoch_losses.append(total_loss / max(tokens, 1))
+    return losses, epoch_losses
 
 
 def _make_loader(args, split, shuffle, text_model, image_model):
@@ -167,6 +162,8 @@ def main():
     dev_loader = _make_loader(args, "dev", False, text_model, image_model)
     if not len(train_loader) or not len(dev_loader):
         raise ValueError("Training and development datasets must be non-empty")
+    train_eval_loader = DataLoader(train_loader.dataset, batch_size=args.batch_size,
+                                   shuffle=False)
     train_criterion = nn.CrossEntropyLoss(
         ignore_index=model.pad_token_id, label_smoothing=args.label_smoothing
     )
@@ -234,13 +231,21 @@ def main():
     history = []
     from test import evaluation
     for epoch in range(start_epoch, args.epochs):
-        losses, train_em, train_f1 = train(
+        _, epoch_losses = train(
             model, train_loader, 1, optimizer, scheduler, train_criterion,
             device=device,
             epoch_offset=epoch, total_epochs=args.epochs,
             gradient_clip=args.gradient_clip or None,
         )
+        train_loss = epoch_losses[-1]
         global_step += len(train_loader)
+        training = evaluation(
+            model, train_eval_loader, validation_criterion, device=device,
+            bert_scorer=bert_scorer,
+        )
+        train_scores = training["metrics"]
+        print(_format_epoch_metrics(epoch + 1, args.epochs, "Train", train_loss,
+                                    train_scores))
         validation = evaluation(
             model, dev_loader, validation_criterion, device=device,
             bert_scorer=bert_scorer,
@@ -262,8 +267,8 @@ def main():
         save_checkpoint(destination / "last.pt", **checkpoint_args)
         if improved:
             save_checkpoint(destination / "best.pt", **checkpoint_args)
-        row = {"epoch": epoch + 1, "train_loss": sum(losses) / len(losses),
-               "train_em": train_em[-1], "train_f1": train_f1[-1],
+        row = {"epoch": epoch + 1, "train_loss": train_loss,
+               **{f"train_{name}": train_scores[name] for name in PAPER_METRICS},
                "val_loss": val_loss,
                **{f"val_{name}": val_scores[name] for name in PAPER_METRICS},
                "learning_rate": scheduler.get_last_lr()[0],
@@ -272,8 +277,8 @@ def main():
         history.append(row)
         with metrics_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(row) + "\n")
-        print(f"Validation: loss={val_loss:.4f}, " + ", ".join(
-              f"{name}={val_scores[name]:.4f}" for name in PAPER_METRICS) +
+        print(_format_epoch_metrics(epoch + 1, args.epochs, "Validation", val_loss,
+                                    val_scores) +
               f", best epoch={best_metric['epoch']}, "
               f"patience={epochs_without_improvement}/{args.early_stopping_patience or 'off'}")
         if (args.early_stopping_patience and
@@ -285,7 +290,10 @@ def main():
     plt.figure(figsize=(10, 6))
     for metric in PAPER_METRICS:
         plt.plot([row["epoch"] for row in history],
-                 [row[f"val_{metric}"] for row in history], label=metric)
+                 [row[f"train_{metric}"] for row in history],
+                 label=f"train_{metric}", linestyle="--")
+        plt.plot([row["epoch"] for row in history],
+                 [row[f"val_{metric}"] for row in history], label=f"val_{metric}")
     plt.xlabel("Epoch")
     plt.ylabel("Score")
     plt.legend()

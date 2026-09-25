@@ -6,6 +6,7 @@ import argparse
 from collections import Counter
 import json
 from pathlib import Path
+from statistics import fmean
 
 import torch
 
@@ -13,7 +14,7 @@ from configs.config import Config
 from utils.checkpoint import load_model
 from utils.data_processing import load_dataframe
 from utils.device import resolve_device, seed_everything
-from utils.metrics import PAPER_METRICS, compute_em_and_f1, normalize_text
+from utils.metrics import PAPER_METRICS, lexical_scores, normalize_text
 from utils.vqa_dataset import VQADataset
 
 
@@ -40,29 +41,41 @@ def _history_report(rows: list[dict]) -> dict:
         "epochs_logged": len(rows),
         "best_epoch": best["epoch"],
         "best_val_loss": best["val_loss"],
+        "best_train_generated_metrics": {name: best[f"train_{name}"] for name in PAPER_METRICS
+                                         if f"train_{name}" in best},
         "best_generated_metrics": {name: best[f"val_{name}"] for name in PAPER_METRICS
                                    if f"val_{name}" in best},
         "last_epoch": last["epoch"],
-        "last_train_f1": last["train_f1"],
+        "last_train_loss": last["train_loss"],
         "last_val_loss": last["val_loss"],
+        "last_train_generated_metrics": {name: last[f"train_{name}"] for name in PAPER_METRICS
+                                         if f"train_{name}" in last},
         "last_generated_metrics": {name: last[f"val_{name}"] for name in PAPER_METRICS
                                    if f"val_{name}" in last},
-        "train_validation_f1_gap": (last["train_f1"] - last.get("val_token_f1", last.get("val_f1", 0))),
         "val_loss_increase_after_best": last["val_loss"] - best["val_loss"],
         "overfitting_detected": (
             last["epoch"] > best["epoch"] and
-            last["train_f1"] > best.get("train_f1", 0) and
-            last["val_loss"] >= best["val_loss"]
+            last["train_loss"] < best["train_loss"] and
+            last["val_loss"] > best["val_loss"]
         ),
     }
 
 
+def _lexical_summary(answers: list[str], predictions: list[str]) -> dict:
+    if len(answers) != len(predictions):
+        raise ValueError("Answers and predictions must have equal lengths")
+    rows = [lexical_scores(answer, prediction)
+            for answer, prediction in zip(answers, predictions)]
+    if not rows:
+        raise ValueError("Cannot score an empty prediction set")
+    return {name: fmean(row[name] for row in rows)
+            for name in PAPER_METRICS if name != "bertscore_f1"}
+
+
 def _prediction_summary(answers: list[str], predictions: list[str]) -> dict:
-    em, f1 = compute_em_and_f1(answers, predictions)
     counts = Counter(predictions)
     return {
-        "em": em,
-        "f1": f1,
+        **_lexical_summary(answers, predictions),
         "unique_predictions": len(counts),
         "top_predictions": counts.most_common(10),
         "top_prediction_fraction": max(counts.values()) / len(predictions),
@@ -75,7 +88,7 @@ def _dataset_report(train_frame, dev_frame) -> dict:
     train_vocabulary = set(train_answers)
     unseen = sum(answer not in train_vocabulary for answer in dev_answers)
     majority_answer, majority_count = Counter(train_answers).most_common(1)[0]
-    majority_em, majority_f1 = compute_em_and_f1(
+    majority_scores = _lexical_summary(
         dev_answers, [majority_answer] * len(dev_answers)
     )
     return {
@@ -87,8 +100,8 @@ def _dataset_report(train_frame, dev_frame) -> dict:
         "validation_unseen_answer_fraction": unseen / len(dev_answers),
         "train_majority_answer": majority_answer,
         "train_majority_fraction": majority_count / len(train_answers),
-        "validation_majority_baseline_em": majority_em,
-        "validation_majority_baseline_f1": majority_f1,
+        **{f"validation_majority_baseline_{name}": value
+           for name, value in majority_scores.items()},
     }
 
 

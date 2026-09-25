@@ -91,16 +91,6 @@ def lexical_scores(reference, hypothesis):
     }
 
 
-def compute_em_and_f1(references, hypotheses):
-    """Compatibility wrapper for lightweight training and diagnostic metrics."""
-    if len(references) != len(hypotheses):
-        raise ValueError("References and hypotheses must have equal lengths")
-    if not references:
-        return 0.0, 0.0
-    rows = [lexical_scores(ref, hyp) for ref, hyp in zip(references, hypotheses)]
-    return fmean(row["em"] for row in rows), fmean(row["token_f1"] for row in rows)
-
-
 def build_bertscore_scorer(model_type="bert-base-uncased", device="cpu", batch_size=16,
                            rescale_with_baseline=True):
     """Create a reusable frozen semantic scorer with explicit settings."""

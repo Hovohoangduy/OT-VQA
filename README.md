@@ -108,6 +108,10 @@ available, but can fall back to another device.
 
 Training writes `last.pt`, the lowest-validation-loss checkpoint as `best.pt`, a JSONL
 metric history, an evaluation plot, and `run_config.json` with dataset hashes.
+After each epoch, it reports generated-answer EM, token F1, BLEU-1/2, ROUGE-L,
+and BERTScore for both the training and validation splits. The history stores
+these as `train_*` and `val_*` fields; the plot shows both curves. Scoring the
+full training split adds an evaluation pass each epoch.
 Resume with `--resume path/to/last.pt`.
 New runs default to OT. For a matched SAN baseline, run the same command with
 `--fusion san` and a different `--model_path`. Set `--ot_dustbin_mass 0` for a

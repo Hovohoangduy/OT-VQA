@@ -21,12 +21,12 @@ from model.sans import StackAttention
 from utils.data_processing import process_dataframe
 from utils.data_processing import preprocess_text
 from utils.vqa_dataset import VQADataset, resolve_image_root
-from utils.metrics import PAPER_METRICS, compute_em_and_f1, lexical_scores, score_pairs, mean_scores
+from utils.metrics import PAPER_METRICS, lexical_scores, score_pairs, mean_scores
 from utils.json_to_csv import convert_json_folder
 from utils.checkpoint import load_model, save_checkpoint
-from train import train
+from train import _format_epoch_metrics, train
 from test import evaluation
-from diagnose_training import _history_report
+from diagnose_training import _history_report, _lexical_summary
 
 
 class ModelLogicTests(unittest.TestCase):
@@ -143,12 +143,22 @@ class ModelLogicTests(unittest.TestCase):
         scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda _: 1)
         output = io.StringIO()
         with redirect_stdout(output):
-            losses, _, _ = train(
+            losses, epoch_losses = train(
                 model, loader, 1, optimizer, scheduler, criterion,
                 epoch_offset=4, total_epochs=50,
             )
         self.assertEqual(len(losses), 2)
-        self.assertIn('Epoch 5/50:', output.getvalue())
+        self.assertEqual(len(epoch_losses), 1)
+        self.assertGreater(epoch_losses[0], 0)
+        self.assertNotIn('teacher-forced EM', output.getvalue())
+        summary = _format_epoch_metrics(5, 50, 'Train', epoch_losses[0],
+                                        {metric: 0.5 for metric in PAPER_METRICS})
+        self.assertTrue(summary.startswith('Epoch 5/50 Train: loss='))
+        self.assertIn('em=0.5000, token_f1=0.5000', summary)
+        self.assertIn('bertscore_f1=0.5000', summary)
+        self.assertTrue(_format_epoch_metrics(
+            5, 50, 'Validation', 1.0, {metric: 0.5 for metric in PAPER_METRICS}
+        ).startswith('Epoch 5/50 Validation: loss=1.0000'))
         predictions = []
         class ConstantScorer:
             def score(self, candidates, references):
@@ -246,13 +256,13 @@ class ModelLogicTests(unittest.TestCase):
 
 class DataLogicTests(unittest.TestCase):
     def test_metrics_count_repeated_words_and_empty_answers(self):
-        em, f1 = compute_em_and_f1(['a a b'], ['a b b'])
-        self.assertEqual(em, 0)
-        self.assertAlmostEqual(f1, 2 / 3)
-        self.assertEqual(compute_em_and_f1([''], ['']), (1.0, 1.0))
-        self.assertEqual(compute_em_and_f1(['Blue car'], ['blue   car']), (0.0, 1.0))
+        scores = _lexical_summary(['a a b'], ['a b b'])
+        self.assertEqual(scores['em'], 0)
+        self.assertAlmostEqual(scores['token_f1'], 2 / 3)
+        self.assertEqual(_lexical_summary([''], [''])['token_f1'], 1.0)
+        self.assertEqual(_lexical_summary(['Blue car'], ['blue   car'])['em'], 0.0)
         with self.assertRaises(ValueError):
-            compute_em_and_f1(['a'], [])
+            _lexical_summary(['a'], [])
 
     def test_paper_lexical_metrics_and_aggregation(self):
         exact = lexical_scores('red leaf', 'red leaf')
@@ -277,12 +287,18 @@ class DataLogicTests(unittest.TestCase):
 
     def test_diagnostics_select_lowest_validation_loss(self):
         rows = [
-            {'epoch': 1, 'val_loss': 0.4, 'val_token_f1': 0.2, 'train_f1': 0.3},
-            {'epoch': 2, 'val_loss': 0.5, 'val_token_f1': 0.9, 'train_f1': 0.95},
+            {'epoch': 1, 'train_loss': 0.6, 'val_loss': 0.4,
+             'train_token_f1': 0.4, 'val_token_f1': 0.2},
+            {'epoch': 2, 'train_loss': 0.3, 'val_loss': 0.5,
+             'train_token_f1': 0.95, 'val_token_f1': 0.9},
         ]
         report = _history_report(rows)
         self.assertEqual(report['best_epoch'], 1)
         self.assertAlmostEqual(report['best_val_loss'], 0.4)
+        self.assertEqual(report['best_train_generated_metrics']['token_f1'], 0.4)
+        self.assertEqual(report['last_train_generated_metrics']['token_f1'], 0.95)
+        self.assertTrue(report['overfitting_detected'])
+        self.assertNotIn('last_train_f1', report)
 
     def test_data_question_column_and_optional_annotations(self):
         frame = pd.DataFrame({'image': ['train/a.jpg'], 'question': [' what  color ? '], 'answer': ['red']})
