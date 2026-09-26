@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import json
 import hashlib
+import os
+from datetime import timedelta
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import torch
+import torch.distributed as dist
 from torch import nn, optim
+from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
 from transformers import get_linear_schedule_with_warmup
 
 from configs.arg_parser import get_args
@@ -37,6 +42,7 @@ def train(model, train_loader, num_epochs, optimizer, scheduler, criterion,
           total_epochs=None, gradient_clip=None):
     """Run teacher-forced optimization; score generated answers after this step."""
     device = device or next(model.parameters()).device
+    base_model = model.module if isinstance(model, DistributedDataParallel) else model
     losses, epoch_losses = [], []
     if len(train_loader) == 0:
         raise ValueError("Training dataset is empty")
@@ -60,18 +66,22 @@ def train(model, train_loader, num_epochs, optimizer, scheduler, criterion,
                 )
             optimizer.step()
             scheduler.step()
-            batch_tokens = targets.ne(model.pad_token_id).sum().item()
+            batch_tokens = targets.ne(base_model.pad_token_id).sum().item()
             total_loss += loss.item() * batch_tokens
             tokens += batch_tokens
             losses.append(loss.item())
             if (batch_idx + 1) % 2000 == 0:
                 print(f"Epoch {displayed_epoch}/{displayed_total}, "
                       f"batch {batch_idx + 1}: loss={loss.item():.4f}")
+        if dist.is_available() and dist.is_initialized():
+            totals = torch.tensor([total_loss, tokens], dtype=torch.float64, device=device)
+            dist.all_reduce(totals, op=dist.ReduceOp.SUM)
+            total_loss, tokens = totals.tolist()
         epoch_losses.append(total_loss / max(tokens, 1))
     return losses, epoch_losses
 
 
-def _make_loader(args, split, shuffle, text_model, image_model):
+def _make_loader(args, split, shuffle, text_model, image_model, rank=0, world_size=1):
     csv_path = getattr(args, f"{split}_csv_path")
     frame = load_dataframe(csv_path)
     image_path = resolve_image_root(
@@ -81,7 +91,29 @@ def _make_loader(args, split, shuffle, text_model, image_model):
         override=getattr(args, f"{split}_img_path"),
     )
     dataset = VQADataset(frame, transform=Config.transforms, img_path=image_path)
-    return DataLoader(dataset, batch_size=args.batch_size, shuffle=shuffle)
+    sampler = (DistributedSampler(dataset, num_replicas=world_size, rank=rank,
+                                  shuffle=shuffle, seed=args.seed)
+               if world_size > 1 and split == "train" else None)
+    return DataLoader(dataset, batch_size=args.batch_size,
+                      shuffle=shuffle and sampler is None, sampler=sampler)
+
+
+def _training_device(requested):
+    """Initialize one CUDA worker per process when launched with torchrun."""
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    if world_size == 1:
+        return resolve_device(requested), 0, 1
+    if requested not in {"auto", "cuda"}:
+        raise ValueError("Multi-GPU training requires --device cuda or auto")
+    if not torch.cuda.is_available():
+        raise RuntimeError("Multi-GPU training requires CUDA")
+    local_rank = int(os.environ["LOCAL_RANK"])
+    if local_rank >= torch.cuda.device_count():
+        raise RuntimeError(f"CUDA device {local_rank} is unavailable")
+    torch.cuda.set_device(local_rank)
+    dist.init_process_group(backend="nccl", init_method="env://",
+                            timeout=timedelta(hours=2))
+    return torch.device("cuda", local_rank), dist.get_rank(), world_size
 
 
 def _csv_digest(path):
@@ -92,8 +124,7 @@ def _csv_digest(path):
     return digest.hexdigest()
 
 
-def main():
-    args = get_args()
+def _run_training(args, device, rank, world_size):
     if args.batch_size < 1 or args.epochs < 1:
         raise ValueError("batch_size and epochs must be positive")
     if args.max_answer_tokens is not None and args.max_answer_tokens < 2:
@@ -114,9 +145,12 @@ def main():
         raise ValueError("gradient_clip cannot be negative")
     if args.bertscore_batch_size < 1:
         raise ValueError("bertscore_batch_size must be positive")
-    seed_everything(args.seed)
-    device = resolve_device(args.device)
-    print(f"Training on device: {device}")
+    seed_everything(args.seed + rank)
+    if rank == 0:
+        if world_size == 1:
+            print(f"Training on device: {device}")
+        else:
+            print(f"Training on {world_size} GPUs; primary device: {device}")
 
     resume = read_checkpoint(args.resume, device) if args.resume else None
     if resume is not None:
@@ -158,12 +192,14 @@ def main():
                          max_answer_tokens=(args.max_answer_tokens if args.max_answer_tokens is not None
                                             else Config.MAX_LEN_ANS)).to(device)
 
-    train_loader = _make_loader(args, "train", True, text_model, image_model)
-    dev_loader = _make_loader(args, "dev", False, text_model, image_model)
-    if not len(train_loader) or not len(dev_loader):
+    train_loader = _make_loader(args, "train", True, text_model, image_model,
+                                rank=rank, world_size=world_size)
+    dev_loader = (_make_loader(args, "dev", False, text_model, image_model)
+                  if rank == 0 else None)
+    if not len(train_loader) or (rank == 0 and not len(dev_loader)):
         raise ValueError("Training and development datasets must be non-empty")
-    train_eval_loader = DataLoader(train_loader.dataset, batch_size=args.batch_size,
-                                   shuffle=False)
+    train_eval_loader = (DataLoader(train_loader.dataset, batch_size=args.batch_size,
+                                    shuffle=False) if rank == 0 else None)
     train_criterion = nn.CrossEntropyLoss(
         ignore_index=model.pad_token_id, label_smoothing=args.label_smoothing
     )
@@ -173,7 +209,7 @@ def main():
         device=str(resolve_device(args.bertscore_device)),
         batch_size=args.bertscore_batch_size,
         rescale_with_baseline=args.bertscore_rescale,
-    )
+    ) if rank == 0 else None
     trainable_parameters = [parameter for parameter in model.parameters()
                             if parameter.requires_grad]
     optimizer = optim.AdamW(
@@ -181,7 +217,8 @@ def main():
         lr=args.lr if args.lr is not None else Config.lr,
         weight_decay=args.weight_decay,
     )
-    print(f"Trainable parameters: {sum(parameter.numel() for parameter in trainable_parameters):,}")
+    if rank == 0:
+        print(f"Trainable parameters: {sum(parameter.numel() for parameter in trainable_parameters):,}")
     scheduler = get_linear_schedule_with_warmup(
         optimizer, num_warmup_steps=0, num_training_steps=len(train_loader) * args.epochs
     )
@@ -195,10 +232,15 @@ def main():
         epochs_without_improvement = int(resume.get("epochs_without_improvement", 0))
     if start_epoch >= args.epochs:
         raise ValueError("Resume checkpoint has already reached the requested epoch count")
+    training_model = (DistributedDataParallel(
+        model, device_ids=[device.index], output_device=device.index,
+        find_unused_parameters=True,
+    ) if world_size > 1 else model)
 
     destination = Path(args.model_path)
-    destination.mkdir(parents=True, exist_ok=True)
-    if resume is None:
+    if rank == 0:
+        destination.mkdir(parents=True, exist_ok=True)
+    if rank == 0 and resume is None:
         manifest = {
             "model_config": model.model_config,
             "arguments": vars(args),
@@ -213,7 +255,7 @@ def main():
             json.dumps(manifest, indent=2, default=str) + "\n", encoding="utf-8"
         )
     metrics_path = destination / "metrics.jsonl"
-    if best_metric is not None and "epoch" not in best_metric:
+    if rank == 0 and best_metric is not None and "epoch" not in best_metric:
         # Version-3 checkpoints written before early stopping tracked the best
         # score but not its epoch. Recover it from the adjacent history when possible.
         best_metric = dict(best_metric)
@@ -226,80 +268,103 @@ def main():
                     continue
                 if old_row.get("val_loss") == best_metric.get("loss"):
                     best_metric["epoch"] = old_row.get("epoch", "unknown")
-    if resume is None:
+    if rank == 0 and resume is None:
         metrics_path.write_text("", encoding="utf-8")
     history = []
     from test import evaluation
     for epoch in range(start_epoch, args.epochs):
+        if isinstance(train_loader.sampler, DistributedSampler):
+            train_loader.sampler.set_epoch(epoch)
         _, epoch_losses = train(
-            model, train_loader, 1, optimizer, scheduler, train_criterion,
+            training_model, train_loader, 1, optimizer, scheduler, train_criterion,
             device=device,
             epoch_offset=epoch, total_epochs=args.epochs,
             gradient_clip=args.gradient_clip or None,
         )
         train_loss = epoch_losses[-1]
         global_step += len(train_loader)
-        training = evaluation(
-            model, train_eval_loader, validation_criterion, device=device,
-            bert_scorer=bert_scorer,
-        )
-        train_scores = training["metrics"]
-        print(_format_epoch_metrics(epoch + 1, args.epochs, "Train", train_loss,
-                                    train_scores))
-        validation = evaluation(
-            model, dev_loader, validation_criterion, device=device,
-            bert_scorer=bert_scorer,
-        )
-        val_loss, val_scores = validation["loss"], validation["metrics"]
-        current = {"loss": val_loss, "epoch": epoch + 1}
-        improved = best_metric is None or val_loss < best_metric["loss"]
-        if improved:
-            best_metric = current
-            epochs_without_improvement = 0
-        else:
-            epochs_without_improvement += 1
-        checkpoint_args = dict(
-            model=model, text_model=text_model, image_model=image_model,
-            optimizer=optimizer, scheduler=scheduler,
-            epoch=epoch + 1, global_step=global_step, best_metric=best_metric,
-            epochs_without_improvement=epochs_without_improvement,
-        )
-        save_checkpoint(destination / "last.pt", **checkpoint_args)
-        if improved:
-            save_checkpoint(destination / "best.pt", **checkpoint_args)
-        row = {"epoch": epoch + 1, "train_loss": train_loss,
-               **{f"train_{name}": train_scores[name] for name in PAPER_METRICS},
-               "val_loss": val_loss,
-               **{f"val_{name}": val_scores[name] for name in PAPER_METRICS},
-               "learning_rate": scheduler.get_last_lr()[0],
-               "improved": improved,
-               "epochs_without_improvement": epochs_without_improvement}
-        history.append(row)
-        with metrics_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(row) + "\n")
-        print(_format_epoch_metrics(epoch + 1, args.epochs, "Validation", val_loss,
-                                    val_scores) +
-              f", best epoch={best_metric['epoch']}, "
-              f"patience={epochs_without_improvement}/{args.early_stopping_patience or 'off'}")
-        if (args.early_stopping_patience and
-                epochs_without_improvement >= args.early_stopping_patience):
-            print(f"Early stopping at epoch {epoch + 1}; best checkpoint is epoch "
-                  f"{best_metric['epoch']} with validation loss={best_metric['loss']:.4f}.")
+        stop = False
+        if rank == 0:
+            training = evaluation(
+                model, train_eval_loader, validation_criterion, device=device,
+                bert_scorer=bert_scorer,
+            )
+            train_scores = training["metrics"]
+            print(_format_epoch_metrics(epoch + 1, args.epochs, "Train", train_loss,
+                                        train_scores))
+            validation = evaluation(
+                model, dev_loader, validation_criterion, device=device,
+                bert_scorer=bert_scorer,
+            )
+            val_loss, val_scores = validation["loss"], validation["metrics"]
+            current = {"loss": val_loss, "epoch": epoch + 1}
+            improved = best_metric is None or val_loss < best_metric["loss"]
+            if improved:
+                best_metric = current
+                epochs_without_improvement = 0
+            else:
+                epochs_without_improvement += 1
+            checkpoint_args = dict(
+                model=model, text_model=text_model, image_model=image_model,
+                optimizer=optimizer, scheduler=scheduler,
+                epoch=epoch + 1, global_step=global_step, best_metric=best_metric,
+                epochs_without_improvement=epochs_without_improvement,
+            )
+            save_checkpoint(destination / "last.pt", **checkpoint_args)
+            if args.save_every_epoch:
+                save_checkpoint(destination / f"epoch_{epoch + 1:04d}.pt", **checkpoint_args)
+            if improved:
+                save_checkpoint(destination / "best.pt", **checkpoint_args)
+            row = {"epoch": epoch + 1, "train_loss": train_loss,
+                   **{f"train_{name}": train_scores[name] for name in PAPER_METRICS},
+                   "val_loss": val_loss,
+                   **{f"val_{name}": val_scores[name] for name in PAPER_METRICS},
+                   "learning_rate": scheduler.get_last_lr()[0],
+                   "improved": improved,
+                   "epochs_without_improvement": epochs_without_improvement}
+            history.append(row)
+            with metrics_path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(row) + "\n")
+            print(_format_epoch_metrics(epoch + 1, args.epochs, "Validation", val_loss,
+                                        val_scores) +
+                  f", best epoch={best_metric['epoch']}, "
+                  f"patience={epochs_without_improvement}/{args.early_stopping_patience or 'off'}")
+            if (args.early_stopping_patience and
+                    epochs_without_improvement >= args.early_stopping_patience):
+                print(f"Early stopping at epoch {epoch + 1}; best checkpoint is epoch "
+                      f"{best_metric['epoch']} with validation loss={best_metric['loss']:.4f}.")
+                stop = True
+        if world_size > 1:
+            stop_signal = torch.tensor([int(stop)], device=device)
+            dist.broadcast(stop_signal, src=0)
+            stop = bool(stop_signal.item())
+        if stop:
             break
 
-    plt.figure(figsize=(10, 6))
-    for metric in PAPER_METRICS:
-        plt.plot([row["epoch"] for row in history],
-                 [row[f"train_{metric}"] for row in history],
-                 label=f"train_{metric}", linestyle="--")
-        plt.plot([row["epoch"] for row in history],
-                 [row[f"val_{metric}"] for row in history], label=f"val_{metric}")
-    plt.xlabel("Epoch")
-    plt.ylabel("Score")
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(destination / "evaluation_metrics_plot.png")
-    plt.close()
+    if rank == 0:
+        plt.figure(figsize=(10, 6))
+        for metric in PAPER_METRICS:
+            plt.plot([row["epoch"] for row in history],
+                     [row[f"train_{metric}"] for row in history],
+                     label=f"train_{metric}", linestyle="--")
+            plt.plot([row["epoch"] for row in history],
+                     [row[f"val_{metric}"] for row in history], label=f"val_{metric}")
+        plt.xlabel("Epoch")
+        plt.ylabel("Score")
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(destination / "evaluation_metrics_plot.png")
+        plt.close()
+
+
+def main():
+    args = get_args()
+    device, rank, world_size = _training_device(args.device)
+    try:
+        _run_training(args, device, rank, world_size)
+    finally:
+        if world_size > 1:
+            dist.destroy_process_group()
 
 
 if __name__ == "__main__":

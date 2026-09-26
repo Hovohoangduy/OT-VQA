@@ -20,7 +20,9 @@ def get_args(argv=None):
                         help="English Hugging Face tokenizer and text encoder")
     parser.add_argument("--image_model", default="google/vit-base-patch16-224-in21k")
     parser.add_argument("--split", choices=["dev", "test"], default="dev")
-    parser.add_argument("--resume", default=None, help="Version-3 training checkpoint to resume")
+    parser.add_argument("--resume", default=None, help="Version-3/4 training checkpoint to resume")
+    parser.add_argument("--save_every_epoch", action="store_true",
+                        help="Keep epoch_0001.pt, epoch_0002.pt, ... in addition to last.pt and best.pt")
     parser.add_argument("--seed", type=int, default=1105)
     parser.add_argument("--lr", type=float, default=None)
     parser.add_argument(

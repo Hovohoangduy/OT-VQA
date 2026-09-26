@@ -108,11 +108,34 @@ available, but can fall back to another device.
 
 Training writes `last.pt`, the lowest-validation-loss checkpoint as `best.pt`, a JSONL
 metric history, an evaluation plot, and `run_config.json` with dataset hashes.
+Add `--save_every_epoch` to retain `epoch_0001.pt`, `epoch_0002.pt`, and so on.
+Each epoch file is a full resumable checkpoint, so 100 files can use substantial disk space.
 After each epoch, it reports generated-answer EM, token F1, BLEU-1/2, ROUGE-L,
 and BERTScore for both the training and validation splits. The history stores
 these as `train_*` and `val_*` fields; the plot shows both curves. Scoring the
 full training split adds an evaluation pass each epoch.
 Resume with `--resume path/to/last.pt`.
+
+For a Kaggle notebook with two enabled GPUs, run:
+
+```bash
+!torchrun --standalone --nnodes=1 --nproc_per_node=2 train.py \
+  --fusion ot --device cuda --epochs 100 --batch_size 32 \
+  --max_answer_tokens 128 --early_stopping_patience 0 \
+  --train_csv_path /kaggle/input/datasets/duyho0511chill/plantexpert-dataset/plantexpert_dataset/train.csv \
+  --dev_csv_path /kaggle/input/datasets/duyho0511chill/plantexpert-dataset/plantexpert_dataset/val.csv \
+  --img_path /kaggle/input/datasets/duyho0511chill/plantexpert-dataset/plantexpert_dataset/images \
+  --model_path /kaggle/working/plantexpert_model
+```
+
+`--batch_size 32` means 32 examples per GPU (64 total). Checkpoints and
+validation metrics are written once by rank 0; validation runs on one GPU.
+Use `/kaggle/working` for output because Kaggle input datasets are read-only.
+Resume with the same command plus `--resume /kaggle/working/plantexpert_model/last.pt`.
+This command updates `last.pt` after every epoch without accumulating 100 large
+files. Add `--save_every_epoch` only if you need a separate file for each epoch.
+The default early-stopping patience is 8 epochs; this command disables it to
+run all 100 epochs.
 New runs default to OT. For a matched SAN baseline, run the same command with
 `--fusion san` and a different `--model_path`. Set `--ot_dustbin_mass 0` for a
 full-OT ablation. Partial OT defaults to mass `0.2`, Sinkhorn epsilon `0.05`,

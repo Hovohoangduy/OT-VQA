@@ -170,7 +170,8 @@ class OTVQATests(unittest.TestCase):
             "--img_path", str(image_root), "--model_path", str(output),
             "--text_model", str(self.text), "--image_model", str(self.visual),
             "--d_model", "16", "--ffn_hidden", "32", "--num_layers", "1",
-            "--batch_size", "1", "--epochs", "1", "--fusion", "ot",
+            "--batch_size", "1", "--epochs", "2", "--fusion", "ot",
+            "--save_every_epoch",
             "--device", "cpu",
         ])
         class ConstantScorer:
@@ -184,6 +185,13 @@ class OTVQATests(unittest.TestCase):
             training_script.main()
         self.assertTrue((output / "run_config.json").is_file())
         self.assertTrue((output / "best.pt").is_file())
+        self.assertTrue((output / "last.pt").is_file())
+        self.assertEqual(torch.load(output / "epoch_0001.pt", map_location="cpu",
+                                    weights_only=True)["epoch"], 1)
+        self.assertEqual(torch.load(output / "epoch_0002.pt", map_location="cpu",
+                                    weights_only=True)["epoch"], 2)
+        self.assertEqual(torch.load(output / "last.pt", map_location="cpu",
+                                    weights_only=True)["epoch"], 2)
         self.assertEqual(load_model(output / "best.pt", torch.device("cpu")).fusion, "ot")
 
 
