@@ -17,7 +17,6 @@ from transformers import BertConfig, BertModel, BertTokenizer, ViTConfig, ViTIma
 from configs.config import Config
 from model.vqa_model import VQAModel
 from model.decoder_model import MultiHeadAttention, MultiHeadCrossAttention, scaled_dot_product
-from model.sans import StackAttention
 from utils.data_processing import process_dataframe
 from utils.data_processing import preprocess_text
 from utils.vqa_dataset import VQADataset, resolve_image_root
@@ -65,11 +64,10 @@ class ModelLogicTests(unittest.TestCase):
         loss = nn.functional.cross_entropy(logits.transpose(1, 2), targets, ignore_index=model.pad_token_id)
         loss.backward()
         self.assertTrue(torch.isfinite(loss))
-        self.assertIsNotNone(model.question_encoder.lstm.weight_ih_l0.grad)
+        self.assertIsNotNone(model.ot_fusion.question_projection.weight.grad)
         self.assertIsNotNone(model.answer_embedding.token_embeddings.word_embeddings.weight.grad)
         self.assertIsNone(next(model.image_model.model.parameters()).grad)
         self.assertFalse(model.image_model.model.training)
-        self.assertIsNot(model.san_model[0], model.san_model[1])
 
     def test_training_can_learn_an_answer_then_generate_without_reference(self):
         torch.manual_seed(7)
@@ -186,8 +184,6 @@ class ModelLogicTests(unittest.TestCase):
             if key.startswith('question_encoder.text_encoder.'):
                 key = key.replace('question_encoder.text_encoder.', 'ques_model.text_encoder.', 1)
                 key = key.replace('ques_model.text_encoder.', 'ques_model.legacy_encoder.', 1)
-            elif key.startswith('question_encoder.lstm.'):
-                key = key.replace('question_encoder.lstm.', 'ques_model.lstm.', 1)
             elif key.startswith('answer_embedding.token_embeddings.'):
                 key = key.replace('answer_embedding.token_embeddings.', 'ans_model.legacy_embeddings.', 1)
             legacy_state[key] = value
@@ -197,6 +193,11 @@ class ModelLogicTests(unittest.TestCase):
         restored = load_model(path, torch.device('cpu'))
         for key, value in model.state_dict().items():
             torch.testing.assert_close(value, restored.state_dict()[key])
+        incompatible = torch.load(path, map_location='cpu', weights_only=True)
+        incompatible['model_config']['fusion'] = 'legacy'
+        torch.save(incompatible, path)
+        with self.assertRaisesRegex(ValueError, 'OT model'):
+            load_model(path, torch.device('cpu'))
         torch.save(model.state_dict(), path)
         with self.assertRaisesRegex(ValueError, 'Retrain'):
             load_model(path, torch.device('cpu'))
@@ -252,7 +253,6 @@ class ModelLogicTests(unittest.TestCase):
         torch.testing.assert_close(self_attn(x), expected)
         cross = MultiHeadCrossAttention(16, 4)
         self.assertEqual(cross(torch.randn(2, 3, 16), x).shape, (2, 5, 16))
-        self.assertEqual(StackAttention(16, 8, dropout=False)(x, torch.randn(2, 1, 16)).shape, (2, 16))
 
 class DataLogicTests(unittest.TestCase):
     def test_metrics_count_repeated_words_and_empty_answers(self):

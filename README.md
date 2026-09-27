@@ -1,9 +1,7 @@
 # OT-VQA
 
 Visual question answering with a frozen ViT image encoder, BERT question tokens,
-partial optimal transport fusion, and autoregressive answer generation. The
-original Stacked Attention Network (SAN) remains available as a baseline. See
-[the implementation and evaluation plan](docs/optimal_transport_vqa_plan.md).
+partial optimal transport fusion, and autoregressive answer generation.
 For a code-level walkthrough with diagrams and an interactive transport example,
 open [the architecture guide](docs/ot_vqa_architecture.html).
 
@@ -54,7 +52,7 @@ For training, pass `--train_csv_path data/plantexpert_dataset/train.csv`,
 To train the OT model on this PlantExpertVQA subset:
 
 ```bash
-python train.py --fusion ot --device auto --batch_size 2 \
+python train.py --device auto --batch_size 2 \
   --max_answer_tokens 128 \
   --train_csv_path data/plantexpert_dataset/train.csv \
   --dev_csv_path data/plantexpert_dataset/val.csv \
@@ -98,7 +96,7 @@ python -c "import torch; print('PyTorch:', torch.__version__); print('CUDA build
 `CUDA available` must print `True`. Then train with CUDA explicitly:
 
 ```powershell
-python train.py --fusion ot --device cuda --train_csv_path data/gqa_dataset/train.csv --dev_csv_path data/gqa_dataset/val.csv --img_path data/gqa_dataset/images --model_path data/gqa_model
+python train.py --device cuda --train_csv_path data/gqa_dataset/train.csv --dev_csv_path data/gqa_dataset/val.csv --img_path data/gqa_dataset/images --model_path data/gqa_model
 ```
 
 Training prints `Training on device: cuda`. If CUDA is unavailable, `--device cuda`
@@ -120,7 +118,7 @@ For a Kaggle notebook with two enabled GPUs, run:
 
 ```bash
 !torchrun --standalone --nnodes=1 --nproc_per_node=2 train.py \
-  --fusion ot --device cuda --epochs 100 --batch_size 32 \
+  --device cuda --epochs 100 --batch_size 32 \
   --max_answer_tokens 128 --early_stopping_patience 0 \
   --train_csv_path /kaggle/input/datasets/duyho0511chill/plantexpert-dataset/plantexpert_dataset/train.csv \
   --dev_csv_path /kaggle/input/datasets/duyho0511chill/plantexpert-dataset/plantexpert_dataset/val.csv \
@@ -136,9 +134,8 @@ This command updates `last.pt` after every epoch without accumulating 100 large
 files. Add `--save_every_epoch` only if you need a separate file for each epoch.
 The default early-stopping patience is 8 epochs; this command disables it to
 run all 100 epochs.
-New runs default to OT. For a matched SAN baseline, run the same command with
-`--fusion san` and a different `--model_path`. Set `--ot_dustbin_mass 0` for a
-full-OT ablation. Partial OT defaults to mass `0.2`, Sinkhorn epsilon `0.05`,
+Set `--ot_dustbin_mass 0` for a full-OT ablation. Partial OT defaults to mass
+`0.2`, Sinkhorn epsilon `0.05`,
 20 iterations, and dustbin-to-dustbin cost `1.0`. These values require
 validation on your dataset.
 
@@ -164,18 +161,7 @@ not be treated as numerically identical to its published results. The local
 5,000/1,000 train/validation subset also differs from the paper's full test
 set. Throughput and peak CUDA memory describe VQA generation and loss only.
 If your CSV has a `question_type` column, the prediction export
-includes it. After evaluating SAN and OT on the *same* held-out examples, compare
-their prediction files with paired bootstrap intervals:
-
-```bash
-python -m utils.compare_predictions \
-  --san data/san_model/dev_predictions.csv \
-  --ot data/gqa_model/dev_predictions.csv \
-  --output-json data/ot_comparison.json
-```
-
-Pass multiple files after `--san` and `--ot` in the same seed order when you
-have repeated runs. The paper's results are for image-text retrieval; VQA gains
+includes it. The paper's results are for image-text retrieval; VQA quality
 must be established with this repository's generated-answer evaluation.
 
 ## Predict

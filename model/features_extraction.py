@@ -1,6 +1,5 @@
 import torch
 from torch import nn
-from torch.nn.utils.rnn import pack_padded_sequence
 from transformers import AutoImageProcessor, BertModel, BertTokenizer, ViTModel
 
 from configs.config import Config
@@ -49,14 +48,11 @@ class ImageEmbedding(nn.Module):
         return outputs.last_hidden_state, image_ids
 
 class QuestionEmbedding(nn.Module):
-    def __init__(self, input_size=None, output_size=768, model_name=Config.text_model,
-                 use_lstm=True):
+    def __init__(self, model_name=Config.text_model):
         super().__init__()
         validate_english_text_model(model_name)
         self.tokenizer = BertTokenizer.from_pretrained(model_name)
         self.text_encoder = BertModel.from_pretrained(model_name)
-        self.lstm = (nn.LSTM(input_size or self.text_encoder.config.hidden_size, output_size,
-                             batch_first=True) if use_lstm else None)
 
     def encode_tokens(self, questions):
         tokens = self.tokenizer(
@@ -70,18 +66,6 @@ class QuestionEmbedding(nn.Module):
         embeddings = self.text_encoder(**tokens).last_hidden_state
         padding_mask = tokens['attention_mask'].eq(0) | special_mask
         return embeddings, padding_mask, tokens['input_ids']
-
-    def forward(self, questions):
-        if self.lstm is None:
-            raise RuntimeError('LSTM summary is unavailable in OT fusion mode')
-        embeddings, _, input_ids = self.encode_tokens(questions)
-        # Preserve the SAN baseline contract: summarize all non-padding tokens,
-        # including tokenizer boundary tokens, with the LSTM.
-        lengths = input_ids.ne(self.tokenizer.pad_token_id).sum(1).cpu()
-        packed = pack_padded_sequence(embeddings, lengths, batch_first=True, enforce_sorted=False)
-        _, (hidden, _) = self.lstm(packed)
-        return hidden.squeeze(0)
-
 
 class AnswerEmbedding(nn.Module):
     def __init__(self, input_size=768, model_name=Config.text_model):

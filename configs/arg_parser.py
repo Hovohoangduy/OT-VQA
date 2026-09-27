@@ -48,8 +48,6 @@ def get_args(argv=None):
     parser.add_argument("--drop_prob", type=float, default=0.2)
     parser.add_argument("--max_answer_tokens", type=int, default=None,
                         help="Answer length including start/end tokens; default 38, use 128 for PlantExpertVQA")
-    parser.add_argument("--fusion", choices=["san", "ot"], default=None,
-                        help="Fusion architecture; new runs default to ot, resume uses checkpoint value")
     parser.add_argument("--ot_epsilon", type=float, default=None,
                         help="Sinkhorn entropy coefficient (new OT runs default to 0.05)")
     parser.add_argument("--ot_iterations", type=int, default=None,

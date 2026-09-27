@@ -1,4 +1,4 @@
-"""Train SAN or OT VQA and select checkpoints by validation loss."""
+"""Train OT VQA and select checkpoints by validation loss."""
 
 from __future__ import annotations
 
@@ -161,9 +161,6 @@ def _run_training(args, device, rank, world_size):
         stored_answer_length = stored_config.get("max_answer_tokens", Config.MAX_LEN_ANS)
         if args.max_answer_tokens is not None and args.max_answer_tokens != stored_answer_length:
             raise ValueError("--max_answer_tokens does not match the resume checkpoint")
-        fusion = stored_config.get("fusion", "san")
-        if args.fusion is not None and args.fusion != fusion:
-            raise ValueError("--fusion does not match the resume checkpoint")
         ot_defaults = {"ot_epsilon": 0.05, "ot_iterations": 20,
                        "ot_dustbin_mass": 0.2, "ot_dustbin_cost": 1.0}
         for name, default in ot_defaults.items():
@@ -182,7 +179,6 @@ def _run_training(args, device, rank, world_size):
                          ffn_hidden=args.ffn_hidden, num_layers=args.num_layers,
                          num_heads=args.num_heads, drop_prob=args.drop_prob,
                          freeze_answer_embeddings=args.freeze_answer_embeddings,
-                         fusion=args.fusion or "ot",
                          ot_epsilon=args.ot_epsilon if args.ot_epsilon is not None else 0.05,
                          ot_iterations=args.ot_iterations if args.ot_iterations is not None else 20,
                          ot_dustbin_mass=(args.ot_dustbin_mass if args.ot_dustbin_mass is not None

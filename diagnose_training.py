@@ -216,10 +216,9 @@ def main():
             model, dataset, args.samples, args.batch_size, device
         ),
     }
-    if model.fusion == "ot":
-        report["transport"] = _transport_report(
-            model, dataset, args.samples, args.batch_size, device
-        )
+    report["transport"] = _transport_report(
+        model, dataset, args.samples, args.batch_size, device
+    )
     if args.train_csv_path:
         train_frame = load_dataframe(args.train_csv_path)
         report["dataset"] = _dataset_report(train_frame, frame)

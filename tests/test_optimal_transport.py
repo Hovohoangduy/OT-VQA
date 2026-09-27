@@ -105,7 +105,7 @@ class OTVQATests(unittest.TestCase):
         cls.directory.cleanup()
 
     def make_model(self):
-        return VQAModel(text_model=str(self.text), image_model=str(self.visual), fusion="ot",
+        return VQAModel(text_model=str(self.text), image_model=str(self.visual),
                         output_size=16, d_model=16, ffn_hidden=32, num_layers=1,
                         drop_prob=0, ot_iterations=50)
 
@@ -170,7 +170,7 @@ class OTVQATests(unittest.TestCase):
             "--img_path", str(image_root), "--model_path", str(output),
             "--text_model", str(self.text), "--image_model", str(self.visual),
             "--d_model", "16", "--ffn_hidden", "32", "--num_layers", "1",
-            "--batch_size", "1", "--epochs", "2", "--fusion", "ot",
+            "--batch_size", "1", "--epochs", "2",
             "--save_every_epoch",
             "--device", "cpu",
         ])

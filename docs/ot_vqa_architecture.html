@@ -46,7 +46,7 @@
         <div class="card"><div class="number">FUSION</div><h3>Partial transport</h3><p>Each image patch and valid question token receives prescribed mass. Global-feature dustbins absorb some unmatched content.</p></div>
         <div class="card"><div class="number">OUTPUT</div><h3>Answer generation</h3><p>Decoder cross-attention reads grounded question-token memory and produces a sequence from <code>[CLS]</code> to <code>[SEP]</code>.</p></div>
       </div>
-      <div class="callout warn" style="margin-top:16px"><strong>Evidence boundary</strong><p>The source paper reports image-text <em>retrieval</em> results. This repository adapts its matching idea to <em>VQA generation</em>; a VQA accuracy gain still requires controlled SAN-versus-OT experiments.</p></div>
+      <div class="callout warn" style="margin-top:16px"><strong>Evidence boundary</strong><p>The source paper reports image-text <em>retrieval</em> results. This repository adapts its matching idea to <em>VQA generation</em>; VQA accuracy must be measured on held-out examples.</p></div>
     </section>
 
     <section id="pipeline">
@@ -147,10 +147,10 @@ P    = exp(logK + logu + logv)</code></pre>
       </div>
       <div class="diagram" style="margin-top:16px"><div class="flow"><div class="node"><strong>Answer IDs</strong>[CLS], wordpieces, [SEP]</div><span class="arrow">→</span><div class="node teal"><strong>Training input</strong>all IDs except last</div><span class="arrow">→</span><div class="node teal"><strong>Causal decoder</strong>cross-attend to OT memory</div><span class="arrow">→</span><div class="node orange"><strong>Loss targets</strong>all IDs except first</div></div><p class="caption">At inference, generation starts with <code>[CLS]</code>, repeatedly chooses the highest-logit next token, and stops at <code>[SEP]</code> or the maximum length.</p></div>
       <h3>Run commands</h3>
-      <pre><code>python train.py --fusion ot --device cuda --train_csv_path data/gqa_dataset/train.csv --dev_csv_path data/gqa_dataset/val.csv --img_path data/gqa_dataset/images --model_path data/gqa_model
+      <pre><code>python train.py --device cuda --train_csv_path data/gqa_dataset/train.csv --dev_csv_path data/gqa_dataset/val.csv --img_path data/gqa_dataset/images --model_path data/gqa_model
 python test.py --checkpoint data/gqa_model/best.pt --split dev --device cuda
 python predict.py --checkpoint data/gqa_model/best.pt --image path/to/image.jpg --question "What color is the car?" --device cuda</code></pre>
-      <p><code>--device cuda</code> requires a CUDA-enabled PyTorch installation. New runs default to OT; the explicit flag makes the architecture clear. Use <code>--fusion san</code> and a separate output path for the baseline. The code also accepts existing CSV/image layouts through path flags.</p>
+      <p><code>--device cuda</code> requires a CUDA-enabled PyTorch installation. The code accepts existing CSV/image layouts through path flags.</p>
     </section>
 
     <section id="source-map">
@@ -162,11 +162,11 @@ python predict.py --checkpoint data/gqa_model/best.pt --image path/to/image.jpg 
         <tr><td><a href="../utils/data_processing.py">utils/data_processing.py</a> + <a href="../utils/vqa_dataset.py">utils/vqa_dataset.py</a></td><td>CSV validation, image-root resolution, image loading, row tuple.</td></tr>
         <tr><td><a href="../model/features_extraction.py">model/features_extraction.py</a></td><td>Frozen ViT; BERT token encoding and mask; answer-token embedding.</td></tr>
         <tr><td><a href="../model/optimal_transport.py">model/optimal_transport.py</a></td><td><code>log_sinkhorn</code>, <code>PartialTransportFusion.forward</code>, plan diagnostics.</td></tr>
-        <tr><td><a href="../model/vqa_model.py">model/vqa_model.py</a></td><td>Architecture switch, encode/decode/generate, memory masking.</td></tr>
-        <tr><td><a href="../model/decoder_model.py">model/decoder_model.py</a> + <a href="../model/sans.py">model/sans.py</a></td><td>Autoregressive Transformer decoder and SAN comparison path.</td></tr>
+        <tr><td><a href="../model/vqa_model.py">model/vqa_model.py</a></td><td>OT encode/decode/generate and memory masking.</td></tr>
+        <tr><td><a href="../model/decoder_model.py">model/decoder_model.py</a></td><td>Autoregressive Transformer decoder.</td></tr>
         <tr><td><a href="../train.py">train.py</a> + <a href="../test.py">test.py</a> + <a href="../predict.py">predict.py</a></td><td>Optimization, generated-answer evaluation, single-image inference.</td></tr>
         <tr><td><a href="../utils/checkpoint.py">utils/checkpoint.py</a></td><td>Version-4 config/state serialization and strict model reconstruction.</td></tr>
-        <tr><td><a href="../diagnose_training.py">diagnose_training.py</a> + <a href="../utils/compare_predictions.py">utils/compare_predictions.py</a></td><td>Transport/reliance diagnostics and paired SAN-versus-OT comparison.</td></tr>
+        <tr><td><a href="../diagnose_training.py">diagnose_training.py</a></td><td>Transport and reliance diagnostics.</td></tr>
         <tr><td><a href="../tests/test_optimal_transport.py">tests/test_optimal_transport.py</a></td><td>Marginals, masking, gradients, FP32 solve, integration, checkpoint, tiny learning test.</td></tr>
       </tbody></table></div>
     </section>
@@ -188,7 +188,7 @@ python predict.py --checkpoint data/gqa_model/best.pt --image path/to/image.jpg 
       <div class="kicker">11 · Checking behavior</div><h2>What to measure before claiming improvement</h2>
       <div class="grid two">
         <div class="card"><div class="number">TRANSPORT HEALTH</div><h3>Plan and solver</h3><p><a href="../diagnose_training.py">diagnose_training.py</a> averages local matched mass and the three dustbin flows, and records maximum marginal residuals. Inspect these values by question type as well as overall.</p></div>
-        <div class="card"><div class="number">VQA QUALITY</div><h3>Generated answers</h3><p><a href="../test.py">test.py</a> reports EM, Token-F1, BLEU-1/2, ROUGE-L, BERTScore-F1, throughput, latency, and peak CUDA memory. <a href="../utils/compare_predictions.py">compare_predictions.py</a> pairs SAN and OT outputs by <code>anno_id</code> and bootstraps score differences for all six metrics.</p></div>
+        <div class="card"><div class="number">VQA QUALITY</div><h3>Generated answers</h3><p><a href="../test.py">test.py</a> reports EM, Token-F1, BLEU-1/2, ROUGE-L, BERTScore-F1, throughput, latency, and peak CUDA memory.</p></div>
       </div>
       <details><summary>What does a large dustbin flow imply?</summary><p>The learned costs favor leaving more patch/token mass unmatched within the allowed capacity. It may reflect irrelevant regions, weak embeddings, or poor hyperparameters. Compare answer accuracy and examples before interpreting it as useful filtering.</p></details>
       <details><summary>Why can a low residual still produce a bad answer?</summary><p>Residuals measure whether the transport constraints were approximately met. They do not measure whether costs capture the right semantics, whether visual features resolve objects/relations, or whether the decoder uses the image.</p></details>
@@ -196,7 +196,7 @@ python predict.py --checkpoint data/gqa_model/best.pt --image path/to/image.jpg 
       <div class="callout warn" style="margin-top:16px"><strong>Current scope</strong><p>The repository contains implementation and tests, but this guide does not claim a measured GQA accuracy gain. Compare the same held-out examples and matched training settings, and keep the final test split separate from tuning.</p></div>
     </section>
 
-    <footer class="footer">Architecture guide for the current OT-VQA source. Equations describe the implemented fusion, with finite-iteration Sinkhorn marginals understood as approximate. <a href="optimal_transport_vqa_plan.md">Implementation plan</a> · <a href="../README.md">README</a></footer>
+    <footer class="footer">Architecture guide for the current OT-VQA source. Equations describe the implemented fusion, with finite-iteration Sinkhorn marginals understood as approximate. <a href="../README.md">README</a></footer>
   </main>
 </div>
 <script>

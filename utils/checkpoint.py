@@ -11,8 +11,8 @@ from model.vqa_model import VQAModel
 
 MODEL_CONFIG_KEYS = {
     "vocab_size", "output_size", "d_model", "num_heads", "ffn_hidden",
-    "drop_prob", "num_layers", "num_att_layers", "mode",
-    "freeze_answer_embeddings", "fusion", "ot_epsilon", "ot_iterations",
+    "drop_prob", "num_layers", "mode",
+    "freeze_answer_embeddings", "ot_epsilon", "ot_iterations",
     "ot_dustbin_mass", "ot_dustbin_cost", "max_answer_tokens",
 }
 
@@ -101,15 +101,14 @@ def read_checkpoint(checkpoint_path, device):
             "Legacy checkpoint was trained with the incorrect decoder/objective. "
             "Retrain with the corrected train.py before generating answers."
         )
+    if checkpoint.get("model_config", {}).get("fusion") != "ot":
+        raise ValueError("Checkpoint must contain an OT model")
     return checkpoint
 
 
 def load_model(checkpoint_path, device):
     checkpoint = read_checkpoint(checkpoint_path, device)
     stored_config = dict(checkpoint.get("model_config", {}))
-    fusion = stored_config.get("fusion", "san")
-    if fusion not in {"san", "ot"}:
-        raise ValueError(f"Unknown checkpoint fusion architecture: {fusion}")
     model_config = {
         key: value for key, value in stored_config.items() if key in MODEL_CONFIG_KEYS
     }
@@ -132,10 +131,7 @@ def _adapt_legacy_text_keys(state_dict):
         updated = key
         parts = key.split(".")
         if len(parts) > 2 and parts[0] == "ques_model":
-            if parts[1] == "lstm":
-                updated = ".".join(["question_encoder", *parts[1:]])
-            else:
-                updated = ".".join(["question_encoder", "text_encoder", *parts[2:]])
+            updated = ".".join(["question_encoder", "text_encoder", *parts[2:]])
         elif len(parts) > 2 and parts[0] == "ans_model":
             updated = ".".join(["answer_embedding", "token_embeddings", *parts[2:]])
         converted[updated] = value

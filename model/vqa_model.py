@@ -1,4 +1,4 @@
-"""SAN or optimal-transport VQA with autoregressive answer generation."""
+"""Optimal-transport VQA with autoregressive answer generation."""
 
 from __future__ import annotations
 
@@ -9,43 +9,38 @@ from configs.config import Config
 from model.decoder_model import Decoder
 from model.features_extraction import AnswerEmbedding, ImageEmbedding, QuestionEmbedding, validate_english_text_model
 from model.optimal_transport import PartialTransportFusion
-from model.sans import StackAttention
 
 
 class VQAModel(nn.Module):
     """Generate answers from question-conditioned image features."""
 
     def __init__(self, vocab_size=None, output_size=768, d_model=768, num_heads=4,
-                 ffn_hidden=2048, drop_prob=0.1, num_layers=4, num_att_layers=2,
+                 ffn_hidden=2048, drop_prob=0.1, num_layers=4,
                  mode='train', text_model=Config.text_model, image_model=Config.image_model,
-                 freeze_answer_embeddings=False, fusion='san', ot_epsilon=0.05,
+                 freeze_answer_embeddings=False, ot_epsilon=0.05,
                  ot_iterations=20, ot_dustbin_mass=0.2, ot_dustbin_cost=1.0,
                  max_answer_tokens=Config.MAX_LEN_ANS):
         super().__init__()
-        if output_size != d_model or num_att_layers < 1:
-            raise ValueError('output_size must equal d_model and at least one attention layer is needed')
-        if fusion not in {'san', 'ot'}:
-            raise ValueError('fusion must be san or ot')
+        if output_size != d_model:
+            raise ValueError('output_size must equal d_model')
         if max_answer_tokens < 2:
             raise ValueError('max_answer_tokens must be at least 2')
         validate_english_text_model(text_model)
         self.mode = mode
-        self.fusion = fusion
+        self.fusion = 'ot'
         self.max_answer_tokens = max_answer_tokens
         self.text_model_name = str(text_model)
         self.image_model_name = str(image_model)
         self.model_config = dict(
             output_size=output_size, d_model=d_model, num_heads=num_heads,
             ffn_hidden=ffn_hidden, drop_prob=drop_prob, num_layers=num_layers,
-            num_att_layers=num_att_layers,
             freeze_answer_embeddings=freeze_answer_embeddings,
-            fusion=fusion, ot_epsilon=ot_epsilon, ot_iterations=ot_iterations,
+            fusion='ot', ot_epsilon=ot_epsilon, ot_iterations=ot_iterations,
             ot_dustbin_mass=ot_dustbin_mass, ot_dustbin_cost=ot_dustbin_cost,
             max_answer_tokens=max_answer_tokens,
         )
         self.image_model = ImageEmbedding(image_model)
-        self.question_encoder = QuestionEmbedding(output_size=output_size, model_name=text_model,
-                                                  use_lstm=(fusion == 'san'))
+        self.question_encoder = QuestionEmbedding(model_name=text_model)
         self.answer_embedding = AnswerEmbedding(model_name=text_model)
         if freeze_answer_embeddings:
             self.answer_embedding.freeze()
@@ -62,16 +57,11 @@ class VQAModel(nn.Module):
         answer_dim = self.answer_embedding.token_embeddings.word_embeddings.embedding_dim
         self.image_projection = nn.Identity() if image_dim == d_model else nn.Linear(image_dim, d_model)
         self.answer_projection = nn.Identity() if answer_dim == d_model else nn.Linear(answer_dim, d_model)
-        if fusion == 'san':
-            self.san_model = nn.ModuleList(
-                [StackAttention(d=d_model, k=512) for _ in range(num_att_layers)]
-            )
-        else:
-            self.ot_fusion = PartialTransportFusion(
-                text_dim=self.question_encoder.text_encoder.config.hidden_size,
-                d_model=d_model, epsilon=ot_epsilon, iterations=ot_iterations,
-                dustbin_mass=ot_dustbin_mass, dustbin_cost=ot_dustbin_cost,
-            )
+        self.ot_fusion = PartialTransportFusion(
+            text_dim=self.question_encoder.text_encoder.config.hidden_size,
+            d_model=d_model, epsilon=ot_epsilon, iterations=ot_iterations,
+            dustbin_mass=ot_dustbin_mass, dustbin_cost=ot_dustbin_cost,
+        )
         self.decoder = Decoder(d_model, ffn_hidden, num_heads, drop_prob, num_layers)
         actual_vocab = self.answer_embedding.token_embeddings.word_embeddings.num_embeddings
         if vocab_size is not None and vocab_size != actual_vocab:
@@ -84,18 +74,10 @@ class VQAModel(nn.Module):
     def encode(self, images, questions, anno_ids=None, return_transport=False):
         image_embeddings, _ = self.image_model(images, image_ids=anno_ids)
         projected_images = self.image_projection(image_embeddings)
-        if self.fusion == 'ot':
-            question_tokens, blocked, _ = self.question_encoder.encode_tokens(questions)
-            return self.ot_fusion(projected_images[:, 1:], question_tokens, ~blocked,
-                                  question_global=question_tokens[:, 0],
-                                  return_transport=return_transport)
-        context = self.question_encoder(questions)
-        for layer in self.san_model:
-            context = layer(projected_images, context.unsqueeze(1))
-        memory = context.unsqueeze(1)
-        if return_transport:
-            raise ValueError('Transport diagnostics require OT fusion')
-        return memory, torch.zeros(memory.shape[:2], dtype=torch.bool, device=memory.device)
+        question_tokens, blocked, _ = self.question_encoder.encode_tokens(questions)
+        return self.ot_fusion(projected_images[:, 1:], question_tokens, ~blocked,
+                              question_global=question_tokens[:, 0],
+                              return_transport=return_transport)
 
     def decode(self, input_ids, memory, causal=True, memory_blocked=None):
         target = self.answer_projection(self.answer_embedding.embed_ids(input_ids))
