@@ -34,8 +34,8 @@
     <header class="hero">
       <div class="eyebrow">Implementation guide · source snapshot</div>
       <h1>How optimal transport drives this VQA model</h1>
-      <p>A code-grounded tour from GQA image and question to an answer. The central operation is a differentiable, partial transport plan between ViT patches and BERT question tokens.</p>
-      <div class="chips"><span class="chip">ViT patches</span><span class="chip">BERT tokens</span><span class="chip">Log-domain Sinkhorn</span><span class="chip">Dustbin matching</span><span class="chip">Autoregressive decoder</span></div>
+      <p>A code-grounded tour from GQA image and question to an answer. The central operation is a differentiable, partial transport plan between MobileViTV2 spatial features and MiniLM question tokens.</p>
+      <div class="chips"><span class="chip">MobileViTV2 locations</span><span class="chip">MiniLM tokens</span><span class="chip">Log-domain Sinkhorn</span><span class="chip">Dustbin matching</span><span class="chip">Autoregressive decoder</span></div>
     </header>
 
     <section id="overview">
@@ -52,16 +52,16 @@
     <section id="pipeline">
       <div class="kicker">02 · Process</div><h2>End-to-end data and model flow</h2>
       <div class="diagram">
-        <div class="flow"><div class="node"><strong>CSV + image</strong>GQA row, RGB file</div><span class="arrow">→</span><div class="node"><strong>Dataset</strong>resize 224×224, tensor</div><span class="arrow">→</span><div class="node teal"><strong>Two encoders</strong>frozen ViT + trainable BERT</div><span class="arrow">→</span><div class="node teal"><strong>OT fusion</strong>cost → Sinkhorn → memory</div><span class="arrow">→</span><div class="node orange"><strong>Decoder</strong>answer-token logits</div></div>
+        <div class="flow"><div class="node"><strong>CSV + image</strong>GQA row, RGB file</div><span class="arrow">→</span><div class="node"><strong>Dataset</strong>resize, center crop, tensor</div><span class="arrow">→</span><div class="node teal"><strong>Two encoders</strong>frozen MobileViTV2 + trainable MiniLM</div><span class="arrow">→</span><div class="node teal"><strong>OT fusion</strong>cost → Sinkhorn → memory</div><span class="arrow">→</span><div class="node orange"><strong>Decoder</strong>answer-token logits</div></div>
         <p class="caption">Entry points: <a href="../train.py">train.py</a> for optimization, <a href="../test.py">test.py</a> for validation, and <a href="../predict.py">predict.py</a> for a single example.</p>
       </div>
       <div class="fork">
-        <div class="node"><strong>Image branch</strong><a href="../configs/config.py">Config.transforms</a> resizes to 224×224 and converts to float RGB. <a href="../model/features_extraction.py">ImageEmbedding</a> normalizes on device and runs frozen <code>google/vit-base-patch16-224-in21k</code>. The ViT CLS token is excluded from OT; 196 patch tokens remain.</div>
-        <div class="node teal"><strong>Question branch</strong><a href="../model/features_extraction.py">QuestionEmbedding.encode_tokens</a> runs <code>bert-base-uncased</code>, truncates to 28 tokens, and marks PAD/CLS/SEP as blocked for matching. Its contextual token vectors feed OT; BERT CLS separately supplies a global question vector.</div>
+        <div class="node"><strong>Image branch</strong><a href="../configs/config.py">Config.transforms</a> resizes the shortest edge to 288 pixels, center crops to 256×256, and converts to float RGB. <a href="../model/features_extraction.py">ImageEmbedding</a> applies processor channel handling on device and runs frozen <code>apple/mobilevitv2-2.0-imagenet1k-256</code>. Its final spatial map becomes 64 local tokens.</div>
+        <div class="node teal"><strong>Question branch</strong><a href="../model/features_extraction.py">QuestionEmbedding.encode_tokens</a> runs <code>sentence-transformers/all-MiniLM-L12-v2</code>, caps questions at 32 tokens, and marks PAD/CLS/SEP as blocked for matching. Its contextual token vectors feed OT; a mean-pooled, normalized question vector supplies the global feature.</div>
       </div>
       <ol class="steps">
         <li><strong>Load and validate rows</strong><p><a href="../utils/data_processing.py">load_dataframe</a> checks required columns and normalizes whitespace. <a href="../utils/vqa_dataset.py">VQADataset</a> resolves image paths and returns image tensors plus strings.</p></li>
-        <li><strong>Encode local features</strong><p><a href="../model/vqa_model.py">VQAModel.encode</a> projects ViT features to <code>d_model</code> and sends patch tokens, BERT tokens, and the content-token mask to <code>PartialTransportFusion</code>.</p></li>
+        <li><strong>Encode local features</strong><p><a href="../model/vqa_model.py">VQAModel.encode</a> projects MobileViTV2 features to <code>d_model</code> and sends spatial tokens, MiniLM tokens, and the content-token mask to <code>PartialTransportFusion</code>.</p></li>
         <li><strong>Align through OT</strong><p>The fusion module builds a cosine-cost matrix with dustbins, solves for a mass-constrained plan, and uses its local block to ground each valid question token.</p></li>
         <li><strong>Decode an answer</strong><p>The decoder uses causal self-attention over answer tokens and cross-attention over OT memory. Padding memory positions are blocked.</p></li>
       </ol>
@@ -69,28 +69,28 @@
 
     <section id="shapes">
       <div class="kicker">03 · Dimensions</div><h2>Tensor shape ledger</h2>
-      <p>Let <code>B</code> be batch size, <code>K</code> patch count, <code>L</code> padded BERT sequence length, <code>N</code> valid content tokens, <code>D</code> model width, and <code>A</code> answer length. Under the default image and model settings, <code>K=196</code>, <code>D=384</code>, <code>L≤28</code>, and usually <code>N≤26</code>.</p>
+      <p>Let <code>B</code> be batch size, <code>K</code> spatial-token count, <code>L</code> padded MiniLM sequence length, <code>N</code> valid content tokens, <code>D</code> model width, and <code>A</code> answer length. Under the default image and model settings, <code>K=64</code>, <code>D=384</code>, <code>L≤32</code>, <code>N≤30</code>, and <code>A≤112</code>.</p>
       <div class="table-wrap"><table><thead><tr><th>Value</th><th>Shape</th><th>Meaning</th></tr></thead><tbody>
-        <tr><td>Input image</td><td><code>[B,3,224,224]</code></td><td>RGB tensor from the dataset.</td></tr>
-        <tr><td>ViT output</td><td><code>[B,197,768]</code></td><td>CLS plus 14×14 patches for the default ViT.</td></tr>
-        <tr><td>Projected patches</td><td><code>[B,196,384]</code></td><td>CLS removed; image projection applied.</td></tr>
-        <tr><td>BERT states and valid mask</td><td><code>[B,L,768]</code>, <code>[B,L]</code></td><td>Content tokens are <code>True</code> in the mask passed to OT.</td></tr>
+        <tr><td>Input image</td><td><code>[B,3,256,256]</code></td><td>RGB tensor from the dataset.</td></tr>
+        <tr><td>MobileViTV2 output</td><td><code>[B,1024,8,8]</code></td><td>Final spatial feature map for the default image model.</td></tr>
+        <tr><td>Projected spatial tokens</td><td><code>[B,64,384]</code></td><td>Flattened 8×8 map after image projection.</td></tr>
+        <tr><td>MiniLM states and valid mask</td><td><code>[B,L,384]</code>, <code>[B,L]</code></td><td>Content tokens are <code>True</code> in the mask passed to OT.</td></tr>
         <tr><td>Extended cost and plan</td><td><code>[B,K+1,L+1]</code></td><td>Last row and column are the two dustbins.</td></tr>
-        <tr><td>Decoder memory</td><td><code>[B,1+L,D]</code></td><td>One global token, then one position per BERT token; invalid positions are masked.</td></tr>
-        <tr><td>Teacher-forced logits</td><td><code>[B,A−1,V]</code></td><td><code>V</code> is the BERT tokenizer vocabulary size.</td></tr>
+        <tr><td>Decoder memory</td><td><code>[B,1+L,D]</code></td><td>One global token, then one position per MiniLM token; invalid positions are masked.</td></tr>
+        <tr><td>Teacher-forced logits</td><td><code>[B,A−1,V]</code></td><td><code>V</code> is the MiniLM tokenizer vocabulary size.</td></tr>
       </tbody></table></div>
-      <p class="tiny">The shown ViT dimensions depend on the configured pretrained image encoder. The model accepts other compatible encoder dimensions through projection layers.</p>
+      <p class="tiny">The shown dimensions depend on the configured encoders. The model accepts other compatible encoder dimensions through projection layers.</p>
     </section>
 
     <section id="ot">
       <div class="kicker">04 · Core engine</div><h2>Optimal partial transport, step by step</h2>
       <p class="lead">The code in <a href="../model/optimal_transport.py">model/optimal_transport.py</a> performs the actual alignment. “Mass” is an abstract nonnegative weight; it is not a pixel count or a probability that an object exists.</p>
       <h3>1. Project values, normalize only for cost</h3>
-      <p>The image projection has already produced patch vectors <code>vᵢ ∈ Rᴰ</code>. A learned linear layer maps BERT states to <code>tⱼ ∈ Rᴰ</code>. The code L2-normalizes FP32 copies to compute costs, while retaining the unnormalized vectors for decoder values.</p>
+      <p>The image projection has already produced spatial vectors <code>vᵢ ∈ Rᴰ</code>. A learned linear layer maps MiniLM states to <code>tⱼ ∈ Rᴰ</code>. The code L2-normalizes FP32 copies to compute costs, while retaining the unnormalized vectors for decoder values.</p>
       <div class="equation">Cᵢⱼ = 1 − cosine(vᵢ, tⱼ) = 1 − (vᵢ/‖vᵢ‖) · (tⱼ/‖tⱼ‖)</div>
       <p>A low cost indicates high embedding similarity. The cost is approximately in <code>[0,2]</code>. For unit vectors, <code>1 − cosine</code> equals half the <em>squared</em> Euclidean distance.</p>
       <h3>2. Add global-feature dustbins</h3>
-      <p>The last <em>column</em> is a global question vector (projected BERT CLS): an image patch can send mass there. The last <em>row</em> is the mean image-patch vector: a question token can receive mass from it. Each cross-dustbin cost is again <code>1 − cosine</code>. The bottom-right dustbin-to-dustbin cost is a configurable constant, default <code>1.0</code>.</p>
+      <p>The last <em>column</em> is a global question vector (projected mean-pooled MiniLM states): an image location can send mass there. The last <em>row</em> is the mean image-feature vector: a question token can receive mass from it. Each cross-dustbin cost is again <code>1 − cosine</code>. The bottom-right dustbin-to-dustbin cost is a configurable constant, default <code>1.0</code>.</p>
       <div class="table-wrap"><table><thead><tr><th></th><th>Valid question tokens</th><th>Question dustbin</th></tr></thead><tbody>
         <tr><th>Image patches</th><td><strong>Local ↔ local</strong><br>The block used for visual grounding.</td><td><strong>Image → dustbin</strong><br>Patch mass not matched to a particular question token.</td></tr>
         <tr><th>Image dustbin</th><td><strong>Dustbin → question</strong><br>Question-token mass not supplied by a particular patch.</td><td><strong>Dustbin ↔ dustbin</strong><br>Balances unused dustbin capacity.</td></tr>
@@ -135,14 +135,14 @@ P    = exp(logK + logu + logv)</code></pre>
       <p>The decoder does not receive the full transport matrix as attention weights. The code first extracts only the local-to-local block <code>P<sub>LL</sub></code>, excluding every dustbin interaction from patch alignment.</p>
       <div class="equation">mⱼ = Σᵢ Pᵢⱼ &nbsp; (local patch mass for token j)<br>aⱼ = (Σᵢ Pᵢⱼ vᵢ) / max(mⱼ, 10⁻⁸)<br>gⱼ = clamp(mⱼ / βⱼ, 0, 1)<br>memoryⱼ = LayerNorm(tⱼ + gⱼ · W<sub>ground</sub>aⱼ)</div>
       <p><code>aⱼ</code> is a weighted patch value for token <code>j</code>. <code>gⱼ</code> is the fraction of that token’s assigned mass supplied by real patches. A token mostly served by the image dustbin gets a small visual contribution. Invalid token memory is zeroed and masked from decoder cross-attention.</p>
-      <p>A separate global memory token is <code>LayerNorm(W<sub>global</sub>[mean(image patches); projected BERT CLS])</code>. It remains available even when individual local matches are weak. The final memory length is <code>1+L</code>.</p>
+      <p>A separate global memory token is <code>LayerNorm(W<sub>global</sub>[mean(image features); projected pooled MiniLM states])</code>. It remains available even when individual local matches are weak. The final memory length is <code>1+L</code>.</p>
       <div class="callout warn"><strong>Interpret the plan carefully</strong><p>High transport mass means the learned embedding cost and marginal constraints favored a pairing. It is useful for diagnosis, but it is not proof of causal grounding or a calibrated explanation of the answer.</p></div>
     </section>
 
     <section id="training">
       <div class="kicker">08 · Optimization and use</div><h2>Training, validation, and inference</h2>
       <div class="grid two">
-        <div class="card"><div class="number">TRAIN</div><h3>Teacher-forced cross-entropy</h3><p><a href="../train.py">train.py</a> shifts answer IDs by one position, ignores PAD in the loss, applies label smoothing, and updates trainable modules with AdamW. The ViT stays frozen; the BERT question encoder, projections, OT fusion, decoder, and output head can learn. Answer embeddings are frozen by default in the CLI.</p></div>
+        <div class="card"><div class="number">TRAIN</div><h3>Teacher-forced cross-entropy</h3><p><a href="../train.py">train.py</a> shifts answer IDs by one position, ignores PAD in the loss, applies label smoothing, and updates trainable modules with AdamW. MobileViTV2 stays frozen; the MiniLM question encoder, projections, OT fusion, decoder, and output head can learn. Answer embeddings are frozen by default in the CLI.</p></div>
         <div class="card"><div class="number">SELECT</div><h3>Validation loss</h3><p>After each epoch, <a href="../test.py">evaluation</a> computes EM, Token-F1, BLEU-1/2, ROUGE-L, and BERTScore-F1. The lowest validation loss selects <code>best.pt</code>. The run also saves <code>last.pt</code>, metrics, a plot, and a configuration manifest.</p></div>
       </div>
       <div class="diagram" style="margin-top:16px"><div class="flow"><div class="node"><strong>Answer IDs</strong>[CLS], wordpieces, [SEP]</div><span class="arrow">→</span><div class="node teal"><strong>Training input</strong>all IDs except last</div><span class="arrow">→</span><div class="node teal"><strong>Causal decoder</strong>cross-attend to OT memory</div><span class="arrow">→</span><div class="node orange"><strong>Loss targets</strong>all IDs except first</div></div><p class="caption">At inference, generation starts with <code>[CLS]</code>, repeatedly chooses the highest-logit next token, and stops at <code>[SEP]</code> or the maximum length.</p></div>
@@ -160,7 +160,7 @@ python predict.py --checkpoint data/gqa_model/best.pt --image path/to/image.jpg 
         <tr><td><a href="../configs/arg_parser.py">configs/arg_parser.py</a></td><td>CLI configuration: model dimensions, fusion, OT settings, device, paths.</td></tr>
         <tr><td><a href="../utils/download_gqa.py">utils/download_gqa.py</a></td><td>Optional GQA subset materialization; first question/answer per selected image.</td></tr>
         <tr><td><a href="../utils/data_processing.py">utils/data_processing.py</a> + <a href="../utils/vqa_dataset.py">utils/vqa_dataset.py</a></td><td>CSV validation, image-root resolution, image loading, row tuple.</td></tr>
-        <tr><td><a href="../model/features_extraction.py">model/features_extraction.py</a></td><td>Frozen ViT; BERT token encoding and mask; answer-token embedding.</td></tr>
+        <tr><td><a href="../model/features_extraction.py">model/features_extraction.py</a></td><td>Frozen MobileViTV2; MiniLM token encoding and mask; answer-token embedding.</td></tr>
         <tr><td><a href="../model/optimal_transport.py">model/optimal_transport.py</a></td><td><code>log_sinkhorn</code>, <code>PartialTransportFusion.forward</code>, plan diagnostics.</td></tr>
         <tr><td><a href="../model/vqa_model.py">model/vqa_model.py</a></td><td>OT encode/decode/generate and memory masking.</td></tr>
         <tr><td><a href="../model/decoder_model.py">model/decoder_model.py</a></td><td>Autoregressive Transformer decoder.</td></tr>
@@ -176,7 +176,7 @@ python predict.py --checkpoint data/gqa_model/best.pt --image path/to/image.jpg 
       <p>The reference is Pan et al., <a href="https://arxiv.org/html/2603.14349v1">Learning Image-Text Matching with Optimal Partial Transport</a> (OMIT, arXiv v1). The local copy is <a href="2603.14349v1.pdf">2603.14349v1.pdf</a>. Its Section 3 introduces local image/text cost, entropic OT, global-feature dustbins, and local-match-only similarity.</p>
       <div class="table-wrap"><table><thead><tr><th>Concept</th><th>OMIT paper</th><th>This repository</th></tr></thead><tbody>
         <tr><td>Task</td><td>Rank matching image-caption pairs for retrieval.</td><td>Generate a short answer conditioned on an image and question.</td></tr>
-        <tr><td>Local features</td><td>Visual regions/grid features and caption fragments, with multiple encoder settings.</td><td>Frozen ViT patch states and contextual BERT question states.</td></tr>
+        <tr><td>Local features</td><td>Visual regions/grid features and caption fragments, with multiple encoder settings.</td><td>Frozen MobileViTV2 spatial features and contextual MiniLM question states.</td></tr>
         <tr><td>Transport output</td><td>Use local matched mass to compute an image-text similarity score.</td><td>Use local matched mass to build grounded decoder memory.</td></tr>
         <tr><td>Training objective</td><td>Retrieval ranking/contrastive learning with negatives.</td><td>Teacher-forced answer-token cross-entropy; no retrieval ranking loss.</td></tr>
         <tr><td>Settings</td><td>Paper reports its own retrieval settings, including entropy λ=0.02.</td><td>VQA defaults ε=0.05, 20 iterations, ρ=0.2, dustbin-to-dustbin cost=1.0; validate these on GQA.</td></tr>

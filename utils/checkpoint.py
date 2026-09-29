@@ -7,13 +7,19 @@ import torch
 
 from configs.config import Config
 from model.vqa_model import VQAModel
+from model.fusion import FUSION_METHODS
+
+
+LEGACY_MAX_QUESTION_TOKENS = 28
+LEGACY_MAX_ANSWER_TOKENS = 38
 
 
 MODEL_CONFIG_KEYS = {
     "vocab_size", "output_size", "d_model", "num_heads", "ffn_hidden",
     "drop_prob", "num_layers", "mode",
     "freeze_answer_embeddings", "ot_epsilon", "ot_iterations",
-    "ot_dustbin_mass", "ot_dustbin_cost", "max_answer_tokens",
+    "ot_dustbin_mass", "ot_dustbin_cost", "max_answer_tokens", "max_question_tokens",
+    "fusion", "fusion_glimpses", "fusion_queries", "fusion_layers",
 }
 
 
@@ -64,7 +70,7 @@ def checkpoint_payload(
             "image": getattr(model.image_model.model.config, "_commit_hash", None),
         },
         "preprocessing": {
-            "max_question_length": Config.MAX_LEN_QUES,
+            "max_question_length": model.max_question_tokens,
             "max_answer_length": getattr(model, "max_answer_tokens", Config.MAX_LEN_ANS),
         },
         "optimizer_state_dict": optimizer.state_dict() if optimizer is not None else None,
@@ -101,8 +107,8 @@ def read_checkpoint(checkpoint_path, device):
             "Legacy checkpoint was trained with the incorrect decoder/objective. "
             "Retrain with the corrected train.py before generating answers."
         )
-    if checkpoint.get("model_config", {}).get("fusion") != "ot":
-        raise ValueError("Checkpoint must contain an OT model")
+    if checkpoint.get("model_config", {}).get("fusion") not in FUSION_METHODS:
+        raise ValueError("Checkpoint must contain an OT model or a supported fusion baseline")
     return checkpoint
 
 
@@ -112,6 +118,14 @@ def load_model(checkpoint_path, device):
     model_config = {
         key: value for key, value in stored_config.items() if key in MODEL_CONFIG_KEYS
     }
+    model_config.setdefault(
+        "max_answer_tokens",
+        checkpoint.get("preprocessing", {}).get("max_answer_length", LEGACY_MAX_ANSWER_TOKENS),
+    )
+    model_config.setdefault(
+        "max_question_tokens",
+        checkpoint.get("preprocessing", {}).get("max_question_length", LEGACY_MAX_QUESTION_TOKENS),
+    )
     model = VQAModel(
         text_model=checkpoint["text_model"], image_model=checkpoint["image_model"],
         **model_config,

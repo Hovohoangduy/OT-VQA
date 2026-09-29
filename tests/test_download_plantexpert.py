@@ -2,16 +2,21 @@
 
 import csv
 import io
+import json
+import sys
 import tempfile
 import unittest
 import urllib.error
 import zipfile
+from argparse import Namespace
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from PIL import Image
 
-from utils.download_plantexpert import ImageEntry, archive_size, choose_rows, read_image, request, retry_delay
+from utils.download_plantexpert import (
+    ImageEntry, archive_size, choose_rows, main, parse_args, read_image, request, retry_delay,
+)
 
 
 class ArchiveSizeTests(unittest.TestCase):
@@ -97,7 +102,61 @@ class SelectionCacheTests(unittest.TestCase):
             self.assertEqual(first, second)
             self.assertEqual(len(first), 5)
             self.assertEqual(open_url.call_count, 1)
-            self.assertTrue((cache / "train_5_seed42.json").is_file())
+            self.assertTrue((cache / "train_5_seed42_rows.json").is_file())
+
+    def test_test_split_samples_rows_from_test_csv(self):
+        output = io.StringIO(newline="")
+        writer = csv.DictWriter(output, fieldnames=(
+            "qa_id", "image_path", "question_text", "answer",
+        ))
+        writer.writeheader()
+        for index in range(400):
+            writer.writerow({
+                "qa_id": str(index), "image_path": f"images/{index}.jpg",
+                "question_text": f"Question {index}?", "answer": "Answer",
+            })
+        data = output.getvalue().encode()
+        image_index = {f"{index}.jpg": None for index in range(400)}
+
+        with tempfile.TemporaryDirectory() as directory:
+            with patch("utils.download_plantexpert.urllib.request.urlopen",
+                       side_effect=lambda *args, **kwargs: io.BytesIO(data)) as open_url:
+                rows = choose_rows("test", 20, 42, image_index, Path(directory))
+        self.assertEqual(len(rows), 20)
+        self.assertEqual(len({row["anno_id"] for row in rows}), 20)
+        self.assertTrue(any(int(row["anno_id"]) >= 200 for row in rows))
+        self.assertTrue(open_url.call_args.args[0].full_url.endswith("/data/test.csv"))
+
+    def test_default_pair_counts(self):
+        with patch.object(sys, "argv", ["download_plantexpert"]):
+            args = parse_args()
+        self.assertEqual((args.train_pairs, args.val_pairs, args.test_pairs),
+                         (10000, 1000, 2000))
+
+    def test_main_writes_all_three_splits(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            args = Namespace(output=output, train_pairs=1, val_pairs=1,
+                             test_pairs=1, seed=42, workers=1)
+            rows = [[{"anno_id": split, "image": f"{split}.jpg",
+                      "question": "Question?", "answer": "Answer",
+                      "question_category": "", "crop": "", "disease": ""}]
+                    for split in ("train", "validation", "test")]
+            with patch("utils.download_plantexpert.parse_args", return_value=args), \
+                 patch("utils.download_plantexpert.index_images", return_value={
+                     f"{split}.jpg": None for split in ("train", "validation", "test")
+                 }), \
+                 patch("utils.download_plantexpert.choose_rows", side_effect=rows) as choose, \
+                 patch("utils.download_plantexpert.save_image"):
+                main()
+            self.assertEqual([call.args[0] for call in choose.call_args_list],
+                             ["train", "validation", "test"])
+            for split, filename in (("train", "train.csv"), ("validation", "val.csv"),
+                                    ("test", "test.csv")):
+                with (output / filename).open(newline="", encoding="utf-8") as handle:
+                    self.assertEqual(list(csv.DictReader(handle))[0]["anno_id"], split)
+            metadata = json.loads((output / "metadata.json").read_text())
+            self.assertEqual(metadata["test_pairs"], 1)
 
 
 if __name__ == "__main__":

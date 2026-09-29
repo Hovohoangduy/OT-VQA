@@ -45,7 +45,7 @@ def log_sinkhorn(cost, row_marginal, column_marginal, epsilon=0.05, iterations=2
 
 
 class PartialTransportFusion(nn.Module):
-    """Align ViT patches with valid BERT tokens and build decoder memory."""
+    """Align spatial image tokens with valid question tokens and build decoder memory."""
 
     def __init__(self, text_dim, d_model, epsilon=0.05, iterations=20,
                  dustbin_mass=0.2, dustbin_cost=1.0):
@@ -70,7 +70,7 @@ class PartialTransportFusion(nn.Module):
                 return_transport=False):
         """Return memory, blocked-memory mask, and optionally OT diagnostics.
 
-        image_tokens: projected patch values [B,K,D], excluding ViT CLS.
+        image_tokens: projected spatial values [B,K,D], excluding a CLS token when present.
         question_mask: True for valid content tokens, False for PAD/specials.
         """
         if image_tokens.ndim != 3 or question_tokens.ndim != 3:

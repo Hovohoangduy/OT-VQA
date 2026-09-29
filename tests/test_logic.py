@@ -202,11 +202,11 @@ class ModelLogicTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'Retrain'):
             load_model(path, torch.device('cpu'))
 
-    def test_answer_length_is_saved_with_checkpoint(self):
+    def test_text_lengths_are_saved_with_checkpoint(self):
         model = VQAModel(
             text_model=str(self.text), image_model=str(self.visual),
             output_size=16, d_model=16, ffn_hidden=32, num_layers=1,
-            max_answer_tokens=10,
+            max_answer_tokens=10, max_question_tokens=7,
         )
         logits, targets = model(torch.rand(1, 3, 32, 32), ['what color ?'], ['red'])
         self.assertEqual(logits.shape, (1, 9, 12))
@@ -215,7 +215,17 @@ class ModelLogicTests(unittest.TestCase):
         save_checkpoint(path, model=model, text_model=str(self.text), image_model=str(self.visual))
         restored = load_model(path, torch.device('cpu'))
         self.assertEqual(restored.max_answer_tokens, 10)
+        self.assertEqual(restored.max_question_tokens, 7)
         self.assertEqual(restored.model_config['max_answer_tokens'], 10)
+        self.assertEqual(restored.question_encoder.max_length, 7)
+        self.assertEqual(restored.question_encoder.encode_tokens(['what color ? red blue'])[0].shape[1], 7)
+        legacy = torch.load(path, map_location='cpu', weights_only=True)
+        legacy['model_config'].pop('max_question_tokens')
+        legacy['model_config'].pop('max_answer_tokens')
+        torch.save(legacy, path)
+        legacy_model = load_model(path, torch.device('cpu'))
+        self.assertEqual(legacy_model.max_question_tokens, 7)
+        self.assertEqual(legacy_model.max_answer_tokens, 10)
 
     def test_answer_embeddings_can_be_frozen(self):
         model = VQAModel(

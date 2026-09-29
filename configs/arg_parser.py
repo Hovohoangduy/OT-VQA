@@ -1,4 +1,6 @@
 import argparse
+from configs.config import Config
+from model.fusion import FUSION_METHODS
 
 def get_args(argv=None):
     parser = argparse.ArgumentParser()
@@ -16,9 +18,9 @@ def get_args(argv=None):
     parser.add_argument("--json_folder_path", type=str, default="data/json", help="Path to folder containing JSON files")
     parser.add_argument("--csv_folder_path", type=str, default="data/csv", help="Path to folder where CSV files will be saved")
     
-    parser.add_argument("--text_model", default="bert-base-uncased",
+    parser.add_argument("--text_model", default=Config.text_model,
                         help="English Hugging Face tokenizer and text encoder")
-    parser.add_argument("--image_model", default="google/vit-base-patch16-224-in21k")
+    parser.add_argument("--image_model", default=Config.image_model)
     parser.add_argument("--split", choices=["dev", "test"], default="dev")
     parser.add_argument("--resume", default=None, help="Version-3/4 training checkpoint to resume")
     parser.add_argument("--save_every_epoch", action="store_true",
@@ -46,8 +48,18 @@ def get_args(argv=None):
     parser.add_argument("--num_layers", type=int, default=2)
     parser.add_argument("--num_heads", type=int, default=4)
     parser.add_argument("--drop_prob", type=float, default=0.2)
+    parser.add_argument("--fusion", choices=FUSION_METHODS, default=None,
+                        help="Fusion method (default: ot; resume uses checkpoint setting)")
+    parser.add_argument("--fusion_glimpses", type=int, default=None,
+                        help="SAN/BAN attention glimpses (default: 2)")
+    parser.add_argument("--fusion_queries", type=int, default=None,
+                        help="Q-Former learned queries (default: 8)")
+    parser.add_argument("--fusion_layers", type=int, default=None,
+                        help="Q-Former blocks (default: 2)")
     parser.add_argument("--max_answer_tokens", type=int, default=None,
-                        help="Answer length including start/end tokens; default 38, use 128 for PlantExpertVQA")
+                        help="Answer length including start/end tokens; default 112 covers the local PlantExpertVQA splits")
+    parser.add_argument("--max_question_tokens", type=int, default=None,
+                        help="Question length including special tokens; default 32 covers the local PlantExpertVQA splits")
     parser.add_argument("--ot_epsilon", type=float, default=None,
                         help="Sinkhorn entropy coefficient (new OT runs default to 0.05)")
     parser.add_argument("--ot_iterations", type=int, default=None,

@@ -1,7 +1,7 @@
 # OT-VQA
 
-Visual question answering with a frozen ViT image encoder, BERT question tokens,
-partial optimal transport fusion, and autoregressive answer generation.
+Visual question answering with a frozen MobileViTV2 image encoder, MiniLM question tokens,
+selectable multimodal fusion, and autoregressive answer generation.
 For a code-level walkthrough with diagrams and an interactive transport example,
 open [the architecture guide](docs/ot_vqa_architecture.html).
 
@@ -13,6 +13,12 @@ pip install -r requirements.txt
 
 The default paths expect GQA CSV files under `data/gqa_dataset` and images under
 `data/gqa_dataset/images`. Run `python train.py --help` to see path overrides.
+The default encoders are `apple/mobilevitv2-2.0-imagenet1k-256` for images and
+`sentence-transformers/all-MiniLM-L12-v2` for text. Images are resized to a
+288-pixel shortest edge, then center cropped to 256×256;
+the image encoder supplies spatial features, and MiniLM supplies token features
+plus a mean-pooled question vector. Existing checkpoints retain their saved
+encoder names and can still be loaded.
 
 To build a larger local GQA subset with the original one-question-per-image format:
 
@@ -29,19 +35,19 @@ reuse completed pages. If rate limiting persists, set `HF_TOKEN` in your shell
 and try `--metadata-workers 1 --request-interval 2`. `--workers` controls image
 downloads separately.
 
-To download 5,000 PlantExpertVQA training question–answer pairs and 1,000
-validation pairs, with their images:
+To download random PlantExpertVQA subsets of 10,000 training, 1,000 validation,
+and 2,000 test question–answer pairs, with their images:
 
 ```bash
 python -m utils.download_plantexpert
 ```
 
-The output is `data/plantexpert_dataset/train.csv`, `val.csv`, and `images/`.
-The script streams the source train and validation CSVs once and samples
-reproducible groups of question–answer rows (`--seed 42` by default). It does
+The output is `data/plantexpert_dataset/train.csv`, `val.csv`, `test.csv`, and `images/`.
+The script streams each source CSV once and samples reproducible individual
+question–answer rows (`--seed 42` by default). It does
 not use the rate-limited dataset viewer API. The image downloader reads only
 the required files from the source ZIP archives. You can change the counts
-with `--train-pairs` and `--val-pairs`. Selected rows are cached in
+with `--train-pairs`, `--val-pairs`, and `--test-pairs`. Selected rows are cached in
 `<output>/.selection_cache`, and rerunning with the same output reuses them
 and any downloaded images. Set `HF_TOKEN` in your shell if you have a Hugging
 Face token.
@@ -53,16 +59,19 @@ To train the OT model on this PlantExpertVQA subset:
 
 ```bash
 python train.py --device auto --batch_size 2 \
-  --max_answer_tokens 128 \
   --train_csv_path data/plantexpert_dataset/train.csv \
   --dev_csv_path data/plantexpert_dataset/val.csv \
   --img_path data/plantexpert_dataset/images \
   --model_path data/plantexpert_model
 ```
 
-The run uses the training default of 10 epochs. The 128-token answer limit
-covers all answers in the downloaded subset; the model's 38-token default
-would truncate many of them. It saves
+The run uses the training default of 10 epochs. Across the local 10,000 train,
+1,000 validation, and 2,000 test rows, the longest MiniLM-tokenized question
+is 32 tokens including special tokens. The longest answer is 112 tokens
+including start and end tokens. The defaults cover all 13,000 rows without
+truncation. `--max_question_tokens` and `--max_answer_tokens` can override
+these limits for other datasets; both limits are saved with each checkpoint.
+It saves
 `best.pt`, `last.pt`, and `metrics.jsonl` in `data/plantexpert_model`. Use
 `--resume data/plantexpert_model/last.pt` to continue an interrupted run, with
 `--epochs` set to the desired total epoch count. `--device auto` chooses CUDA,
@@ -81,6 +90,42 @@ python test.py --checkpoint data/plantexpert_model/best.pt --split dev \
 ```
 
 ## Train
+
+Choose a fusion method with `--fusion ot|san|ban|cross_attention|qformer`.
+The default is `ot`. SAN uses stacked question-guided image attention;
+BAN uses low-rank bilinear token-patch attention; cross attention uses
+question-to-image multihead attention; and Q-Former uses learned query tokens
+that interact with question tokens before attending to image patches. These
+are compact baselines in this shared VQA architecture, not reproductions of
+every component in the original SAN, BAN, or BLIP-2 systems. All methods use
+the same MobileViTV2, MiniLM, decoder, training loss, data splits, and answer metrics.
+The fusion method and its settings are saved in each checkpoint. `test.py`
+loads them automatically; an optional `--fusion` there checks that the
+checkpoint matches the requested method. `--resume` also checks the method.
+
+`--fusion_glimpses` sets SAN/BAN attention steps (default 2).
+`--fusion_queries` and `--fusion_layers` set Q-Former learned queries (8)
+and blocks (2). OT options apply only to `--fusion ot`.
+
+To train and evaluate all five methods on the same GQA splits and seed:
+
+```bash
+python -m scripts.compare_fusions --output_dir results/fusion_comparison \
+  --device cuda --epochs 10 --batch_size 4 --seeds 1105 1106 1107
+```
+
+The runner trains each method into its own directory, selects `best.pt` by
+lowest validation loss, evaluates the held-out test split, and writes
+`comparison.csv`, `summary.csv`, and `comparison.md`. It also saves per-run predictions,
+reports, manifests, and checkpoints. Use `--split dev` for a development-only
+comparison. Training flags not defined by the runner (such as `--d_model`,
+`--lr`, `--fusion_glimpses`, and `--text_model`) are passed to `train.py`.
+Completed checkpoints and reports are reused when rerunning the command;
+`--force` retrains and reevaluates the selected runs. Ensure identical flags
+and data when reusing an output directory. Throughput measurements depend on
+the machine and are not model-quality scores. The repository does not include
+trained checkpoints for these five methods, so the table is generated after
+the comparison run; the older CSVs in `results/` are separate experiments.
 
 For NVIDIA GPU training on Windows, install a CUDA-enabled `torch` and matching
 `torchvision` in your active environment using the
@@ -119,7 +164,7 @@ For a Kaggle notebook with two enabled GPUs, run:
 ```bash
 !torchrun --standalone --nnodes=1 --nproc_per_node=2 train.py \
   --device cuda --epochs 100 --batch_size 32 \
-  --max_answer_tokens 128 --early_stopping_patience 0 \
+  --early_stopping_patience 0 \
   --train_csv_path /kaggle/input/datasets/duyho0511chill/plantexpert-dataset/plantexpert_dataset/train.csv \
   --dev_csv_path /kaggle/input/datasets/duyho0511chill/plantexpert-dataset/plantexpert_dataset/val.csv \
   --img_path /kaggle/input/datasets/duyho0511chill/plantexpert-dataset/plantexpert_dataset/images \

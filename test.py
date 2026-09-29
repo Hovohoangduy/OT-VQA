@@ -1,6 +1,7 @@
 """Evaluate teacher-forced loss and generated VQA answer quality."""
 
 import json
+import hashlib
 from pathlib import Path
 from time import perf_counter
 
@@ -85,6 +86,9 @@ def main():
     default = Path(args.model_path) / "best.pt"
     checkpoint = Path(args.checkpoint) if args.checkpoint else default
     model = load_model(checkpoint, device)
+    if args.fusion is not None and args.fusion != model.fusion:
+        raise ValueError(f"--fusion {args.fusion} does not match checkpoint fusion {model.fusion}")
+    print(f"Fusion method: {model.fusion}")
     csv_path = args.dev_csv_path if args.split == "dev" else args.test_csv_path
     frame = load_dataframe(csv_path)
     split_image_path = resolve_image_root(
@@ -120,11 +124,18 @@ def main():
     if args.report_json:
         output = Path(args.report_json)
         output.parent.mkdir(parents=True, exist_ok=True)
+        digest = hashlib.sha256()
+        with Path(csv_path).open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
         output.write_text(json.dumps({
             "checkpoint": str(checkpoint), "fusion": model.fusion, "split": args.split,
+            "evaluation_csv_sha256": digest.hexdigest(),
+            "trainable_parameters": sum(p.numel() for p in model.parameters() if p.requires_grad),
             "loss": result["loss"], "generated_metrics": result["metrics"],
             "bertscore": {"model": args.bertscore_model, "model_hash": scorer.hash,
                           "rescale_with_baseline": args.bertscore_rescale,
+                          "batch_size": args.bertscore_batch_size,
                           "device": str(resolve_device(args.bertscore_device))},
             "performance": performance,
         }, indent=2) + "\n", encoding="utf-8")

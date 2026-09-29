@@ -12,7 +12,6 @@ import csv
 import http.client
 import io
 import json
-import math
 import os
 import random
 import re
@@ -32,7 +31,6 @@ from PIL import Image
 
 DATASET_ID = "SyedNazmusSakib/PlantExpertVQA"
 BASE_URL = f"https://huggingface.co/datasets/{DATASET_ID}/resolve/main"
-PAGE_SIZE = 100
 CSV_FIELDS = ("anno_id", "image", "question", "answer", "question_category", "crop", "disease")
 
 
@@ -178,42 +176,57 @@ def index_images() -> dict[str, ImageEntry]:
     return images
 
 
-def sample_csv_pages(split: str, count: int, seed: int) -> list[list[dict]]:
-    """Reservoir-sample groups of 100 rows using one streaming CSV request."""
-    source_name = "train" if split == "train" else "val"
+def sample_csv_rows(split: str, count: int, seed: int,
+                    image_index: dict[str, ImageEntry]) -> list[dict[str, str]]:
+    """Uniformly sample valid QA pairs while streaming one source CSV."""
+    source_name = "val" if split == "validation" else split
+    if source_name not in ("train", "val", "test"):
+        raise ValueError(f"Unknown split: {split}")
     url = f"{BASE_URL}/data/{source_name}.csv"
-    target_pages = max(math.ceil(count / PAGE_SIZE) + 2,
-                       math.ceil(count / PAGE_SIZE * 1.5))
     headers = {"User-Agent": "OT-VQA-PlantExpert-downloader/1.0"}
     if os.environ.get("HF_TOKEN"):
         headers["Authorization"] = f"Bearer {os.environ['HF_TOKEN']}"
     for attempt in range(6):
         rng = random.Random(seed)
-        pages: list[list[dict]] = []
-        current_page: list[dict] | None = None
-        pages_seen = 0
+        selected: list[dict[str, str]] = []
+        seen: set[str] = set()
+        valid_count = 0
         try:
             req = urllib.request.Request(url, headers=headers)
             with urllib.request.urlopen(req, timeout=180) as response:
                 reader = csv.DictReader(io.TextIOWrapper(response, encoding="utf-8", newline=""))
-                for row_number, row in enumerate(reader):
-                    if row_number % PAGE_SIZE == 0:
-                        pages_seen += 1
-                        if len(pages) < target_pages:
-                            current_page = []
-                            pages.append(current_page)
-                        else:
-                            slot = rng.randrange(pages_seen)
-                            if slot < target_pages:
-                                current_page = []
-                                pages[slot] = current_page
-                            else:
-                                current_page = None
-                    if current_page is not None:
-                        current_page.append(row)
-            rng.shuffle(pages)
-            print(f"Sampled {len(pages)} {split} pages from the source CSV", flush=True)
-            return pages
+                for row in reader:
+                    image_path = str(row.get("image_path") or "")
+                    image_name = image_path.removeprefix("images/")
+                    qa_id = str(row.get("qa_id") or "")
+                    question = str(row.get("question_text") or "").strip()
+                    answer = str(row.get("answer") or "").strip()
+                    if (image_path != f"images/{image_name}" or "/" in image_name
+                            or image_name not in image_index or not qa_id or qa_id in seen
+                            or not question or not answer):
+                        continue
+                    seen.add(qa_id)
+                    valid_count += 1
+                    chosen = {
+                        "anno_id": qa_id,
+                        "image": image_name,
+                        "question": question,
+                        "answer": answer,
+                        "question_category": str(row.get("question_category") or ""),
+                        "crop": str(row.get("crop") or ""),
+                        "disease": str(row.get("disease") or ""),
+                    }
+                    if len(selected) < count:
+                        selected.append(chosen)
+                    else:
+                        slot = rng.randrange(valid_count)
+                        if slot < count:
+                            selected[slot] = chosen
+            if valid_count < count:
+                raise RuntimeError(f"Only found {valid_count} valid {split} pairs; requested {count}")
+            rng.shuffle(selected)
+            print(f"Sampled {count} {split} pairs from {valid_count} valid rows", flush=True)
+            return selected
         except urllib.error.HTTPError as exc:
             if exc.code not in (429, 500, 502, 503, 504) or attempt == 5:
                 raise
@@ -230,7 +243,7 @@ def sample_csv_pages(split: str, count: int, seed: int) -> list[list[dict]]:
 
 def choose_rows(split: str, count: int, seed: int,
                 image_index: dict[str, ImageEntry], cache_dir: Path) -> list[dict[str, str]]:
-    cache_path = cache_dir / f"{split}_{count}_seed{seed}.json"
+    cache_path = cache_dir / f"{split}_{count}_seed{seed}_rows.json"
     if cache_path.is_file():
         try:
             cached = json.loads(cache_path.read_text(encoding="utf-8"))
@@ -240,38 +253,12 @@ def choose_rows(split: str, count: int, seed: int,
         except (OSError, ValueError, TypeError, KeyError):
             pass
 
-    pages = sample_csv_pages(split, count, seed)
-    selected: list[dict[str, str]] = []
-    seen: set[str] = set()
-    for page in pages:
-        for row in page:
-            image_path = str(row.get("image_path") or "")
-            image_name = image_path.removeprefix("images/")
-            qa_id = str(row.get("qa_id") or "")
-            question = str(row.get("question_text") or "").strip()
-            answer = str(row.get("answer") or "").strip()
-            if (image_path != f"images/{image_name}" or "/" in image_name
-                    or image_name not in image_index or not qa_id or qa_id in seen
-                    or not question or not answer):
-                continue
-            seen.add(qa_id)
-            selected.append({
-                "anno_id": qa_id,
-                "image": image_name,
-                "question": question,
-                "answer": answer,
-                "question_category": str(row.get("question_category") or ""),
-                "crop": str(row.get("crop") or ""),
-                "disease": str(row.get("disease") or ""),
-            })
-            if len(selected) == count:
-                cache_path.parent.mkdir(parents=True, exist_ok=True)
-                temporary = cache_path.with_suffix(".json.part")
-                temporary.write_text(json.dumps(selected, ensure_ascii=False), encoding="utf-8")
-                os.replace(temporary, cache_path)
-                print(f"Selected {count} {split} pairs", flush=True)
-                return selected
-    raise RuntimeError(f"Only found {len(selected)} valid {split} pairs; requested {count}")
+    selected = sample_csv_rows(split, count, seed, image_index)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = cache_path.with_suffix(".json.part")
+    temporary.write_text(json.dumps(selected, ensure_ascii=False), encoding="utf-8")
+    os.replace(temporary, cache_path)
+    return selected
 
 
 def read_image(entry: ImageEntry) -> bytes:
@@ -340,10 +327,11 @@ def write_csv(path: Path, rows: list[dict[str, str]]) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Download PlantExpertVQA train/validation pairs")
+    parser = argparse.ArgumentParser(description="Download random PlantExpertVQA train/validation/test pairs")
     parser.add_argument("--output", type=Path, default=Path("data/plantexpert_dataset"))
-    parser.add_argument("--train-pairs", type=int, default=5000)
+    parser.add_argument("--train-pairs", type=int, default=10000)
     parser.add_argument("--val-pairs", type=int, default=1000)
+    parser.add_argument("--test-pairs", type=int, default=2000)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--workers", type=int, default=4)
     return parser.parse_args()
@@ -351,18 +339,20 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    if min(args.train_pairs, args.val_pairs, args.workers) < 1:
+    if min(args.train_pairs, args.val_pairs, args.test_pairs, args.workers) < 1:
         raise ValueError("Pair counts and workers must be positive")
     image_index = index_images()
     cache_dir = args.output / ".selection_cache"
     train_rows = choose_rows("train", args.train_pairs, args.seed, image_index, cache_dir)
     val_rows = choose_rows("validation", args.val_pairs, args.seed + 1, image_index, cache_dir)
-    if {r["image"] for r in train_rows} & {r["image"] for r in val_rows}:
-        raise RuntimeError("Training and validation images overlap")
+    test_rows = choose_rows("test", args.test_pairs, args.seed + 2, image_index, cache_dir)
+    split_images = [{r["image"] for r in rows} for rows in (train_rows, val_rows, test_rows)]
+    if any(split_images[i] & split_images[j] for i, j in ((0, 1), (0, 2), (1, 2))):
+        raise RuntimeError("Images overlap between splits")
 
     image_folder = args.output / "images"
     image_folder.mkdir(parents=True, exist_ok=True)
-    image_names = sorted({r["image"] for r in train_rows + val_rows})
+    image_names = sorted(set().union(*split_images))
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
         futures = {pool.submit(save_image, name, image_index[name], image_folder): name
                    for name in image_names}
@@ -373,12 +363,14 @@ def main() -> None:
 
     write_csv(args.output / "train.csv", train_rows)
     write_csv(args.output / "val.csv", val_rows)
+    write_csv(args.output / "test.csv", test_rows)
     metadata = {
         "source": f"https://huggingface.co/datasets/{DATASET_ID}",
         "seed": args.seed,
-        "selection": "seeded reservoir sample of source CSV pages",
+        "selection": "seeded reservoir sample of valid source CSV rows",
         "train_pairs": len(train_rows),
         "validation_pairs": len(val_rows),
+        "test_pairs": len(test_rows),
         "unique_images": len(image_names),
     }
     (args.output / "metadata.json").write_text(
