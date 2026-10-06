@@ -25,7 +25,7 @@ from utils.checkpoint import (LEGACY_MAX_ANSWER_TOKENS, LEGACY_MAX_QUESTION_TOKE
                               save_checkpoint)
 from utils.data_processing import load_dataframe
 from utils.device import resolve_device, seed_everything
-from utils.metrics import PAPER_METRICS, build_bertscore_scorer
+from utils.metrics import build_bertscore_scorer, metrics_for_dataset, resolve_dataset
 from utils.vqa_dataset import VQADataset, resolve_image_root
 
 
@@ -35,7 +35,7 @@ def _forward_batch(model, batch, device):
 
 
 def _format_epoch_metrics(epoch, total_epochs, split, loss, scores):
-    metrics = ", ".join(f"{name}={scores[name]:.4f}" for name in PAPER_METRICS)
+    metrics = ", ".join(f"{name}={value:.4f}" for name, value in scores.items())
     return f"Epoch {epoch}/{total_epochs} {split}: loss={loss:.4f}, {metrics}"
 
 
@@ -92,7 +92,8 @@ def _make_loader(args, split, shuffle, text_model, image_model, rank=0, world_si
         split,
         override=getattr(args, f"{split}_img_path"),
     )
-    dataset = VQADataset(frame, transform=Config.transforms, img_path=image_path)
+    dataset = VQADataset(frame, transform=Config.transforms, img_path=image_path,
+                         dataset_name=resolve_dataset(args.dataset, args.train_csv_path))
     sampler = (DistributedSampler(dataset, num_replicas=world_size, rank=rank,
                                   shuffle=shuffle, seed=args.seed)
                if world_size > 1 and split == "train" else None)
@@ -127,6 +128,8 @@ def _csv_digest(path):
 
 
 def _run_training(args, device, rank, world_size):
+    dataset_name = resolve_dataset(args.dataset, args.train_csv_path)
+    metric_names = metrics_for_dataset(dataset_name)
     if args.batch_size < 1 or args.epochs < 1:
         raise ValueError("batch_size and epochs must be positive")
     if args.max_answer_tokens is not None and args.max_answer_tokens < 2:
@@ -147,7 +150,7 @@ def _run_training(args, device, rank, world_size):
         raise ValueError("weight_decay cannot be negative")
     if args.gradient_clip < 0:
         raise ValueError("gradient_clip cannot be negative")
-    if args.bertscore_batch_size < 1:
+    if dataset_name != "gqa" and args.bertscore_batch_size < 1:
         raise ValueError("bertscore_batch_size must be positive")
     for name in ("fusion_glimpses", "fusion_queries", "fusion_layers"):
         value = getattr(args, name)
@@ -159,6 +162,7 @@ def _run_training(args, device, rank, world_size):
             print(f"Training on device: {device}")
         else:
             print(f"Training on {world_size} GPUs; primary device: {device}")
+        print(f"Dataset: {dataset_name}; generated-answer metrics: {', '.join(metric_names)}")
 
     resume = read_checkpoint(args.resume, device) if args.resume else None
     if resume is not None:
@@ -237,7 +241,7 @@ def _run_training(args, device, rank, world_size):
         device=str(resolve_device(args.bertscore_device)),
         batch_size=args.bertscore_batch_size,
         rescale_with_baseline=args.bertscore_rescale,
-    ) if rank == 0 else None
+    ) if rank == 0 and dataset_name != "gqa" else None
     trainable_parameters = [parameter for parameter in model.parameters()
                             if parameter.requires_grad]
     optimizer = optim.AdamW(
@@ -277,8 +281,11 @@ def _run_training(args, device, rank, world_size):
             "train_csv_sha256": _csv_digest(args.train_csv_path),
             "dev_csv_sha256": _csv_digest(args.dev_csv_path),
             "torch_version": torch.__version__,
-            "bertscore_hash": bert_scorer.hash,
+            "dataset": dataset_name,
+            "generated_metrics": list(metric_names),
         }
+        if bert_scorer is not None:
+            manifest["bertscore_hash"] = bert_scorer.hash
         (destination / "run_config.json").write_text(
             json.dumps(manifest, indent=2, default=str) + "\n", encoding="utf-8"
         )
@@ -344,9 +351,9 @@ def _run_training(args, device, rank, world_size):
             if improved:
                 save_checkpoint(destination / "best.pt", **checkpoint_args)
             row = {"epoch": epoch + 1, "train_loss": train_loss,
-                   **{f"train_{name}": train_scores[name] for name in PAPER_METRICS},
+                   **{f"train_{name}": train_scores[name] for name in metric_names},
                    "val_loss": val_loss,
-                   **{f"val_{name}": val_scores[name] for name in PAPER_METRICS},
+                   **{f"val_{name}": val_scores[name] for name in metric_names},
                    "learning_rate": scheduler.get_last_lr()[0],
                    "improved": improved,
                    "epochs_without_improvement": epochs_without_improvement}
@@ -371,7 +378,7 @@ def _run_training(args, device, rank, world_size):
 
     if rank == 0:
         plt.figure(figsize=(10, 6))
-        for metric in PAPER_METRICS:
+        for metric in metric_names:
             plt.plot([row["epoch"] for row in history],
                      [row[f"train_{metric}"] for row in history],
                      label=f"train_{metric}", linestyle="--")

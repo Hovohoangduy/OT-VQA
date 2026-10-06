@@ -15,12 +15,18 @@ from configs.config import Config
 from utils.checkpoint import load_model
 from utils.data_processing import load_dataframe
 from utils.device import resolve_device
-from utils.metrics import PAPER_METRICS, build_bertscore_scorer, mean_scores, score_pairs
+from utils.metrics import (build_bertscore_scorer, mean_scores, metrics_for_dataset,
+                           resolve_dataset, score_pairs, vqa_score_pairs)
 from utils.vqa_dataset import VQADataset, resolve_image_root
 
 
 def evaluation(model, test_loader, criterion, vocab_swap=None, device=None,
-               measure_performance=False, predictions=None, bert_scorer=None):
+               measure_performance=False, predictions=None, bert_scorer=None,
+               dataset=None):
+    dataset_name = resolve_dataset(
+        dataset if dataset is not None else
+        getattr(test_loader.dataset, "dataset_name", "plantexpert")
+    )
     model.eval()
     device = device or next(model.parameters()).device
     total_loss = 0.0
@@ -54,10 +60,13 @@ def evaluation(model, test_loader, criterion, vocab_swap=None, device=None,
     if device.type == "cuda":
         torch.cuda.synchronize(device)
     model_elapsed = perf_counter() - started
-    if bert_scorer is None:
-        bert_scorer = build_bertscore_scorer()
-    rows = score_pairs(references, generated, bert_scorer)
-    scores = mean_scores(rows)
+    if dataset_name == "gqa":
+        rows = vqa_score_pairs(references, generated)
+    else:
+        if bert_scorer is None:
+            bert_scorer = build_bertscore_scorer()
+        rows = score_pairs(references, generated, bert_scorer)
+    scores = mean_scores(rows, metrics_for_dataset(dataset_name))
     if predictions is not None:
         for annotation, question, reference, hypothesis, row in zip(
                 annotations, question_texts, references, generated, rows):
@@ -90,12 +99,15 @@ def main():
         raise ValueError(f"--fusion {args.fusion} does not match checkpoint fusion {model.fusion}")
     print(f"Fusion method: {model.fusion}")
     csv_path = args.dev_csv_path if args.split == "dev" else args.test_csv_path
+    dataset_name = resolve_dataset(args.dataset, csv_path)
+    print(f"Dataset: {dataset_name}")
     frame = load_dataframe(csv_path)
     split_image_path = resolve_image_root(
         frame, args.img_path, args.split,
         override=(args.dev_img_path if args.split == "dev" else args.test_img_path),
     )
-    dataset = VQADataset(frame, transform=Config.transforms, img_path=split_image_path)
+    dataset = VQADataset(frame, transform=Config.transforms, img_path=split_image_path,
+                         dataset_name=dataset_name)
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False)
     predictions = [] if args.predictions_csv else None
     scorer = build_bertscore_scorer(
@@ -103,12 +115,12 @@ def main():
         device=str(resolve_device(args.bertscore_device)),
         batch_size=args.bertscore_batch_size,
         rescale_with_baseline=args.bertscore_rescale,
-    )
+    ) if dataset_name != "gqa" else None
     result = evaluation(model, loader, nn.CrossEntropyLoss(ignore_index=model.pad_token_id),
                         device=device, measure_performance=True, predictions=predictions,
                         bert_scorer=scorer)
     print(f"{args.split} loss: {result['loss']:.4f}, " + ", ".join(
-        f"{name}={result['metrics'][name]:.4f}" for name in PAPER_METRICS))
+        f"{name}={value:.4f}" for name, value in result["metrics"].items()))
     performance = result["performance"]
     print(f"Throughput: {performance['examples_per_second']:.2f} examples/s; "
           f"latency: {performance['milliseconds_per_example']:.1f} ms/example; "
@@ -128,17 +140,22 @@ def main():
         with Path(csv_path).open("rb") as handle:
             for chunk in iter(lambda: handle.read(1024 * 1024), b""):
                 digest.update(chunk)
-        output.write_text(json.dumps({
+        report = {
             "checkpoint": str(checkpoint), "fusion": model.fusion, "split": args.split,
+            "dataset": dataset_name,
             "evaluation_csv_sha256": digest.hexdigest(),
             "trainable_parameters": sum(p.numel() for p in model.parameters() if p.requires_grad),
             "loss": result["loss"], "generated_metrics": result["metrics"],
-            "bertscore": {"model": args.bertscore_model, "model_hash": scorer.hash,
-                          "rescale_with_baseline": args.bertscore_rescale,
-                          "batch_size": args.bertscore_batch_size,
-                          "device": str(resolve_device(args.bertscore_device))},
             "performance": performance,
-        }, indent=2) + "\n", encoding="utf-8")
+        }
+        if scorer is not None:
+            report["bertscore"] = {
+                "model": args.bertscore_model, "model_hash": scorer.hash,
+                "rescale_with_baseline": args.bertscore_rescale,
+                "batch_size": args.bertscore_batch_size,
+                "device": str(resolve_device(args.bertscore_device)),
+            }
+        output.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
         print(f"Wrote evaluation report to {output}")
 
 

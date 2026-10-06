@@ -20,18 +20,24 @@ the image encoder supplies spatial features, and MiniLM supplies token features
 plus a mean-pooled question vector. Existing checkpoints retain their saved
 encoder names and can still be loaded.
 
-To build a larger local GQA subset with the original one-question-per-image format:
+To download random GQA subsets of 10,000 training, 1,000 validation, and 2,000
+test images, with one question–answer pair per image:
 
 ```bash
-python -m utils.download_gqa --train-images 10000 --val-images 500 \
-  --test-images 500
+python -m utils.download_gqa
 ```
+
+Sampling uses `--seed 42` by default; change the seed for a different subset.
+Override sizes with `--train-images`, `--val-images`, and `--test-images`.
+Validation and test are disjoint random subsets of the labeled GQA validation split.
 
 Keep the held-out test split for the final comparison. Dataset downloads require
 network access and can be large; choose counts that fit your compute budget.
 The downloader spaces dataset viewer requests, honors HTTP 429 retry delays, and
 saves metadata pages in `<output>/.row_cache`. Rerun with the same `--output` to
-reuse completed pages. If rate limiting persists, set `HF_TOKEN` in your shell
+reuse completed pages. By default, metadata uses one worker and starts requests
+at least one second apart. HTTP 429 responses pause all metadata workers for
+the server's requested cooldown before retrying. If rate limiting persists, set `HF_TOKEN` in your shell
 and try `--metadata-workers 1 --request-interval 2`. `--workers` controls image
 downloads separately.
 
@@ -153,8 +159,9 @@ Training writes `last.pt`, the lowest-validation-loss checkpoint as `best.pt`, a
 metric history, an evaluation plot, and `run_config.json` with dataset hashes.
 Add `--save_every_epoch` to retain `epoch_0001.pt`, `epoch_0002.pt`, and so on.
 Each epoch file is a full resumable checkpoint, so 100 files can use substantial disk space.
-After each epoch, it reports generated-answer EM, token F1, BLEU-1/2, ROUGE-L,
-and BERTScore for both the training and validation splits. The history stores
+After each epoch, GQA runs report generated-answer `vqa_accuracy` for both
+the training and validation splits. Other datasets report EM, token F1,
+BLEU-1/2, ROUGE-L, and BERTScore. The history stores
 these as `train_*` and `val_*` fields; the plot shows both curves. Scoring the
 full training split adds an evaluation pass each epoch.
 Resume with `--resume path/to/last.pt`.
@@ -192,7 +199,49 @@ python test.py --checkpoint data/gqa_model/best.pt --split dev \
   --report_json data/gqa_model/dev_report.json
 ```
 
-Evaluation reports the six PlantExpertVQA paper metrics: case-insensitive exact
+To evaluate `data/weights/OT_fusion_0410.pt` on the 2,000-example PlantExpertVQA
+test split, run from the repository root:
+
+```bash
+conda activate ot-vqa
+
+OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 python -u test.py \
+  --checkpoint data/weights/OT_fusion_0410.pt \
+  --split test \
+  --test_csv_path data/plantexpert_dataset/test.csv \
+  --img_path data/plantexpert_dataset/images \
+  --device auto \
+  --batch_size 4 \
+  --predictions_csv results/OT_fusion_0410_test_predictions.csv \
+  --report_json results/OT_fusion_0410_test_report.json
+```
+
+Use the dataset the checkpoint was trained on. If it was trained on GQA,
+replace both `plantexpert_dataset` paths with `gqa_dataset`.
+The command prints loss and the dataset's answer metrics described below, plus
+throughput and latency. It saves per-example predictions to CSV and an
+evaluation report to JSON, creating the output directory automatically.
+
+Metric selection defaults to `--dataset auto`: a CSV path containing a `gqa`
+component (such as `data/gqa_dataset/val.csv`) selects GQA scoring. Use
+`--dataset gqa` when your GQA files have other names, or `--dataset plantexpert`
+to select the six paper metrics explicitly. The same option works for
+`train.py`, `test.py`, and `python -m scripts.compare_fusions`.
+
+GQA uses the requested VQA consensus formula for each generated answer:
+`vqa_accuracy = min(number_of_matching_reference_answers / 3, 1)`.
+The dataset score is the mean of these per-question scores. Matching ignores
+case and repeated whitespace. Each GQA CSV row has one reference answer, so
+a correct prediction receives `1/3` and an incorrect prediction receives `0`;
+the maximum dataset score is `1/3`. References are never duplicated to create
+artificial votes. This applies the requested formula literally rather than
+[GQA's official binary accuracy](https://cs.stanford.edu/people/dorarad/gqa/evaluate.html).
+Training logs and plots use `train_vqa_accuracy` and `val_vqa_accuracy`;
+evaluation JSON and prediction CSV exports use `vqa_accuracy`. GQA runs do not
+compute the six paper metrics or load a BERTScore model. Checkpoint selection
+and early stopping still use validation loss.
+
+For other datasets, evaluation reports the six PlantExpertVQA paper metrics: case-insensitive exact
 match, SQuAD-style token F1, BLEU-1, BLEU-2, ROUGE-L F1, and BERTScore-F1.
 Scores are fractions; baseline-rescaled BERTScore can be negative. BLEU uses
 unsmoothed per-answer modified precision and a brevity penalty. The default

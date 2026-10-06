@@ -1,4 +1,4 @@
-"""Generated-answer metrics from the PlantExpertVQA evaluation section.
+"""Dataset-specific generated-answer metrics for GQA and PlantExpertVQA.
 
 Scores are fractions (0 to 1 for lexical metrics), not percentages. BERTScore
 can be negative when baseline rescaling is enabled. The paper gives formulas
@@ -15,13 +15,53 @@ from statistics import fmean
 
 
 PAPER_METRICS = ("em", "token_f1", "bleu_1", "bleu_2", "rouge_l", "bertscore_f1")
+GQA_METRICS = ("vqa_accuracy",)
 _ARTICLE = re.compile(r"\b(a|an|the)\b", flags=re.IGNORECASE)
 _WORD_PUNCT = re.compile(r"\w+|[^\w\s]", flags=re.UNICODE)
+
+
+def resolve_dataset(dataset="auto", csv_path=None):
+    """Use an explicit dataset or detect GQA in a CSV path; otherwise paper metrics."""
+    dataset = dataset.lower()
+    if dataset not in {"auto", "gqa", "plantexpert"}:
+        raise ValueError(f"Unknown dataset: {dataset}")
+    if dataset != "auto":
+        return dataset
+    return ("gqa" if csv_path is not None and
+            re.search(r"(?:^|[^a-z0-9])gqa(?:$|[^a-z0-9])", str(csv_path).lower())
+            else "plantexpert")
+
+
+def metrics_for_dataset(dataset):
+    return GQA_METRICS if resolve_dataset(dataset) == "gqa" else PAPER_METRICS
 
 
 def normalize_text(text):
     """Light normalization retained for dataset diagnostics."""
     return " ".join(str(text).casefold().strip().split())
+
+
+def vqa_accuracy(reference, hypothesis):
+    """Consensus accuracy: min(number of matching references / 3, 1).
+
+    A string is one reference answer, not an artificial annotator consensus.
+    Therefore a correct single-reference GQA answer scores 1/3. Matching is
+    case-insensitive with whitespace normalized, as in dataset diagnostics.
+    """
+    answers = [reference] if isinstance(reference, str) else list(reference)
+    if not answers:
+        raise ValueError("VQA accuracy requires at least one reference answer")
+    prediction = normalize_text(hypothesis)
+    matches = sum(normalize_text(answer) == prediction for answer in answers)
+    return min(matches / 3.0, 1.0)
+
+
+def vqa_score_pairs(references, hypotheses):
+    """Per-example consensus accuracy for aligned reference/prediction pairs."""
+    if len(references) != len(hypotheses):
+        raise ValueError("References and hypotheses must have equal lengths")
+    return [{"vqa_accuracy": vqa_accuracy(ref, hyp)}
+            for ref, hyp in zip(references, hypotheses)]
 
 
 def _as_text(value):
@@ -129,7 +169,7 @@ def score_pairs(references, hypotheses, bert_scorer):
     return rows
 
 
-def mean_scores(rows):
+def mean_scores(rows, metrics=PAPER_METRICS):
     if not rows:
         raise ValueError("Cannot aggregate an empty evaluation set")
-    return {metric: fmean(row[metric] for row in rows) for metric in PAPER_METRICS}
+    return {metric: fmean(row[metric] for row in rows) for metric in metrics}

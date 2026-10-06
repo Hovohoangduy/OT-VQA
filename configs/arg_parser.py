@@ -4,6 +4,10 @@ from model.fusion import FUSION_METHODS
 
 def get_args(argv=None):
     parser = argparse.ArgumentParser()
+    parser.add_argument("--dataset", type=str.lower,
+                        choices=["auto", "gqa", "plantexpert"], default="auto",
+                        help="Answer metrics: auto detects GQA from the CSV path; "
+                             "use gqa for custom GQA paths, plantexpert for paper metrics")
 
     parser.add_argument("--batch_size", type=int, default=4, help="Batch size for training the model")
     parser.add_argument("--epochs", type=int, default=10, help="Number of epochs for training")

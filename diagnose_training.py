@@ -14,7 +14,7 @@ from configs.config import Config
 from utils.checkpoint import load_model
 from utils.data_processing import load_dataframe
 from utils.device import resolve_device, seed_everything
-from utils.metrics import PAPER_METRICS, lexical_scores, normalize_text
+from utils.metrics import GQA_METRICS, PAPER_METRICS, lexical_scores, normalize_text
 from utils.vqa_dataset import VQADataset
 
 
@@ -37,20 +37,21 @@ def _history_report(rows: list[dict]) -> dict:
         return {}
     best = min(rows, key=lambda row: row["val_loss"])
     last = rows[-1]
+    metric_names = (*GQA_METRICS, *PAPER_METRICS)
     return {
         "epochs_logged": len(rows),
         "best_epoch": best["epoch"],
         "best_val_loss": best["val_loss"],
-        "best_train_generated_metrics": {name: best[f"train_{name}"] for name in PAPER_METRICS
+        "best_train_generated_metrics": {name: best[f"train_{name}"] for name in metric_names
                                          if f"train_{name}" in best},
-        "best_generated_metrics": {name: best[f"val_{name}"] for name in PAPER_METRICS
+        "best_generated_metrics": {name: best[f"val_{name}"] for name in metric_names
                                    if f"val_{name}" in best},
         "last_epoch": last["epoch"],
         "last_train_loss": last["train_loss"],
         "last_val_loss": last["val_loss"],
-        "last_train_generated_metrics": {name: last[f"train_{name}"] for name in PAPER_METRICS
+        "last_train_generated_metrics": {name: last[f"train_{name}"] for name in metric_names
                                          if f"train_{name}" in last},
-        "last_generated_metrics": {name: last[f"val_{name}"] for name in PAPER_METRICS
+        "last_generated_metrics": {name: last[f"val_{name}"] for name in metric_names
                                    if f"val_{name}" in last},
         "val_loss_increase_after_best": last["val_loss"] - best["val_loss"],
         "overfitting_detected": (

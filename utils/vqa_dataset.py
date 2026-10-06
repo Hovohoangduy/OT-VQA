@@ -24,10 +24,12 @@ def resolve_image_root(dataframe, img_path, split, override=None):
 
 
 class VQADataset(Dataset):
-    def __init__(self, dataframe, transform=None, img_path="data/gqa_dataset/images"):
+    def __init__(self, dataframe, transform=None, img_path="data/gqa_dataset/images",
+                 dataset_name="plantexpert"):
         self.data = dataframe
         self.transform = transform
         self.img_path = Path(img_path)
+        self.dataset_name = dataset_name
 
     def __len__(self):
         return len(self.data)
