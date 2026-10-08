@@ -15,7 +15,7 @@ from statistics import fmean
 
 
 PAPER_METRICS = ("em", "token_f1", "bleu_1", "bleu_2", "rouge_l", "bertscore_f1")
-GQA_METRICS = ("vqa_accuracy",)
+GQA_METRICS = ("accuracy",)
 _ARTICLE = re.compile(r"\b(a|an|the)\b", flags=re.IGNORECASE)
 _WORD_PUNCT = re.compile(r"\w+|[^\w\s]", flags=re.UNICODE)
 
@@ -41,26 +41,23 @@ def normalize_text(text):
     return " ".join(str(text).casefold().strip().split())
 
 
-def vqa_accuracy(reference, hypothesis):
-    """Consensus accuracy: min(number of matching references / 3, 1).
+def gqa_accuracy(reference, hypothesis):
+    """Binary GQA exact match against one reference, with surrounding whitespace trimmed.
 
-    A string is one reference answer, not an artificial annotator consensus.
-    Therefore a correct single-reference GQA answer scores 1/3. Matching is
-    case-insensitive with whitespace normalized, as in dataset diagnostics.
+    A matching generated answer receives 1 and a wrong answer receives 0.
+    Case, punctuation, and internal whitespace remain significant; answers are
+    not extracted from prose, mapped to synonyms, or scored by annotator votes.
     """
-    answers = [reference] if isinstance(reference, str) else list(reference)
-    if not answers:
-        raise ValueError("VQA accuracy requires at least one reference answer")
-    prediction = normalize_text(hypothesis)
-    matches = sum(normalize_text(answer) == prediction for answer in answers)
-    return min(matches / 3.0, 1.0)
+    if not isinstance(reference, str) or not isinstance(hypothesis, str):
+        raise TypeError("GQA accuracy requires one reference string and one prediction string")
+    return float(reference.strip() == hypothesis.strip())
 
 
-def vqa_score_pairs(references, hypotheses):
-    """Per-example consensus accuracy for aligned reference/prediction pairs."""
+def gqa_score_pairs(references, hypotheses):
+    """Per-example binary accuracy for aligned GQA references and predictions."""
     if len(references) != len(hypotheses):
         raise ValueError("References and hypotheses must have equal lengths")
-    return [{"vqa_accuracy": vqa_accuracy(ref, hyp)}
+    return [{"accuracy": gqa_accuracy(ref, hyp)}
             for ref, hyp in zip(references, hypotheses)]
 
 

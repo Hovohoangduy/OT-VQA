@@ -1,4 +1,4 @@
-"""Offline checks for literal VQA consensus scoring in GQA runs."""
+"""Offline checks for binary exact-match GQA scoring in training and evaluation."""
 
 import io
 import json
@@ -20,9 +20,8 @@ from diagnose_training import _history_report
 from scripts.compare_fusions import collect_results, write_comparison
 from test import evaluation, main as evaluate_main
 from train import _run_training
-from utils.metrics import (GQA_METRICS, PAPER_METRICS, mean_scores,
-                           metrics_for_dataset, resolve_dataset, vqa_accuracy,
-                           vqa_score_pairs)
+from utils.metrics import (GQA_METRICS, PAPER_METRICS, gqa_accuracy, gqa_score_pairs,
+                           mean_scores, metrics_for_dataset, resolve_dataset)
 from utils.vqa_dataset import VQADataset
 
 
@@ -51,24 +50,32 @@ class ConstantAnswerModel(nn.Module):
 
 
 class GQAMetricTests(unittest.TestCase):
-    def test_consensus_formula_for_zero_one_two_and_three_or_more_matches(self):
-        for matches in range(6):
-            with self.subTest(matches=matches):
-                self.assertAlmostEqual(
-                    vqa_accuracy(["red"] * matches + ["blue"] * (10 - matches), "red"),
-                    min(matches / 3, 1),
-                )
-        self.assertEqual(vqa_accuracy("red", "blue"), 0)
-        self.assertAlmostEqual(vqa_accuracy("red", "red"), 1 / 3)
-        self.assertAlmostEqual(vqa_accuracy("  RED   leaf ", "red leaf"), 1 / 3)
-        # One multi-word string remains one vote.
-        self.assertAlmostEqual(vqa_accuracy("red red red", "red red red"), 1 / 3)
+    def test_binary_exact_match_and_matching_rules(self):
+        for reference, hypothesis, expected in [
+            ("red", "red", 1.0),
+            ("red", "blue", 0.0),
+            ("  red leaf ", "red leaf\n", 1.0),
+            ("RED", "red", 0.0),
+            ("red   leaf", "red leaf", 0.0),
+            ("red", "red.", 0.0),
+            ("red", "The answer is red", 0.0),
+            ("two", "2", 0.0),
+            ("red", "", 0.0),
+            ("red red red", "red red red", 1.0),
+        ]:
+            with self.subTest(reference=reference, hypothesis=hypothesis):
+                self.assertEqual(gqa_accuracy(reference, hypothesis), expected)
+        with self.assertRaises(TypeError):
+            gqa_accuracy(["red"] * 3, "red")
         with self.assertRaises(ValueError):
-            vqa_accuracy([], "red")
-        with self.assertRaises(ValueError):
-            vqa_score_pairs(["red"], [])
+            gqa_score_pairs(["red"], [])
         with self.assertRaises(ValueError):
             mean_scores([], GQA_METRICS)
+        rows = gqa_score_pairs(["red", "blue", "red"], ["red", "red", "red"])
+        self.assertEqual(rows, [{"accuracy": 1.0}, {"accuracy": 0.0}, {"accuracy": 1.0}])
+        self.assertEqual(mean_scores(rows, GQA_METRICS), {"accuracy": 2 / 3})
+        self.assertEqual(mean_scores(gqa_score_pairs(["red"], ["red"]), GQA_METRICS),
+                         {"accuracy": 1.0})
 
     def test_dataset_selection_and_cli_override(self):
         args = get_args([])
@@ -110,9 +117,9 @@ class GQAMetricTests(unittest.TestCase):
             builder.assert_not_called()
             paper_scorer.assert_not_called()
             self.assertEqual(result["examples"], 3)
-            self.assertEqual(set(result["metrics"]), {"vqa_accuracy"})
-            self.assertAlmostEqual(result["metrics"]["vqa_accuracy"], 2 / 9)
-            self.assertEqual([row["vqa_accuracy"] for row in predictions], [1 / 3, 0, 1 / 3])
+            self.assertEqual(result["metrics"], {"accuracy": 2 / 3})
+            self.assertEqual([row["accuracy"] for row in predictions], [1, 0, 1])
+            self.assertNotIn("vqa_accuracy", predictions[0])
             self.assertFalse(set(PAPER_METRICS).intersection(predictions[0]))
             self.assertGreater(result["loss"], 0)
             self.assertEqual(result["performance"]["examples"], 3)
@@ -137,17 +144,20 @@ class GQAMetricTests(unittest.TestCase):
             self.assertEqual(save.call_count, 2)
             history = [json.loads(line) for line in
                        (destination / "metrics.jsonl").read_text().splitlines()]
-            self.assertAlmostEqual(history[0]["train_vqa_accuracy"], 2 / 9)
-            self.assertAlmostEqual(history[0]["val_vqa_accuracy"], 2 / 9)
+            self.assertAlmostEqual(history[0]["train_accuracy"], 2 / 3)
+            self.assertAlmostEqual(history[0]["val_accuracy"], 2 / 3)
+            self.assertNotIn("train_vqa_accuracy", history[0])
+            self.assertNotIn("val_vqa_accuracy", history[0])
             self.assertNotIn("train_em", history[0])
-            self.assertIn("vqa_accuracy=0.2222", stdout.getvalue())
+            self.assertIn("accuracy=0.6667", stdout.getvalue())
+            self.assertNotIn("vqa_accuracy", stdout.getvalue())
             self.assertTrue((destination / "evaluation_metrics_plot.png").is_file())
             manifest = json.loads((destination / "run_config.json").read_text())
             self.assertEqual(manifest["dataset"], "gqa")
-            self.assertEqual(manifest["generated_metrics"], ["vqa_accuracy"])
+            self.assertEqual(manifest["generated_metrics"], ["accuracy"])
             self.assertNotIn("bertscore_hash", manifest)
             self.assertEqual(_history_report(history)["best_generated_metrics"],
-                             {"vqa_accuracy": 2 / 9})
+                             {"accuracy": 2 / 3})
 
             # Custom paths can force GQA on both validation and test splits.
             custom_path = root / "custom.csv"
@@ -168,11 +178,13 @@ class GQAMetricTests(unittest.TestCase):
                 builder.assert_not_called()
                 report = json.loads(report_path.read_text())
                 self.assertEqual(report["dataset"], "gqa")
-                self.assertEqual(report["generated_metrics"], {"vqa_accuracy": 2 / 9})
+                self.assertEqual(report["generated_metrics"], {"accuracy": 2 / 3})
                 self.assertNotIn("bertscore", report)
                 predictions = pd.read_csv(predictions_path)
                 self.assertEqual(len(predictions), 3)
-                self.assertIn("vqa_accuracy", predictions)
+                self.assertIn("accuracy", predictions)
+                self.assertNotIn("vqa_accuracy", predictions)
+                self.assertEqual(predictions["accuracy"].tolist(), [1, 0, 1])
                 self.assertIn("question_type", predictions)
                 self.assertNotIn("em", predictions)
 
@@ -184,12 +196,20 @@ class GQAMetricTests(unittest.TestCase):
             (run / "test_report.json").write_text(json.dumps(report))
             rows = collect_results(comparison_root, ["ot", "san"], [1], "test")
             write_comparison(comparison_root, rows)
-            self.assertIn("VQA accuracy", (comparison_root / "comparison.md").read_text())
-            self.assertIn("mean_vqa_accuracy", (comparison_root / "summary.csv").read_text())
+            self.assertIn("GQA accuracy", (comparison_root / "comparison.md").read_text())
+            self.assertIn("mean_accuracy", (comparison_root / "summary.csv").read_text())
+            self.assertNotIn("vqa_accuracy", (comparison_root / "comparison.csv").read_text())
             self.assertNotIn("bertscore", (comparison_root / "comparison.csv").read_text())
             rows.append({**rows[0], "em": 0.5})
             with self.assertRaisesRegex(ValueError, "different generated metrics"):
                 write_comparison(comparison_root, rows)
+
+    def test_fusion_comparison_rejects_legacy_consensus_reports(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(ValueError, "Legacy vqa_accuracy"):
+                write_comparison(Path(directory), [
+                    {"status": "complete", "vqa_accuracy": 1 / 3},
+                ])
 
 
 if __name__ == "__main__":

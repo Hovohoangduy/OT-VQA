@@ -57,6 +57,9 @@ def collect_results(output_dir, methods, seeds, split):
 def write_comparison(output_dir, rows):
     output_dir.mkdir(parents=True, exist_ok=True)
     completed = [row for row in rows if row["status"] == "complete"]
+    if any("vqa_accuracy" in row for row in completed):
+        raise ValueError("Legacy vqa_accuracy reports use consensus scoring. "
+                         "Reevaluate GQA checkpoints with test.py to obtain accuracy.")
     metric_sets = {tuple(name for name in (*GQA_METRICS, *PAPER_METRICS) if name in row)
                    for row in completed}
     if len(metric_sets) > 1:
@@ -91,7 +94,7 @@ def write_comparison(output_dir, rows):
         writer = csv.DictWriter(handle, fieldnames=summary_columns)
         writer.writeheader()
         writer.writerows(summary)
-    metric_labels = {"vqa_accuracy": "VQA accuracy", "em": "EM", "token_f1": "Token F1",
+    metric_labels = {"accuracy": "GQA accuracy", "em": "EM", "token_f1": "Token F1",
                      "bleu_1": "BLEU-1", "bleu_2": "BLEU-2", "rouge_l": "ROUGE-L",
                      "bertscore_f1": "BERTScore F1"}
     per_seed_headers = ["Fusion", "Seed", "Status", "Trainable parameters", "Loss",
@@ -107,7 +110,7 @@ def write_comparison(output_dir, rows):
         values += [f"{row[key]:.4f}" if key in row else "—" for key in
                    ("loss", *metric_names, "milliseconds_per_example")]
         lines.append("| " + " | ".join(values) + " |")
-    summary_metrics = (GQA_METRICS if "vqa_accuracy" in metric_names else
+    summary_metrics = (GQA_METRICS if "accuracy" in metric_names else
                        ("em", "token_f1", "bertscore_f1"))
     summary_headers = ["Fusion", "Runs", *(f"{metric_labels[name]} mean ± SD"
                        for name in summary_metrics), "ms/example mean ± SD"]

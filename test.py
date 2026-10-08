@@ -15,8 +15,8 @@ from configs.config import Config
 from utils.checkpoint import load_model
 from utils.data_processing import load_dataframe
 from utils.device import resolve_device
-from utils.metrics import (build_bertscore_scorer, mean_scores, metrics_for_dataset,
-                           resolve_dataset, score_pairs, vqa_score_pairs)
+from utils.metrics import (build_bertscore_scorer, gqa_score_pairs, mean_scores,
+                           metrics_for_dataset, resolve_dataset, score_pairs)
 from utils.vqa_dataset import VQADataset, resolve_image_root
 
 
@@ -61,7 +61,7 @@ def evaluation(model, test_loader, criterion, vocab_swap=None, device=None,
         torch.cuda.synchronize(device)
     model_elapsed = perf_counter() - started
     if dataset_name == "gqa":
-        rows = vqa_score_pairs(references, generated)
+        rows = gqa_score_pairs(references, generated)
     else:
         if bert_scorer is None:
             bert_scorer = build_bertscore_scorer()

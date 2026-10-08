@@ -159,7 +159,7 @@ Training writes `last.pt`, the lowest-validation-loss checkpoint as `best.pt`, a
 metric history, an evaluation plot, and `run_config.json` with dataset hashes.
 Add `--save_every_epoch` to retain `epoch_0001.pt`, `epoch_0002.pt`, and so on.
 Each epoch file is a full resumable checkpoint, so 100 files can use substantial disk space.
-After each epoch, GQA runs report generated-answer `vqa_accuracy` for both
+After each epoch, GQA runs report generated-answer binary exact-match `accuracy` for both
 the training and validation splits. Other datasets report EM, token F1,
 BLEU-1/2, ROUGE-L, and BERTScore. The history stores
 these as `train_*` and `val_*` fields; the plot shows both curves. Scoring the
@@ -192,6 +192,74 @@ Set `--ot_dustbin_mass 0` for a full-OT ablation. Partial OT defaults to mass
 validation on your dataset.
 
 ## Evaluate
+
+### Zero-shot Qwen3-VL with LM Studio
+
+Load the **vision** model `qwen3-vl-2b-instruct` in LM Studio and start its local
+server on port 1234. This evaluator uses Python 3.9+ and only the standard
+library, so it does not require PyTorch or the OpenAI Python package.
+LM Studio supports the
+[OpenAI-compatible chat endpoint](https://lmstudio.ai/docs/developer/openai-compat/chat-completions).
+Run these commands from the repository root:
+
+```bash
+# Check the exact API model identifier.
+python3 -m scripts.evaluate_gqa_lmstudio --list-models
+
+# First check five examples in a separate output directory.
+python3 -m scripts.evaluate_gqa_lmstudio --limit 5 --output-dir results/qwen_smoke
+
+# Evaluate every row in data/gqa_dataset/test.csv (2,000 in the downloaded subset).
+python3 -m scripts.evaluate_gqa_lmstudio
+
+# Resume the full run after an interruption, using its original flags.
+python3 -m scripts.evaluate_gqa_lmstudio --resume
+```
+
+Each question gets a fresh request containing the original image and question,
+with a short-answer instruction, temperature 0, and no examples or reference
+answers. The server handles image preprocessing. The default URL is
+`http://127.0.0.1:1234/v1`; override it with `--base-url`. If the model identifier
+differs, pass the exact ID printed by `--list-models` with `--model`.
+If server authentication is enabled, set `LM_STUDIO_API_KEY` in your environment.
+
+Results go to `results/qwen3_vl_2b_gqa_zero_shot/`: `predictions.jsonl` retains
+the raw responses and token usage as each request finishes, `predictions.csv`
+contains predictions and per-question scores, and `report.json` contains
+aggregate metrics and the run settings. `run_config.json` guards resume against
+changed question files or inference settings. Existing outputs require
+`--resume` or a fresh directory. The script stops on errors by default;
+`--continue-on-error` records failures and continues. Failed labeled requests
+count as incorrect, and resume retries them. `--max-tokens` (default 64) and
+`--timeout` (default 180 seconds) are configurable; the report counts responses
+that reached the token limit. Temperature 0 and a seed reduce sampling variation,
+but results can still vary between model quantizations and server versions.
+
+The report's `accuracy` is binary exact-match accuracy (0–1), using the
+[GQA accuracy definition](https://cs.stanford.edu/people/dorarad/gqa/evaluate.html).
+It trims response whitespace without extracting answers from explanations.
+`normalized_accuracy` additionally ignores case and repeated whitespace.
+Use `accuracy` for comparisons with this repository's GQA training and testing.
+Partial reports score attempted questions and explicitly indicate `complete: false`.
+This computes answer accuracy, not GQA's other scene-graph-based metrics.
+
+The repository's `test.csv` is a held-out subset of the **labeled validation
+split**, not the official GQA hidden test split. To evaluate official question
+JSON and its image directory instead:
+
+```bash
+python3 -m scripts.evaluate_gqa_lmstudio \
+  --questions /path/to/val_balanced_questions.json \
+  --images /path/to/gqa/images \
+  --output-dir results/qwen_official_val
+```
+
+Official JSON maps question IDs to objects containing `imageId`, `question`,
+and optionally `answer`. Unlabeled files produce predictions without accuracy.
+`gqa_predictions.json` uses GQA's `questionId`/`prediction` format; use official
+question JSON for official evaluation, because this repository's CSV `anno_id`
+values identify images rather than official questions. `--limit N` always selects
+the first N rows, so a smoke run is not a randomly sampled benchmark score.
 
 ```bash
 python test.py --checkpoint data/gqa_model/best.pt --split dev \
@@ -228,18 +296,25 @@ component (such as `data/gqa_dataset/val.csv`) selects GQA scoring. Use
 to select the six paper metrics explicitly. The same option works for
 `train.py`, `test.py`, and `python -m scripts.compare_fusions`.
 
-GQA uses the requested VQA consensus formula for each generated answer:
-`vqa_accuracy = min(number_of_matching_reference_answers / 3, 1)`.
-The dataset score is the mean of these per-question scores. Matching ignores
-case and repeated whitespace. Each GQA CSV row has one reference answer, so
-a correct prediction receives `1/3` and an incorrect prediction receives `0`;
-the maximum dataset score is `1/3`. References are never duplicated to create
-artificial votes. This applies the requested formula literally rather than
-[GQA's official binary accuracy](https://cs.stanford.edu/people/dorarad/gqa/evaluate.html).
-Training logs and plots use `train_vqa_accuracy` and `val_vqa_accuracy`;
-evaluation JSON and prediction CSV exports use `vqa_accuracy`. GQA runs do not
-compute the six paper metrics or load a BERTScore model. Checkpoint selection
-and early stopping still use validation loss.
+GQA uses [binary exact-match accuracy](https://cs.stanford.edu/people/dorarad/gqa/evaluate.html):
+each generated answer receives `1` if it matches the single reference answer
+and `0` otherwise. The dataset's `accuracy` is the mean of these scores, ranging
+from `0` to `1` (multiply by 100 for a percentage). Matching trims leading and
+trailing whitespace; case, punctuation, and internal whitespace remain
+significant. It does not extract answers from explanations or award partial
+credit for synonyms.
+Training logs and plots use `train_accuracy` and `val_accuracy`;
+evaluation JSON and prediction CSV exports use `accuracy`. GQA runs do not
+compute the six PlantExpertVQA metrics or load a BERTScore model. Checkpoint
+selection and early stopping still use validation loss.
+
+This replaces the earlier `vqa_accuracy` consensus score that awarded only
+`1/3` for a correct single-reference answer. Existing checkpoints can be
+evaluated with the new metric without retraining. Old reports and history
+entries retain their original scores; rerun evaluation to obtain exact-match
+accuracy rather than renaming or multiplying old scores, because matching
+rules also changed. When resuming training, newly appended epochs use the
+`train_accuracy`/`val_accuracy` fields.
 
 For other datasets, evaluation reports the six PlantExpertVQA paper metrics: case-insensitive exact
 match, SQuAD-style token F1, BLEU-1, BLEU-2, ROUGE-L F1, and BERTScore-F1.

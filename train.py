@@ -1,4 +1,7 @@
-"""Train OT VQA and select checkpoints by validation loss."""
+"""Train OT VQA, report dataset answer metrics, and select checkpoints by validation loss.
+
+GQA reports binary generated-answer accuracy for training and validation.
+"""
 
 from __future__ import annotations
 
