@@ -196,8 +196,9 @@ validation on your dataset.
 ### Zero-shot Qwen3-VL with LM Studio
 
 Load the **vision** model `qwen3-vl-2b-instruct` in LM Studio and start its local
-server on port 1234. This evaluator uses Python 3.9+ and only the standard
-library, so it does not require PyTorch or the OpenAI Python package.
+server on port 1234. This evaluator uses Python 3.9+. GQA scoring and PlantExpert
+lexical scoring use only the standard library; PlantExpert BERTScore also needs
+`bert-score` and its dependencies. The OpenAI Python package is not required.
 LM Studio supports the
 [OpenAI-compatible chat endpoint](https://lmstudio.ai/docs/developer/openai-compat/chat-completions).
 Run these commands from the repository root:
@@ -260,6 +261,55 @@ and optionally `answer`. Unlabeled files produce predictions without accuracy.
 question JSON for official evaluation, because this repository's CSV `anno_id`
 values identify images rather than official questions. `--limit N` always selects
 the first N rows, so a smoke run is not a randomly sampled benchmark score.
+
+### Zero-shot PlantExpertVQA with LM Studio
+
+Use the same evaluator with `--dataset plantexpert`. This selects
+`data/plantexpert_dataset/test.csv`, `data/plantexpert_dataset/images`, and
+`results/qwen3_vl_2b_plantexpert_zero_shot/` by default. Load the vision model
+and start the LM Studio server as above.
+
+```bash
+# Check five questions using lexical metrics, with no extra dependencies.
+python3 -m scripts.evaluate_gqa_lmstudio \
+  --dataset plantexpert --no-bertscore --limit 5 \
+  --output-dir results/qwen_plantexpert_smoke
+
+# Install BERTScore in the Python environment used for the full run.
+python3 -m pip install bert-score==0.3.13
+
+# Evaluate all PlantExpert test questions with all six repository metrics.
+python3 -m scripts.evaluate_gqa_lmstudio --dataset plantexpert
+
+# Resume using the same flags as the original run.
+python3 -m scripts.evaluate_gqa_lmstudio --dataset plantexpert --resume
+```
+
+PlantExpert requests use a concise, complete-answer instruction rather than
+GQA's one-word/short-phrase instruction. The default `--max-tokens` is 256
+for PlantExpert and remains 64 for GQA. Each request contains only the image,
+question, and fixed instruction: reference answers, crop/disease annotations,
+and examples are never sent to the model.
+
+The report's `generated_metrics` contains `em`, `token_f1`, `bleu_1`, `bleu_2`,
+`rouge_l`, and `bertscore_f1`, using the same scoring functions as `test.py`.
+`predictions.csv` includes per-question metrics and available `question_category`,
+`question_type`, `crop`, and `disease` fields for analysis. PlantExpert does not
+write the GQA-specific prediction JSON. Scores are fractions; rescaled BERTScore
+can be negative. Failed labeled requests receive zero for every metric, and
+partial runs score only attempted questions. A missing `answer` column produces
+unscored predictions; empty reference strings are scored as empty answers.
+
+BERTScore defaults to `bert-base-uncased`, CPU, batch size 16, and English
+baseline rescaling. The report records its model hash. Configure it with
+`--bertscore-model`, `--bertscore-device`, `--bertscore-batch-size`, and
+`--no-bertscore-rescale`. Its first run may download the scoring model; it is
+loaded before inference so missing dependencies fail early. `--no-bertscore`
+computes the five lexical metrics and records `bertscore_f1` as `null`.
+Keep this flag when resuming a lexical-only run. As with GQA, a five-question
+smoke run checks the workflow and does not establish benchmark performance.
+
+### Evaluate a trained repository model
 
 ```bash
 python test.py --checkpoint data/gqa_model/best.pt --split dev \

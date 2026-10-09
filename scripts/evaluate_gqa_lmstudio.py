@@ -1,8 +1,12 @@
-"""Zero-shot GQA evaluation through LM Studio; Python standard library only.
+"""Zero-shot GQA or PlantExpertVQA evaluation through LM Studio.
 
 Run from the repository root:
     python3 -m scripts.evaluate_gqa_lmstudio --limit 5 --output-dir results/qwen_smoke
     python3 -m scripts.evaluate_gqa_lmstudio
+    python3 -m scripts.evaluate_gqa_lmstudio --dataset plantexpert
+
+GQA and PlantExpert lexical scoring use only the standard library.
+PlantExpert BERTScore additionally requires bert-score and its dependencies.
 
 Each request contains only an image and question, with no demonstrations,
 reference answers, scene graphs, or chat history. Images retain their original
@@ -22,8 +26,10 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+
+from utils.metrics import PAPER_METRICS, build_bertscore_scorer, lexical_scores, score_pairs
 
 
 SYSTEM_PROMPT = (
@@ -31,6 +37,13 @@ SYSTEM_PROMPT = (
     "usually one word or a short phrase. For yes/no questions, return yes or no. "
     "Do not include an explanation, a full sentence, or an 'Answer:' prefix."
 )
+PLANTEXPERT_SYSTEM_PROMPT = (
+    "Answer the plant-science question using the image. Give a concise, complete "
+    "answer with the details requested by the question. For yes/no questions, "
+    "answer yes or no and explain only if requested. Do not include an 'Answer:' "
+    "prefix, unrelated information, or discussion of your reasoning process."
+)
+METADATA_FIELDS = ("question_type", "question_category", "crop", "disease")
 
 
 @dataclass(frozen=True)
@@ -39,6 +52,7 @@ class Example:
     image: str
     question: str
     answer: str | None
+    metadata: dict[str, str] = field(default_factory=dict)
 
 
 def load_examples(path: Path) -> list[Example]:
@@ -52,7 +66,8 @@ def load_examples(path: Path) -> list[Example]:
             for index, row in enumerate(reader):
                 examples.append(Example(
                     row.get("question_id") or row.get("anno_id") or str(index),
-                    row["image"], row["question"], row.get("answer") or None,
+                    row["image"], row["question"], row.get("answer"),
+                    {key: row[key] for key in METADATA_FIELDS if key in row},
                 ))
     elif path.suffix.lower() == ".json":
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -134,12 +149,12 @@ class LMStudioClient:
         return [item["id"] for item in self.request("/models")["data"]]
 
     def answer(self, model: str, example: Example, path: Path,
-               max_tokens: int, seed: int) -> dict:
+               max_tokens: int, seed: int, system_prompt: str = SYSTEM_PROMPT) -> dict:
         start = time.perf_counter()
         response = self.request("/chat/completions", {
             "model": model,
             "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": [
                     {"type": "image_url", "image_url": {"url": image_data_url(path)}},
                     {"type": "text", "text": example.question},
@@ -167,14 +182,25 @@ def normalize(text: str) -> str:
     return " ".join(text.casefold().split())
 
 
-def make_record(example: Example, result: dict | None = None, error: str = "") -> dict:
+def make_record(example: Example, result: dict | None = None, error: str = "",
+                dataset: str = "gqa") -> dict:
     record = {
         "question_id": example.question_id, "image": example.image,
         "question": example.question, "reference": example.answer,
         "prediction": "", "raw_response": "", "error": error,
     }
+    record.update(example.metadata)
     record.update(result or {})
     labeled = example.answer is not None
+    if dataset == "plantexpert":
+        if not labeled:
+            scores = {metric: None for metric in PAPER_METRICS[:-1]}
+        elif error:
+            scores = {metric: 0.0 for metric in PAPER_METRICS[:-1]}
+        else:
+            scores = lexical_scores(example.answer, record["prediction"])
+        record.update(scores)
+        return record
     record["correct"] = (
         bool(not error and record["prediction"].strip() == example.answer.strip()) if labeled else None
     )
@@ -186,7 +212,7 @@ def make_record(example: Example, result: dict | None = None, error: str = "") -
 
 
 def save_outputs(output: Path, records: dict[str, dict], config: dict,
-                 selected_count: int) -> dict:
+                 selected_count: int, bert_scorer=None) -> dict:
     rows = list(records.values())
     labeled = [row for row in rows if row["reference"] is not None]
     successful = [row for row in rows if not row["error"]]
@@ -198,28 +224,68 @@ def save_outputs(output: Path, records: dict[str, dict], config: dict,
         "errors": len(rows) - len(successful),
         "labeled_examples_attempted": len(labeled),
         "complete": len(successful) == selected_count,
-        "accuracy": sum(row["correct"] for row in labeled) / len(labeled) if labeled else None,
-        "normalized_accuracy": (
-            sum(row["normalized_correct"] for row in labeled) / len(labeled) if labeled else None
-        ),
         "truncated_responses": sum(row.get("finish_reason") == "length" for row in successful),
         "mean_latency_seconds": (
             sum(row["latency_seconds"] for row in successful) / len(successful)
             if successful else None
         ),
-        "scoring": {
-            "accuracy": "Exact match after trimming response whitespace; one point per correct answer.",
-            "normalized_accuracy": "Exact match ignoring case and repeated whitespace.",
-            "errors": "Failed labeled requests count as incorrect; unattempted questions are excluded.",
-        },
     }
+    plantexpert = config.get("dataset") == "plantexpert"
+    if plantexpert:
+        report["generated_metrics"] = {
+            metric: sum(row[metric] for row in labeled) / len(labeled) if labeled else None
+            for metric in PAPER_METRICS[:-1]
+        }
+        report["generated_metrics"]["bertscore_f1"] = None
+        report["bertscore"] = config["bertscore"].copy()
+        report["scoring"] = {
+            "metrics": "Repository PlantExpert metrics; scores are fractions, rescaled BERTScore can be negative.",
+            "errors": "Failed labeled requests receive zero for every metric; unattempted questions are excluded.",
+        }
+    else:
+        report.update({
+            "accuracy": sum(row["correct"] for row in labeled) / len(labeled) if labeled else None,
+            "normalized_accuracy": (
+                sum(row["normalized_correct"] for row in labeled) / len(labeled) if labeled else None
+            ),
+            "scoring": {
+                "accuracy": "Exact match after trimming response whitespace; one point per correct answer.",
+                "normalized_accuracy": "Exact match ignoring case and repeated whitespace.",
+                "errors": "Failed labeled requests count as incorrect; unattempted questions are excluded.",
+            },
+        })
+    # Save a report before semantic scoring, so scoring failures preserve inference results.
     (output / "report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-    fields = ["question_id", "image", "question", "reference", "prediction", "correct",
-              "normalized_correct", "latency_seconds", "finish_reason", "error"]
-    with (output / "predictions.csv").open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fields, extrasaction="ignore")
-        writer.writeheader()
-        writer.writerows(rows)
+    fields = ["question_id", "image", "question", "reference", "prediction"]
+    fields += list(PAPER_METRICS) if plantexpert else ["correct", "normalized_correct"]
+    fields += [key for key in METADATA_FIELDS if any(key in row for row in rows)]
+    fields += ["latency_seconds", "finish_reason", "error"]
+
+    def write_csv():
+        with (output / "predictions.csv").open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fields, extrasaction="ignore")
+            writer.writeheader()
+            writer.writerows(rows)
+
+    write_csv()
+    if plantexpert:
+        for row in rows:
+            failed_label = row["error"] and row["reference"] is not None
+            row["bertscore_f1"] = 0.0 if bert_scorer is not None and failed_label else None
+        if bert_scorer is not None:
+            scored = [row for row in labeled if not row["error"]]
+            if scored:
+                scores = score_pairs([row["reference"] for row in scored],
+                                     [row["prediction"] for row in scored], bert_scorer)
+                for row, metrics in zip(scored, scores):
+                    row["bertscore_f1"] = metrics["bertscore_f1"]
+            report["generated_metrics"]["bertscore_f1"] = (
+                sum(row["bertscore_f1"] for row in labeled) / len(labeled) if labeled else None
+            )
+            report["bertscore"]["model_hash"] = bert_scorer.hash
+        (output / "report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+        write_csv()
+        return report
     # Official GQA prediction structure. Repository anno_id values are image IDs,
     # so use official question JSON if exporting predictions for the GQA evaluator.
     (output / "gqa_predictions.json").write_text(json.dumps([
@@ -236,6 +302,8 @@ def evaluate(args: argparse.Namespace, client: LMStudioClient) -> dict:
     # Validate the selected files before starting a potentially long inference run.
     paths = {example.question_id: image_path(args.images, example, args.image_split or args.questions.stem)
              for example in examples}
+    plantexpert = args.dataset == "plantexpert"
+    system_prompt = PLANTEXPERT_SYSTEM_PROMPT if plantexpert else SYSTEM_PROMPT
     config = {
         "questions": str(args.questions.resolve()),
         "questions_sha256": hashlib.sha256(args.questions.read_bytes()).hexdigest(),
@@ -244,8 +312,14 @@ def evaluate(args: argparse.Namespace, client: LMStudioClient) -> dict:
         "model": args.model, "base_url": client.base_url,
         "limit": args.limit, "seed": args.seed,
         "temperature": 0, "max_tokens": args.max_tokens,
-        "system_prompt": SYSTEM_PROMPT, "protocol": "zero-shot",
+        "system_prompt": system_prompt, "protocol": "zero-shot",
     }
+    if plantexpert:
+        config.update({"dataset": "plantexpert", "bertscore": {
+            "enabled": not args.no_bertscore, "model": args.bertscore_model,
+            "device": args.bertscore_device, "batch_size": args.bertscore_batch_size,
+            "rescale_with_baseline": args.bertscore_rescale,
+        }})
     output = args.output_dir
     output.mkdir(parents=True, exist_ok=True)
     manifest = output / "run_config.json"
@@ -261,6 +335,14 @@ def evaluate(args: argparse.Namespace, client: LMStudioClient) -> dict:
     else:
         if any(output.iterdir()):
             raise ValueError(f"Output directory is not empty: {output}. Use --resume or a new output-dir.")
+    bert_scorer = None
+    if plantexpert and not args.no_bertscore and any(example.answer is not None for example in examples):
+        print("Loading BERTScore before inference...", flush=True)
+        bert_scorer = build_bertscore_scorer(
+            model_type=args.bertscore_model, device=args.bertscore_device,
+            batch_size=args.bertscore_batch_size, rescale_with_baseline=args.bertscore_rescale,
+        )
+    if not args.resume:
         manifest.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
     print(f"Model: {args.model}; selected questions: {len(examples)}; zero-shot", flush=True)
     try:
@@ -271,12 +353,13 @@ def evaluate(args: argparse.Namespace, client: LMStudioClient) -> dict:
                     continue
                 failure = None
                 try:
+                    prompt_args = {"system_prompt": system_prompt} if plantexpert else {}
                     result = client.answer(args.model, example, paths[example.question_id],
-                                           args.max_tokens, args.seed)
-                    record = make_record(example, result)
+                                           args.max_tokens, args.seed, **prompt_args)
+                    record = make_record(example, result, dataset=args.dataset)
                 except (RuntimeError, OSError, ValueError, KeyError, IndexError, TypeError) as error:
                     failure = error
-                    record = make_record(example, error=str(error))
+                    record = make_record(example, error=str(error), dataset=args.dataset)
                 handle.write(json.dumps(record, ensure_ascii=False) + "\n")
                 handle.flush()
                 records[example.question_id] = record
@@ -286,7 +369,7 @@ def evaluate(args: argparse.Namespace, client: LMStudioClient) -> dict:
                 if failure and not args.continue_on_error:
                     raise RuntimeError("Stopped after an error; predictions are saved. Fix it and use --resume.") from failure
     finally:
-        report = save_outputs(output, records, config, len(examples))
+        report = save_outputs(output, records, config, len(examples), bert_scorer)
     return report
 
 
@@ -295,22 +378,38 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--base-url", default="http://127.0.0.1:1234/v1")
     parser.add_argument("--model", default="qwen3-vl-2b-instruct", help="Exact identifier from --list-models")
     parser.add_argument("--list-models", action="store_true", help="Print model identifiers and exit")
-    parser.add_argument("--questions", type=Path, default=Path("data/gqa_dataset/test.csv"))
-    parser.add_argument("--images", type=Path, default=Path("data/gqa_dataset/images"))
+    parser.add_argument("--dataset", choices=("gqa", "plantexpert"), default="gqa",
+                        help="Choose dataset defaults, answer prompt, and scoring (default: gqa)")
+    parser.add_argument("--questions", type=Path, help="Default: data/<dataset>_dataset/test.csv")
+    parser.add_argument("--images", type=Path, help="Default: data/<dataset>_dataset/images")
     parser.add_argument("--image-split", help="Optional split subfolder for flat image names")
-    parser.add_argument("--output-dir", type=Path, default=Path("results/qwen3_vl_2b_gqa_zero_shot"))
+    parser.add_argument("--output-dir", type=Path, help="Default: results/qwen3_vl_2b_<dataset>_zero_shot")
     parser.add_argument("--limit", type=int, help="Evaluate only the first N questions (default: all)")
-    parser.add_argument("--max-tokens", type=int, default=64)
+    parser.add_argument("--max-tokens", type=int, help="Default: 64 for GQA, 256 for PlantExpert")
+    parser.add_argument("--no-bertscore", action="store_true",
+                        help="PlantExpert: compute five lexical metrics only, without extra dependencies")
+    parser.add_argument("--bertscore-model", default="bert-base-uncased")
+    parser.add_argument("--bertscore-device", default="cpu")
+    parser.add_argument("--bertscore-batch-size", type=int, default=16)
+    parser.add_argument("--no-bertscore-rescale", dest="bertscore_rescale", action="store_false",
+                        help="Disable BERTScore English baseline rescaling")
     parser.add_argument("--seed", type=int, default=42, help="LM Studio sampling seed")
     parser.add_argument("--timeout", type=float, default=180, help="Request timeout in seconds")
     parser.add_argument("--retries", type=int, default=2, help="Additional attempts for transient API failures")
     parser.add_argument("--resume", action="store_true", help="Reuse saved successes and retry failed questions")
     parser.add_argument("--continue-on-error", action="store_true", help="Record errors and continue; errors count as wrong")
     args = parser.parse_args(argv)
+    args.questions = args.questions or Path(f"data/{args.dataset}_dataset/test.csv")
+    args.images = args.images or Path(f"data/{args.dataset}_dataset/images")
+    args.output_dir = args.output_dir or Path(f"results/qwen3_vl_2b_{args.dataset}_zero_shot")
+    if args.max_tokens is None:
+        args.max_tokens = 256 if args.dataset == "plantexpert" else 64
     if args.limit is not None and args.limit <= 0:
         parser.error("--limit must be positive")
     if args.max_tokens <= 0 or args.timeout <= 0 or args.retries < 0:
         parser.error("max-tokens and timeout must be positive; retries must be nonnegative")
+    if args.bertscore_batch_size <= 0:
+        parser.error("bertscore-batch-size must be positive")
     return args
 
 
@@ -331,7 +430,12 @@ def main(argv: list[str] | None = None) -> int:
     except (RuntimeError, OSError, ValueError, KeyError, TypeError) as error:
         print(f"Error: {error}", file=sys.stderr)
         return 1
-    if report["accuracy"] is not None:
+    if args.dataset == "plantexpert":
+        print("PlantExpert metrics: " + ", ".join(
+            f"{key}={value:.4f}" if value is not None else f"{key}=not computed"
+            for key, value in report["generated_metrics"].items()
+        ))
+    elif report["accuracy"] is not None:
         print(f"Accuracy: {report['accuracy']:.2%}; normalized: {report['normalized_accuracy']:.2%}")
     else:
         print("No reference answers supplied; predictions saved without accuracy scoring.")
