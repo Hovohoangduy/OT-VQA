@@ -5,4 +5,5 @@ data
 docs/secret_docs
 docs/*.pdf
 results
-docs
+docs/*
+!docs/optimal_transport_architecture.html

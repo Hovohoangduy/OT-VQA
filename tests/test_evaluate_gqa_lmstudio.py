@@ -60,10 +60,11 @@ class LMStudioEvaluationTests(unittest.TestCase):
         client = LMStudioClient("http://127.0.0.1:1234", timeout=10, retries=0)
         response = {"choices": [{"message": {"content": " red\n"}, "finish_reason": "stop"}]}
         with patch.object(client, "request", return_value=response) as request:
-            answer = client.answer("qwen3-vl-2b-instruct", load_examples(self.questions)[0],
+            answer = client.answer(self.args.model, load_examples(self.questions)[0],
                                    self.images / "test/1.jpg", 64, 42)
         endpoint, payload = request.call_args.args
         self.assertEqual(endpoint, "/chat/completions")
+        self.assertEqual(payload["model"], "lmstudio-community/gemma-3n-E4B-it-MLX-4bit")
         self.assertEqual(client.base_url, "http://127.0.0.1:1234/v1")
         self.assertEqual([item["role"] for item in payload["messages"]], ["system", "user"])
         content = payload["messages"][1]["content"]
@@ -144,10 +145,10 @@ class LMStudioEvaluationTests(unittest.TestCase):
     def test_http_transient_retry_and_permanent_failure(self):
         client = LMStudioClient("http://localhost:1234/v1", 10, 1)
         transient = urllib.error.HTTPError("local", 503, "busy", {}, io.BytesIO(b"busy"))
-        response = io.BytesIO(b'{"data": [{"id": "qwen3-vl-2b-instruct"}]}')
+        response = io.BytesIO(b'{"data": [{"id": "lmstudio-community/gemma-3n-E4B-it-MLX-4bit"}]}')
         with patch("urllib.request.urlopen", side_effect=[transient, response]) as request, \
                 patch("time.sleep") as sleep:
-            self.assertEqual(client.models(), ["qwen3-vl-2b-instruct"])
+            self.assertEqual(client.models(), ["lmstudio-community/gemma-3n-E4B-it-MLX-4bit"])
         self.assertEqual(request.call_count, 2)
         sleep.assert_called_once()
         permanent = urllib.error.HTTPError("local", 400, "bad", {}, io.BytesIO(b"vision unavailable"))
@@ -165,12 +166,15 @@ class LMStudioEvaluationTests(unittest.TestCase):
 
     def test_dataset_defaults_and_overrides(self):
         gqa = parse_args([])
+        self.assertEqual(gqa.model, "lmstudio-community/gemma-3n-E4B-it-MLX-4bit")
+        self.assertEqual(gqa.output_dir, Path("results/gemma3n_e4b_mlx_4bit_gqa_zero_shot"))
         self.assertEqual(gqa.max_tokens, 64)
         self.assertEqual(gqa.questions, Path("data/gqa_dataset/test.csv"))
         plant = parse_args(["--dataset", "plantexpert"])
         self.assertEqual(plant.questions, Path("data/plantexpert_dataset/test.csv"))
         self.assertEqual(plant.images, Path("data/plantexpert_dataset/images"))
-        self.assertEqual(plant.output_dir, Path("results/qwen3_vl_2b_plantexpert_zero_shot"))
+        self.assertEqual(plant.model, gqa.model)
+        self.assertEqual(plant.output_dir, Path("results/gemma3n_e4b_mlx_4bit_plantexpert_zero_shot"))
         self.assertEqual(plant.max_tokens, 256)
         self.assertFalse(plant.no_bertscore)
         self.assertEqual(self.plant_args("--max-tokens", "512").max_tokens, 512)

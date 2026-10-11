@@ -3,7 +3,7 @@
 Visual question answering with a frozen MobileViTV2 image encoder, MiniLM question tokens,
 selectable multimodal fusion, and autoregressive answer generation.
 For a code-level walkthrough with diagrams and an interactive transport example,
-open [the architecture guide](docs/ot_vqa_architecture.html).
+open [the architecture guide](docs/optimal_transport_architecture.html).
 
 ## Setup
 
@@ -193,9 +193,9 @@ validation on your dataset.
 
 ## Evaluate
 
-### Zero-shot Qwen3-VL with LM Studio
+### Zero-shot Gemma 3n E4B with LM Studio
 
-Load the **vision** model `qwen3-vl-2b-instruct` in LM Studio and start its local
+Load `lmstudio-community/gemma-3n-E4B-it-MLX-4bit` in LM Studio and start its local
 server on port 1234. This evaluator uses Python 3.9+. GQA scoring and PlantExpert
 lexical scoring use only the standard library; PlantExpert BERTScore also needs
 `bert-score` and its dependencies. The OpenAI Python package is not required.
@@ -208,7 +208,7 @@ Run these commands from the repository root:
 python3 -m scripts.evaluate_gqa_lmstudio --list-models
 
 # First check five examples in a separate output directory.
-python3 -m scripts.evaluate_gqa_lmstudio --limit 5 --output-dir results/qwen_smoke
+python3 -m scripts.evaluate_gqa_lmstudio --limit 5 --output-dir results/gemma_smoke
 
 # Evaluate every row in data/gqa_dataset/test.csv (2,000 in the downloaded subset).
 python3 -m scripts.evaluate_gqa_lmstudio
@@ -224,7 +224,7 @@ answers. The server handles image preprocessing. The default URL is
 differs, pass the exact ID printed by `--list-models` with `--model`.
 If server authentication is enabled, set `LM_STUDIO_API_KEY` in your environment.
 
-Results go to `results/qwen3_vl_2b_gqa_zero_shot/`: `predictions.jsonl` retains
+Results go to `results/gemma3n_e4b_mlx_4bit_gqa_zero_shot/`: `predictions.jsonl` retains
 the raw responses and token usage as each request finishes, `predictions.csv`
 contains predictions and per-question scores, and `report.json` contains
 aggregate metrics and the run settings. `run_config.json` guards resume against
@@ -252,7 +252,7 @@ JSON and its image directory instead:
 python3 -m scripts.evaluate_gqa_lmstudio \
   --questions /path/to/val_balanced_questions.json \
   --images /path/to/gqa/images \
-  --output-dir results/qwen_official_val
+  --output-dir results/gemma_official_val
 ```
 
 Official JSON maps question IDs to objects containing `imageId`, `question`,
@@ -266,14 +266,14 @@ the first N rows, so a smoke run is not a randomly sampled benchmark score.
 
 Use the same evaluator with `--dataset plantexpert`. This selects
 `data/plantexpert_dataset/test.csv`, `data/plantexpert_dataset/images`, and
-`results/qwen3_vl_2b_plantexpert_zero_shot/` by default. Load the vision model
+`results/gemma3n_e4b_mlx_4bit_plantexpert_zero_shot/` by default. Load the vision model
 and start the LM Studio server as above.
 
 ```bash
 # Check five questions using lexical metrics, with no extra dependencies.
 python3 -m scripts.evaluate_gqa_lmstudio \
   --dataset plantexpert --no-bertscore --limit 5 \
-  --output-dir results/qwen_plantexpert_smoke
+  --output-dir results/gemma_plantexpert_smoke
 
 # Install BERTScore in the Python environment used for the full run.
 python3 -m pip install bert-score==0.3.13
