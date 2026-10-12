@@ -26,6 +26,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from urllib.parse import urlsplit
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -330,7 +331,21 @@ def evaluate(args: argparse.Namespace, client: LMStudioClient) -> dict:
     journal = output / "predictions.jsonl"
     records = {}
     if args.resume:
-        if not manifest.is_file() or json.loads(manifest.read_text(encoding="utf-8")) != config:
+        saved_config = json.loads(manifest.read_text(encoding="utf-8")) if manifest.is_file() else None
+        # Managed llama.cpp runs can use a fresh local port without changing inference.
+        # Keep all model, dataset, prompt, and backend checks intact.
+        if saved_config is not None and getattr(args, "allow_server_port_change", False):
+            if (saved_config.get("backend", {}).get("engine") == "llama.cpp"
+                    and config.get("backend", {}).get("engine") == "llama.cpp"):
+                before = urlsplit(saved_config.get("base_url", ""))
+                after = urlsplit(config["base_url"])
+                if (before.scheme == after.scheme == "http"
+                        and before.hostname == after.hostname == "127.0.0.1"
+                        and before.path == after.path == "/v1"
+                        and not any((before.username, after.username, before.query, after.query,
+                                     before.fragment, after.fragment))):
+                    saved_config["base_url"] = config["base_url"]
+        if saved_config != config:
             raise ValueError("Resume configuration differs or is missing. Use the original flags or a new output-dir.")
         if journal.is_file():
             for line in journal.read_text(encoding="utf-8").splitlines():

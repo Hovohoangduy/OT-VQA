@@ -7,6 +7,7 @@ All evaluation flags from scripts.evaluate_gqa_lmstudio are accepted.
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import json
 import os
@@ -208,12 +209,26 @@ def wait_for_server(process, port: int, timeout: float):
     raise RuntimeError(f"llama-server did not become ready within {timeout:g}s; inspect its log.")
 
 
+def available_server_port(port: int = 0) -> int:
+    """Reuse closing connections; port 0 asks the OS to select a free port."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            probe.bind(("127.0.0.1", port))
+        except OSError as error:
+            if error.errno == errno.EADDRINUSE:
+                raise RuntimeError(
+                    f"Port {port} is occupied. Use --server-port 0 to select a free port."
+                ) from error
+            raise
+        return probe.getsockname()[1]
+
+
 @contextmanager
 def running_server(command: list[str], environment: dict, log_path: Path,
                    port: int, timeout: float):
     # Refuse an occupied port so health checks cannot attach to a different model.
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", port))
+    available_server_port(port)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("w", encoding="utf-8") as log:
         process = subprocess.Popen(command, env=environment, stdout=log, stderr=subprocess.STDOUT)
@@ -240,15 +255,16 @@ def parse_args(argv=None):
     parser.add_argument("--quantization", help="Optional quantization override; auto prefers Q4_K_M")
     parser.add_argument("--hf-revision", default="main", help="HF commit or revision to download")
     parser.add_argument("--context-size", type=int, default=8192)
-    parser.add_argument("--server-port", type=int, default=8080)
+    parser.add_argument("--server-port", type=int, default=0,
+                        help="Local port; 0 automatically chooses a free port (default)")
     parser.add_argument("--startup-timeout", type=float, default=300)
     parser.add_argument("--server-log", type=Path, default=Path("/kaggle/working/llama-server.log"))
     options, remaining = parser.parse_known_args(argv)
     if "--help" in remaining or "-h" in remaining:
         print(parser.format_help())
         evaluation_args(["--help"])
-    if options.context_size <= 0 or options.startup_timeout <= 0 or not 1 <= options.server_port <= 65535:
-        parser.error("context-size and startup-timeout must be positive; server-port must be 1..65535")
+    if options.context_size <= 0 or options.startup_timeout <= 0 or not 0 <= options.server_port <= 65535:
+        parser.error("context-size and startup-timeout must be positive; server-port must be 0..65535")
     alias = model_identifier(options.model_dir, options.quantization)
     url = f"http://127.0.0.1:{options.server_port}/v1"
     args = evaluation_args(["--model", alias, "--base-url", url, *remaining])
@@ -273,6 +289,8 @@ def main(argv=None) -> int:
         model, projector, source = resolve_model(options.model_dir, options.cache_dir,
                                                options.quantization, options.hf_revision)
         print(f"Selected weights: {model.name}; vision projector: {projector.name}", flush=True)
+        options.server_port = available_server_port(options.server_port)
+        args.base_url = f"http://127.0.0.1:{options.server_port}/v1"
         command = server_command(options.llama_server, model, projector, args.model,
                                  options.server_port, options.context_size)
         version = subprocess.run([str(options.llama_server.resolve()), "--version"],
@@ -283,7 +301,8 @@ def main(argv=None) -> int:
             "context_size": options.context_size, "parallel": 1, "flash_attention": "off",
             "cuda_visible_devices": environment["CUDA_VISIBLE_DEVICES"],
         }
-        print(f"Starting llama-server on two GPUs; log: {options.server_log}", flush=True)
+        args.allow_server_port_change = True
+        print(f"Starting llama-server on two GPUs at {args.base_url}; log: {options.server_log}", flush=True)
         with running_server(command, environment, options.server_log,
                             options.server_port, options.startup_timeout):
             client = LMStudioClient(args.base_url, args.timeout, args.retries, server_name="llama.cpp")

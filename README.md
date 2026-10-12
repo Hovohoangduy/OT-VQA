@@ -210,6 +210,18 @@ are automatically detected when available. The model is split across both GPUs u
 server. This uses llama.cpp model splitting rather than PyTorch `torchrun`.
 The server log shows CUDA offload and device allocations.
 
+If a Kaggle build reports `CUDA::cuda_driver` was not found, add
+`"-DGGML_CUDA_NO_VMM=ON"` to the CMake configuration arguments and rerun the
+build cell. The notebook includes this flag: it disables CUDA virtual memory
+management while retaining CUDA inference and model splitting across both GPUs.
+The existing llama.cpp clone and build directory can be reused.
+
+Each run automatically chooses a free local server port. The port check enables
+`SO_REUSEADDR` so closing smoke-test connections do not block the next run.
+Use `--server-port 8081` to set a specific port or `--server-port 0` for automatic
+selection. Resume permits a different local port while checking every other
+model and evaluation setting.
+
 To switch models, change only `MODEL_DIR`:
 
 ```python

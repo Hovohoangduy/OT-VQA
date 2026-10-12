@@ -125,6 +125,8 @@ def build_notebook():
         Compilation can take several minutes and is reused when rerunning cells
         in the same session. The build targets your GPUs' compute capability.
         Build errors stop this cell; evaluation never silently switches to CPU.
+        CUDA virtual memory management is disabled to avoid Kaggle's missing
+        `CUDA::cuda_driver` CMake target. The CUDA backend and GPU splitting remain enabled.
     """), cell("code", """
         LLAMA_ROOT = WORK / "llama.cpp"
         if not LLAMA_ROOT.exists():
@@ -139,7 +141,7 @@ def build_notebook():
         assert actual_commit == requested_commit, "Use a fresh working session after changing LLAMA_CPP_REF."
         subprocess.run([
             "cmake", "-S", str(LLAMA_ROOT), "-B", str(LLAMA_ROOT / "build"),
-            "-DGGML_CUDA=ON", f"-DCMAKE_CUDA_ARCHITECTURES={CUDA_ARCHS}",
+            "-DGGML_CUDA=ON", "-DGGML_CUDA_NO_VMM=ON", f"-DCMAKE_CUDA_ARCHITECTURES={CUDA_ARCHS}",
             "-DCMAKE_BUILD_TYPE=Release", "-DLLAMA_BUILD_TESTS=OFF", "-DLLAMA_OPENSSL=OFF",
         ], check=True)
         subprocess.run([
@@ -156,6 +158,9 @@ def build_notebook():
         shuts it down when evaluation finishes or fails. Check predictions and
         errors before relying on the full results. Smoke and full outputs use
         separate directories; rerunning a smoke test resumes saved successes.
+        Each run selects a free local server port automatically, so the full run
+        can start immediately after smoke. Resume accepts port changes while
+        retaining the checks on model and evaluation settings.
         The first cell below defines command arguments. Run it even when skipping
         the smoke test during resume.
     """), cell("code", """

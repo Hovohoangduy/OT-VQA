@@ -3,6 +3,7 @@
 import ast
 import io
 import json
+import socket
 import subprocess
 import sys
 import tempfile
@@ -64,7 +65,7 @@ class KaggleEvaluationTests(unittest.TestCase):
         options, args = runner.parse_args(["--quantization", "Q8_0", "--dataset", "plantexpert"])
         self.assertEqual(args.model, runner.model_identifier(runner.DEFAULT_MODEL_DIR, "Q8_0"))
         self.assertEqual(args.max_tokens, 256)
-        self.assertEqual(args.base_url, "http://127.0.0.1:8080/v1")
+        self.assertEqual(args.base_url, "http://127.0.0.1:0/v1")
         self.assertIn(args.model + "_plantexpert", str(args.output_dir))
         self.assertEqual(options.context_size, 8192)
         _, args = runner.parse_args(self.flags("--dataset", "gqa", "--limit", "5", "--resume"))
@@ -202,6 +203,7 @@ class KaggleEvaluationTests(unittest.TestCase):
         client.models = Mock(return_value=[runner.model_identifier(runner.DEFAULT_MODEL_DIR)])
         with patch.object(runner, "gpu_environment", return_value=({"CUDA_VISIBLE_DEVICES": "0,1"}, ["T4", "T4"])), \
                 patch.object(runner, "resolve_model", return_value=(self.model, self.projector, {"revision": "abc"})), \
+                patch.object(runner, "available_server_port", return_value=8080), \
                 patch.object(runner.subprocess, "run", return_value=Mock(stdout="version: test", stderr="")), \
                 patch.object(runner, "running_server", return_value=nullcontext()), \
                 patch.object(runner, "LMStudioClient", return_value=client), \
@@ -211,9 +213,21 @@ class KaggleEvaluationTests(unittest.TestCase):
         self.assertEqual(report["accuracy"], 1.0)
         self.assertTrue(report["complete"])
         self.assertEqual(report["config"]["backend"]["model_source"]["revision"], "abc")
+        _, resumed = runner.parse_args(self.flags("--resume"))
+        resumed.backend_config = report["config"]["backend"]
+        resumed.allow_server_port_change = True
+        client.base_url = "http://127.0.0.1:8081/v1"
+        with patch.object(client, "answer") as answer, patch("builtins.print"):
+            resumed_report = evaluate(resumed, client)
+        self.assertTrue(resumed_report["complete"])
+        answer.assert_not_called()
+        resumed.allow_server_port_change = False
+        with self.assertRaisesRegex(ValueError, "Resume configuration differs"):
+            evaluate(resumed, client)
         _, args = runner.parse_args(self.flags("--resume"))
         args.backend_config = report["config"]["backend"]
         args.backend_config["model_source"]["revision"] = "changed"
+        args.allow_server_port_change = True
         with self.assertRaisesRegex(ValueError, "Resume configuration differs"):
             evaluate(args, client)
 
@@ -223,6 +237,34 @@ class KaggleEvaluationTests(unittest.TestCase):
             result = runner.main(self.flags("--images", str(self.root / "missing")))
         self.assertEqual(result, 1)
         download.assert_not_called()
+
+    def test_occupied_port_selects_another_without_touching_listener(self):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
+            server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            server.bind(("127.0.0.1", 0))
+            server.listen()
+            occupied = server.getsockname()[1]
+            with self.assertRaisesRegex(RuntimeError, "occupied.*--server-port 0"):
+                runner.available_server_port(occupied)
+            selected = runner.available_server_port()
+            self.assertNotEqual(selected, occupied)
+            self.assertGreater(selected, 0)
+            with socket.create_connection(("127.0.0.1", occupied), timeout=2) as client:
+                connection, _ = server.accept()
+                connection.close()
+
+    def test_port_is_reusable_immediately_after_server_connection_closes(self):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
+            server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            server.bind(("127.0.0.1", 0))
+            server.listen()
+            port = server.getsockname()[1]
+            with socket.create_connection(("127.0.0.1", port), timeout=2) as client:
+                connection, _ = server.accept()
+                connection.shutdown(socket.SHUT_WR)
+                self.assertEqual(client.recv(1), b"")
+                connection.close()
+        self.assertEqual(runner.available_server_port(port), port)
 
     def test_notebook_cells_compile_and_bundle_current_sources(self):
         notebook = build_notebook()
@@ -241,6 +283,34 @@ class KaggleEvaluationTests(unittest.TestCase):
             self.assertEqual(bundle[name], (ROOT / name).read_text())
         committed = json.loads((ROOT / "notebooks/evaluate_ministral_3_8b_kaggle.ipynb").read_text())
         self.assertEqual(committed, notebook)
+
+    def test_kaggle_build_avoids_missing_driver_target_and_reuses_clone(self):
+        source = next("".join(cell["source"]) for cell in build_notebook()["cells"]
+                      if "".join(cell["source"]).startswith("LLAMA_ROOT = WORK"))
+        (self.root / "llama.cpp").mkdir()
+        commands = []
+
+        def run(command, **kwargs):
+            commands.append(command)
+            if command[0] == "cmake" and "-S" in command:
+                if "-DGGML_CUDA_NO_VMM=ON" not in command:
+                    raise subprocess.CalledProcessError(1, command, stderr="CUDA::cuda_driver target was not found")
+            return Mock(returncode=0)
+
+        namespace = {
+            "WORK": self.root, "LLAMA_CPP_REF": "v0.6.0", "CUDA_ARCHS": "75",
+            "subprocess": subprocess, "os": Mock(cpu_count=Mock(return_value=4)),
+        }
+        with patch.object(subprocess, "run", side_effect=run), \
+                patch.object(subprocess, "check_output", return_value="pinned-commit\n"), \
+                patch("builtins.print"):
+            exec(source, namespace)
+        self.assertEqual(len(commands), 3)
+        self.assertIn("-DGGML_CUDA=ON", commands[0])
+        self.assertIn("-DCMAKE_CUDA_ARCHITECTURES=75", commands[0])
+        self.assertIn("--build", commands[1])
+        self.assertEqual(commands[2][1], "--list-devices")
+        self.assertFalse(any(command[0] == "git" for command in commands))
 
 
 if __name__ == "__main__":
