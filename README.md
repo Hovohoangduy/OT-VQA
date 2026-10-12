@@ -246,7 +246,11 @@ repository metrics described below. BERTScore runs on CPU by default. Set
 `/kaggle/working`, with a ZIP download in the last cell. Save a Kaggle notebook
 version to preserve these files.
 
-Set `RESUME = True` to resume the full evaluation with identical settings.
+The full-run cell automatically adds `--resume` when `run_config.json` exists,
+reusing successful predictions and retrying failed or unfinished questions.
+Run it with identical model and evaluation settings. Set `RESUME = True` to
+require a saved run explicitly. A nonempty folder without `run_config.json`
+stops before starting the server; preserve its files and use a new output directory.
 For a new session, copy the saved full-run directory back to its original
 working path. Resume checks include the resolved HF revision, llama.cpp
 version, quantization and context size. Prefer a fixed `HF_REVISION` commit

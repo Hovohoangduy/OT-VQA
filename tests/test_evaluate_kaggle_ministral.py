@@ -238,6 +238,46 @@ class KaggleEvaluationTests(unittest.TestCase):
         self.assertEqual(result, 1)
         download.assert_not_called()
 
+    def full_cell(self, resume=False):
+        source = next("".join(cell["source"]) for cell in build_notebook()["cells"]
+                      if "".join(cell["source"]).startswith("# Rebuild the arguments"))
+        namespace = {
+            "evaluation_output": lambda: self.root / "results",
+            "evaluation_command": lambda: [sys.executable, "-m", "scripts.evaluate_kaggle_ministral"],
+            "WORK": self.root, "EVAL_ROOT": self.root, "FULL_LIMIT": None,
+            "RESUME": resume, "subprocess": subprocess,
+        }
+        return source, namespace
+
+    def test_full_cell_automatically_resumes_existing_predictions(self):
+        output = self.root / "results/full"
+        output.mkdir(parents=True)
+        (output / "run_config.json").write_text('{"model":"unchanged"}')
+        predictions = output / "predictions.jsonl"
+        predictions.write_text('{"question_id":"1","prediction":"red"}\n')
+        source, namespace = self.full_cell()
+        with patch.object(subprocess, "run") as run, patch("builtins.print"):
+            exec(source, namespace)
+        command = run.call_args.args[0]
+        self.assertEqual(command.count("--resume"), 1)
+        self.assertEqual(command[command.index("--output-dir") + 1], str(output))
+        self.assertEqual(predictions.read_text(), '{"question_id":"1","prediction":"red"}\n')
+
+    def test_full_cell_starts_new_runs_and_preserves_unrecognized_outputs(self):
+        source, namespace = self.full_cell()
+        with patch.object(subprocess, "run") as run, patch("builtins.print"):
+            exec(source, namespace)
+        self.assertNotIn("--resume", run.call_args.args[0])
+        output = self.root / "results/full"
+        output.mkdir(parents=True)
+        artifact = output / "predictions.jsonl"
+        artifact.write_text("saved output")
+        with patch.object(subprocess, "run") as run, \
+                self.assertRaisesRegex(ValueError, "no run_config.json"):
+            exec(source, namespace)
+        run.assert_not_called()
+        self.assertEqual(artifact.read_text(), "saved output")
+
     def test_occupied_port_selects_another_without_touching_listener(self):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
             server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)

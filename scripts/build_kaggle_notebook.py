@@ -70,7 +70,7 @@ def build_notebook():
         CONTEXT_SIZE = 8192
         MAX_TOKENS = 256 if DATASET == "plantexpert" else 64
         NO_BERTSCORE = False  # PlantExpert only: True skips the semantic metric.
-        RESUME = False  # Set True to resume the FULL run with identical settings.
+        RESUME = False  # Existing full runs resume automatically; True requires a saved run.
         FULL_LIMIT = None  # None = all questions; positive integer = first N.
         WORK = Path("/kaggle/working")
         EVAL_ROOT = WORK / "ot-vqa-eval"
@@ -198,8 +198,9 @@ def build_notebook():
         normalized accuracy; PlantExpert reports EM, Token-F1, BLEU-1/2,
         ROUGE-L and BERTScore-F1. Predictions flush to JSONL after every request.
 
-        To resume, set `RESUME = True` and rerun the configuration, argument-setup
-        and full-run cells with the same dataset, paths, quantization, revisions
+        Existing full runs resume automatically when `run_config.json` is present.
+        Rerun the configuration, argument-setup and full-run cells with the same
+        dataset, paths, quantization, revisions
         and settings. In a fresh session, run the dependency, bundled-script and
         llama.cpp build cells too.
         After a new Kaggle session, attach saved outputs and **copy the full run
@@ -209,12 +210,21 @@ def build_notebook():
     """), cell("code", """
         # Rebuild the arguments so configuration edits also apply when resuming.
         full_output = evaluation_output() / "full"
+        saved_run = (full_output / "run_config.json").is_file()
+        if full_output.exists() and any(full_output.iterdir()) and not saved_run:
+            raise ValueError(
+                f"{full_output} contains files but no run_config.json. "
+                "Preserve those files and choose a new output directory before starting."
+            )
         full = evaluation_command() + ["--output-dir", str(full_output),
                          "--server-log", str(WORK / "llama-full.log")]
         if FULL_LIMIT is not None:
             full += ["--limit", str(FULL_LIMIT)]
-        if RESUME:
+        if RESUME or saved_run:
             full.append("--resume")
+            print("Resuming saved run:", full_output)
+        else:
+            print("Starting new run:", full_output)
         subprocess.run(full, cwd=EVAL_ROOT, check=True)
     """), cell("markdown", """
         ## Inspect and download results
