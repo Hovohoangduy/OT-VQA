@@ -1,6 +1,7 @@
 """Train OT VQA, report dataset answer metrics, and select checkpoints by validation loss.
 
 GQA reports binary generated-answer accuracy for training and validation.
+SciVQA reports ROUGE-1/L and BERTScore precision, recall and F1.
 """
 
 from __future__ import annotations
@@ -289,6 +290,9 @@ def _run_training(args, device, rank, world_size):
         }
         if bert_scorer is not None:
             manifest["bertscore_hash"] = bert_scorer.hash
+        if dataset_name == "scivqa":
+            manifest["rouge"] = {"implementation": "rouge-score", "use_stemmer": False,
+                                 "aggregation": "mean of per-answer scores"}
         (destination / "run_config.json").write_text(
             json.dumps(manifest, indent=2, default=str) + "\n", encoding="utf-8"
         )

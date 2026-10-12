@@ -19,7 +19,8 @@ from pathlib import Path
 from model.fusion import FUSION_METHODS
 from configs.arg_parser import get_args
 from utils.device import resolve_device
-from utils.metrics import GQA_METRICS, PAPER_METRICS, metrics_for_dataset, resolve_dataset
+from utils.metrics import (ALL_METRICS, GQA_METRICS, PAPER_METRICS,
+                           bertscore_defaults, metrics_for_dataset, resolve_dataset)
 
 
 def collect_results(output_dir, methods, seeds, split):
@@ -60,7 +61,7 @@ def write_comparison(output_dir, rows):
     if any("vqa_accuracy" in row for row in completed):
         raise ValueError("Legacy vqa_accuracy reports use consensus scoring. "
                          "Reevaluate GQA checkpoints with test.py to obtain accuracy.")
-    metric_sets = {tuple(name for name in (*GQA_METRICS, *PAPER_METRICS) if name in row)
+    metric_sets = {tuple(name for name in ALL_METRICS if name in row)
                    for row in completed}
     if len(metric_sets) > 1:
         raise ValueError("Cannot compare runs with different generated metrics")
@@ -97,6 +98,12 @@ def write_comparison(output_dir, rows):
     metric_labels = {"accuracy": "GQA accuracy", "em": "EM", "token_f1": "Token F1",
                      "bleu_1": "BLEU-1", "bleu_2": "BLEU-2", "rouge_l": "ROUGE-L",
                      "bertscore_f1": "BERTScore F1"}
+    metric_labels.update({
+        "rouge_1_f1": "ROUGE-1 F1", "rouge_1_precision": "ROUGE-1 P",
+        "rouge_1_recall": "ROUGE-1 R", "rouge_l_f1": "ROUGE-L F1",
+        "rouge_l_precision": "ROUGE-L P", "rouge_l_recall": "ROUGE-L R",
+        "bertscore_precision": "BERTScore P", "bertscore_recall": "BERTScore R",
+    })
     per_seed_headers = ["Fusion", "Seed", "Status", "Trainable parameters", "Loss",
                         *(metric_labels[name] for name in metric_names), "ms/example"]
     lines = ["# Fusion comparison", "",
@@ -110,8 +117,12 @@ def write_comparison(output_dir, rows):
         values += [f"{row[key]:.4f}" if key in row else "—" for key in
                    ("loss", *metric_names, "milliseconds_per_example")]
         lines.append("| " + " | ".join(values) + " |")
-    summary_metrics = (GQA_METRICS if "accuracy" in metric_names else
-                       ("em", "token_f1", "bertscore_f1"))
+    if "accuracy" in metric_names:
+        summary_metrics = GQA_METRICS
+    elif "rouge_1_f1" in metric_names:
+        summary_metrics = ("rouge_1_f1", "rouge_l_f1", "bertscore_f1")
+    else:
+        summary_metrics = ("em", "token_f1", "bertscore_f1")
     summary_headers = ["Fusion", "Runs", *(f"{metric_labels[name]} mean ± SD"
                        for name in summary_metrics), "ms/example mean ± SD"]
     lines += ["", "## Across seeds", "",
@@ -137,7 +148,7 @@ def main(argv=None):
     parser.add_argument("--output_dir", type=Path, default=Path("results/fusion_comparison"))
     parser.add_argument("--split", choices=("dev", "test"), default="test")
     parser.add_argument("--dataset", type=str.lower,
-                        choices=("auto", "gqa", "plantexpert"), default="auto")
+                        choices=("auto", "gqa", "plantexpert", "scivqa"), default="auto")
     parser.add_argument("--train_csv_path", default="data/gqa_dataset/train.csv")
     parser.add_argument("--dev_csv_path", default="data/gqa_dataset/val.csv")
     parser.add_argument("--test_csv_path", default="data/gqa_dataset/test.csv")
@@ -145,11 +156,11 @@ def main(argv=None):
     parser.add_argument("--device", default="auto")
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--batch_size", type=int, default=4)
-    parser.add_argument("--bertscore_model", default="bert-base-uncased")
+    parser.add_argument("--bertscore_model", default=None)
     parser.add_argument("--bertscore_device", default="cpu")
     parser.add_argument("--bertscore_batch_size", type=int, default=16)
     parser.add_argument("--bertscore_rescale", action=argparse.BooleanOptionalAction,
-                        default=True)
+                        default=None)
     parser.add_argument("--force", action="store_true", help="Retrain completed runs")
     args, extra_train_args = parser.parse_known_args(argv)
     if any(option.split("=")[0] in {"--fusion", "--model_path", "--seed", "--resume"}
@@ -157,6 +168,11 @@ def main(argv=None):
         parser.error("fusion, model_path, seed and resume are controlled by this runner")
     project_root = Path(__file__).resolve().parents[1]
     dataset_name = resolve_dataset(args.dataset, args.train_csv_path)
+    bert_model, bert_rescale = bertscore_defaults(dataset_name)
+    if args.bertscore_model is None:
+        args.bertscore_model = bert_model
+    if args.bertscore_rescale is None:
+        args.bertscore_rescale = bert_rescale
     common = ["--dataset", dataset_name,
               "--train_csv_path", args.train_csv_path, "--dev_csv_path", args.dev_csv_path,
               "--test_csv_path", args.test_csv_path, "--img_path", args.img_path,

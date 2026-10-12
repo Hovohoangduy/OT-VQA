@@ -14,7 +14,7 @@ from configs.config import Config
 from utils.checkpoint import load_model
 from utils.data_processing import load_dataframe
 from utils.device import resolve_device, seed_everything
-from utils.metrics import GQA_METRICS, PAPER_METRICS, lexical_scores, normalize_text
+from utils.metrics import ALL_METRICS, PAPER_METRICS, lexical_scores, normalize_text
 from utils.vqa_dataset import VQADataset
 
 
@@ -37,7 +37,7 @@ def _history_report(rows: list[dict]) -> dict:
         return {}
     best = min(rows, key=lambda row: row["val_loss"])
     last = rows[-1]
-    metric_names = (*GQA_METRICS, *PAPER_METRICS)
+    metric_names = ALL_METRICS
     return {
         "epochs_logged": len(rows),
         "best_epoch": best["epoch"],

@@ -15,8 +15,9 @@ from configs.config import Config
 from utils.checkpoint import load_model
 from utils.data_processing import load_dataframe
 from utils.device import resolve_device
-from utils.metrics import (build_bertscore_scorer, gqa_score_pairs, mean_scores,
-                           metrics_for_dataset, resolve_dataset, score_pairs)
+from utils.metrics import (bertscore_defaults, build_bertscore_scorer, gqa_score_pairs, mean_scores,
+                           metrics_for_dataset, resolve_dataset, score_pairs,
+                           scivqa_score_pairs)
 from utils.vqa_dataset import VQADataset, resolve_image_root
 
 
@@ -64,8 +65,11 @@ def evaluation(model, test_loader, criterion, vocab_swap=None, device=None,
         rows = gqa_score_pairs(references, generated)
     else:
         if bert_scorer is None:
-            bert_scorer = build_bertscore_scorer()
-        rows = score_pairs(references, generated, bert_scorer)
+            encoder, rescale = bertscore_defaults(dataset_name)
+            bert_scorer = build_bertscore_scorer(
+                model_type=encoder, rescale_with_baseline=rescale)
+        scorer = scivqa_score_pairs if dataset_name == "scivqa" else score_pairs
+        rows = scorer(references, generated, bert_scorer)
     scores = mean_scores(rows, metrics_for_dataset(dataset_name))
     if predictions is not None:
         for annotation, question, reference, hypothesis, row in zip(
@@ -89,7 +93,7 @@ def evaluation(model, test_loader, criterion, vocab_swap=None, device=None,
 
 
 def main():
-    args = get_args()
+    args = get_args(evaluation=True)
     device = resolve_device(args.device)
     print(f"Evaluating on device: {device}")
     default = Path(args.model_path) / "best.pt"
@@ -129,8 +133,9 @@ def main():
         output = Path(args.predictions_csv)
         output.parent.mkdir(parents=True, exist_ok=True)
         prediction_frame = pd.DataFrame(predictions)
-        if "question_type" in frame:
-            prediction_frame["question_type"] = frame["question_type"].tolist()
+        for column in ("question_type", "qa_pair_type", "figure_type"):
+            if column in frame:
+                prediction_frame[column] = frame[column].tolist()
         prediction_frame.to_csv(output, index=False)
         print(f"Wrote predictions to {output}")
     if args.report_json:
@@ -155,6 +160,9 @@ def main():
                 "batch_size": args.bertscore_batch_size,
                 "device": str(resolve_device(args.bertscore_device)),
             }
+        if dataset_name == "scivqa":
+            report["rouge"] = {"implementation": "rouge-score", "use_stemmer": False,
+                               "aggregation": "mean of per-answer scores"}
         output.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
         print(f"Wrote evaluation report to {output}")
 

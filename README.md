@@ -57,18 +57,78 @@ with `--train-pairs`, `--val-pairs`, and `--test-pairs`. Selected rows are cache
 `<output>/.selection_cache`, and rerunning with the same output reuses them
 and any downloaded images. Set `HF_TOKEN` in your shell if you have a Hugging
 Face token.
-For training, pass `--train_csv_path data/plantexpert_dataset/train.csv`,
-`--dev_csv_path data/plantexpert_dataset/val.csv`, and
-`--img_path data/plantexpert_dataset/images` to `train.py`.
+For training, use `python train.py --dataset plantexpert`. This automatically
+selects the Python defaults in `configs/config.py`, including dataset paths and answer metrics.
+
+To download and format [SciVQA](https://huggingface.co/datasets/katebor/SciVQA):
+
+```bash
+python -m utils.download_scivqa
+```
+
+This preserves all official labeled splits and writes `train.csv`, `val.csv`,
+`test.csv`, `images/`, and `metadata.json` under `data/scivqa_dataset`.
+The CSVs use `anno_id`, `image`, `question`, and `answer` for this project's
+loader, and retain the original questions, answer options, captions, and figure
+metadata. Multiple-choice questions include labeled options; answers retain
+their original labels (including multiple labels). Add `--include-caption` to
+include captions in the model input; captions are always retained in the CSV.
+
+Optional `--train-pairs 10000 --val-pairs 1000 --test-pairs 2000` selects
+reproducible subsets with `--seed 42`; each count defaults to `0` (all pairs).
+The script downloads each complete source image ZIP even for subsets. Source
+files are cached under `<output>/.download_cache`, and reruns reuse downloaded
+files and verified images. Use `--output` to change the destination or
+`--revision` to choose a Hugging Face commit. `HF_TOKEN` is supported.
+
+Train the OT model with the SciVQA preset:
+
+```bash
+python train.py --dataset scivqa
+```
+
+[`configs/config.py`](configs/config.py) supplies the split/image paths,
+OT fusion, MiniLM/MobileViTV2 backbones, batch size 4, up to 30 epochs, AdamW
+learning rate `1e-5`, weight decay `0.05`, label smoothing `0.1`, gradient clipping
+at `1.0`, and patience 8. These are project training choices. The reference
+[SciVQA paper](https://arxiv.org/html/2507.06183v1) primarily evaluates prompting
+and ensembles; Appendix D mentions LoRA on 5,000 Bespoke MiniChart examples
+but provides no full OT training recipe. This preset trains on the complete
+15,120/1,680 train/validation splits and reserves the 4,200 test examples for
+final evaluation. Checkpoints still use the lowest validation loss.
+
+The preset allows 256 question tokens and 64 answer tokens, including special
+tokens. The downloaded splits reach 210/37 tokens with the default MiniLM
+tokenizer, preserving the choice context and unanswerable targets. If exporting
+with `--include-caption`, use `--max_question_tokens 512` and check lengths for
+your dataset revision. The preset uses the existing image preprocessing and
+256-pixel vision backbone; it does not reproduce the paper's high-resolution VLMs.
+
+`--dataset scivqa` and `--dataset plantexpert` select built-in Python defaults
+from `Config.DATASET_DEFAULTS` for both training and evaluation. Each selects
+its own paths, token limits, and evaluation metrics. Other training settings
+use the shared defaults. Explicit CLI flags override these settings; for example,
+add `--device cuda --batch_size 2` to reduce GPU memory. Edit `configs/config.py`
+to change the dataset defaults.
+Training records the resolved arguments and all nine SciVQA metrics in
+`run_config.json` and `metrics.jsonl` under `data/scivqa_model`.
+
+Evaluate the best checkpoint on validation or test:
+
+```bash
+python test.py --dataset scivqa --split dev \
+  --report_json results/scivqa/dev_report.json \
+  --predictions_csv results/scivqa/dev_predictions.csv
+
+python test.py --dataset scivqa --split test \
+  --report_json results/scivqa/test_report.json \
+  --predictions_csv results/scivqa/test_predictions.csv
+```
 
 To train the OT model on this PlantExpertVQA subset:
 
 ```bash
-python train.py --device auto --batch_size 2 \
-  --train_csv_path data/plantexpert_dataset/train.csv \
-  --dev_csv_path data/plantexpert_dataset/val.csv \
-  --img_path data/plantexpert_dataset/images \
-  --model_path data/plantexpert_model
+python train.py --dataset plantexpert --device auto --batch_size 2
 ```
 
 The run uses the training default of 10 epochs. Across the local 10,000 train,
@@ -88,9 +148,7 @@ or `--device cuda` (NVIDIA GPU), or `--device mps` (Apple GPU). The current
 After training, evaluate the PlantExpert validation split with:
 
 ```bash
-python test.py --checkpoint data/plantexpert_model/best.pt --split dev \
-  --dev_csv_path data/plantexpert_dataset/val.csv \
-  --img_path data/plantexpert_dataset/images \
+python test.py --dataset plantexpert --split dev \
   --predictions_csv data/plantexpert_model/val_predictions.csv \
   --report_json data/plantexpert_model/val_report.json
 ```
@@ -160,7 +218,8 @@ metric history, an evaluation plot, and `run_config.json` with dataset hashes.
 Add `--save_every_epoch` to retain `epoch_0001.pt`, `epoch_0002.pt`, and so on.
 Each epoch file is a full resumable checkpoint, so 100 files can use substantial disk space.
 After each epoch, GQA runs report generated-answer binary exact-match `accuracy` for both
-the training and validation splits. Other datasets report EM, token F1,
+the training and validation splits. SciVQA reports ROUGE-1/L and BERTScore
+precision, recall, and F1. PlantExpertVQA and unrecognized dataset paths report EM, token F1,
 BLEU-1/2, ROUGE-L, and BERTScore. The history stores
 these as `train_*` and `val_*` fields; the plot shows both curves. Scoring the
 full training split adds an evaluation pass each epoch.
@@ -435,9 +494,10 @@ throughput and latency. It saves per-example predictions to CSV and an
 evaluation report to JSON, creating the output directory automatically.
 
 Metric selection defaults to `--dataset auto`: a CSV path containing a `gqa`
-component (such as `data/gqa_dataset/val.csv`) selects GQA scoring. Use
-`--dataset gqa` when your GQA files have other names, or `--dataset plantexpert`
-to select the six paper metrics explicitly. The same option works for
+or `scivqa` component (such as `data/scivqa_dataset/val.csv`) selects that
+dataset's scoring. Use `--dataset gqa` or `--dataset scivqa` for custom paths,
+or `--dataset plantexpert` to select the six PlantExpertVQA metrics explicitly.
+The same option works for
 `train.py`, `test.py`, and `python -m scripts.compare_fusions`.
 
 GQA uses [binary exact-match accuracy](https://cs.stanford.edu/people/dorarad/gqa/evaluate.html):
@@ -460,7 +520,32 @@ accuracy rather than renaming or multiplying old scores, because matching
 rules also changed. When resuming training, newly appended epochs use the
 `train_accuracy`/`val_accuracy` fields.
 
-For other datasets, evaluation reports the six PlantExpertVQA paper metrics: case-insensitive exact
+SciVQA uses the nine metrics in Tables 1 and 2 of the
+[reference paper](https://arxiv.org/html/2507.06183v1):
+
+| Paper column | JSON/CSV metric |
+| --- | --- |
+| R1-F1 / R1-P / R1-R | `rouge_1_f1` / `rouge_1_precision` / `rouge_1_recall` |
+| RL-F1 / RL-P / RL-R | `rouge_l_f1` / `rouge_l_precision` / `rouge_l_recall` |
+| BS-F1 / BS-P / BS-R | `bertscore_f1` / `bertscore_precision` / `bertscore_recall` |
+
+Scores are macro means of per-answer values; F1 is averaged directly rather
+than recomputed from average precision/recall. ROUGE uses `rouge-score` with
+its lowercase alphanumeric tokenizer and stemming disabled. SciVQA defaults
+to `roberta-large` BERTScore without baseline rescaling; change these choices
+with `--bertscore_model` and `--bertscore_rescale`. The paper does not specify
+its encoder or tokenizer, so the implementation records these choices and the
+BERTScore model hash rather than claiming identical published scores.
+ROUGE follows the library's zero score for empty token sequences. BERTScore
+assigns 1 when both answers are empty and 0 when only one is empty, as an
+explicit project convention. Answers retain their original multiple-choice
+labels, numbers, and abstention text; scoring does not infer abstention from
+gold annotations or rewrite model responses to reproduce the paper's
+post-processing. Prediction exports retain `qa_pair_type` and `figure_type`.
+Training logs use `train_<metric>` and `val_<metric>`; fusion comparisons and
+history diagnostics accept the same nine-score schema.
+
+For PlantExpertVQA and unrecognized dataset paths, evaluation reports the six PlantExpertVQA paper metrics: case-insensitive exact
 match, SQuAD-style token F1, BLEU-1, BLEU-2, ROUGE-L F1, and BERTScore-F1.
 Scores are fractions; baseline-rescaled BERTScore can be negative. BLEU uses
 unsmoothed per-answer modified precision and a brevity penalty. The default

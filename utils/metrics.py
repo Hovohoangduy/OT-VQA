@@ -1,4 +1,4 @@
-"""Dataset-specific generated-answer metrics for GQA and PlantExpertVQA.
+"""Dataset-specific generated-answer metrics for GQA, PlantExpertVQA and SciVQA.
 
 Scores are fractions (0 to 1 for lexical metrics), not percentages. BERTScore
 can be negative when baseline rescaling is enabled. The paper gives formulas
@@ -16,24 +16,39 @@ from statistics import fmean
 
 PAPER_METRICS = ("em", "token_f1", "bleu_1", "bleu_2", "rouge_l", "bertscore_f1")
 GQA_METRICS = ("accuracy",)
+SCIVQA_METRICS = (
+    "rouge_1_f1", "rouge_1_precision", "rouge_1_recall",
+    "rouge_l_f1", "rouge_l_precision", "rouge_l_recall",
+    "bertscore_f1", "bertscore_precision", "bertscore_recall",
+)
+ALL_METRICS = tuple(dict.fromkeys((*GQA_METRICS, *PAPER_METRICS, *SCIVQA_METRICS)))
 _ARTICLE = re.compile(r"\b(a|an|the)\b", flags=re.IGNORECASE)
 _WORD_PUNCT = re.compile(r"\w+|[^\w\s]", flags=re.UNICODE)
 
 
 def resolve_dataset(dataset="auto", csv_path=None):
-    """Use an explicit dataset or detect GQA in a CSV path; otherwise paper metrics."""
+    """Use an explicit dataset or detect GQA/SciVQA in a CSV path."""
     dataset = dataset.lower()
-    if dataset not in {"auto", "gqa", "plantexpert"}:
+    if dataset not in {"auto", "gqa", "plantexpert", "scivqa"}:
         raise ValueError(f"Unknown dataset: {dataset}")
     if dataset != "auto":
         return dataset
-    return ("gqa" if csv_path is not None and
-            re.search(r"(?:^|[^a-z0-9])gqa(?:$|[^a-z0-9])", str(csv_path).lower())
-            else "plantexpert")
+    for name in ("scivqa", "gqa"):
+        if csv_path is not None and re.search(
+                rf"(?:^|[^a-z0-9]){name}(?:$|[^a-z0-9])", str(csv_path).lower()):
+            return name
+    return "plantexpert"
 
 
 def metrics_for_dataset(dataset):
-    return GQA_METRICS if resolve_dataset(dataset) == "gqa" else PAPER_METRICS
+    return {"gqa": GQA_METRICS, "plantexpert": PAPER_METRICS,
+            "scivqa": SCIVQA_METRICS}[resolve_dataset(dataset)]
+
+
+def bertscore_defaults(dataset):
+    """Explicit project defaults; the SciVQA paper does not specify its encoder."""
+    return ("roberta-large", False) if resolve_dataset(dataset) == "scivqa" else (
+        "bert-base-uncased", True)
 
 
 def normalize_text(text):
@@ -166,21 +181,61 @@ def score_pairs(references, hypotheses, bert_scorer):
     if bert_scorer is None:
         raise ValueError("A BERTScore scorer is required for the six paper metrics")
     rows = [lexical_scores(ref, hyp) for ref, hyp in zip(references, hypotheses)]
+    _add_bertscores(rows, references, hypotheses, bert_scorer, ("f1",))
+    return rows
+
+
+def _add_bertscores(rows, references, hypotheses, bert_scorer, components):
+    """Reuse one semantic scoring call, with explicit empty-answer conventions."""
     nonempty = [i for i, (ref, hyp) in enumerate(zip(references, hypotheses))
                 if _as_text(ref).strip() and _as_text(hyp).strip()]
     nonempty_indices = set(nonempty)
     for i, (ref, hyp) in enumerate(zip(references, hypotheses)):
         if i not in nonempty_indices:
-            rows[i]["bertscore_f1"] = float(not _as_text(ref).strip() and
-                                           not _as_text(hyp).strip())
+            for component in components:
+                rows[i][f"bertscore_{component}"] = float(
+                    not _as_text(ref).strip() and not _as_text(hyp).strip())
     if nonempty:
-        _, _, f1 = bert_scorer.score([_as_text(hypotheses[i]) for i in nonempty],
-                                     [_as_text(references[i]) for i in nonempty])
-        values = f1.detach().cpu().tolist() if hasattr(f1, "detach") else list(f1)
-        if len(values) != len(nonempty):
-            raise RuntimeError("BERTScore returned the wrong number of examples")
-        for i, value in zip(nonempty, values):
-            rows[i]["bertscore_f1"] = float(value)
+        precision, recall, f1 = bert_scorer.score(
+            [_as_text(hypotheses[i]) for i in nonempty],
+            [_as_text(references[i]) for i in nonempty])
+        for component, tensor in (("precision", precision), ("recall", recall), ("f1", f1)):
+            if component not in components:
+                continue
+            values = tensor.detach().cpu().tolist() if hasattr(tensor, "detach") else list(tensor)
+            if len(values) != len(nonempty):
+                raise RuntimeError("BERTScore returned the wrong number of examples")
+            for i, value in zip(nonempty, values):
+                rows[i][f"bertscore_{component}"] = float(value)
+
+
+def scivqa_score_pairs(references, hypotheses, bert_scorer):
+    """SciVQA Tables 1/2: ROUGE-1/L and BERTScore precision, recall and F1.
+
+    ROUGE uses rouge-score's lowercase alphanumeric tokenizer without stemming.
+    Scores are macro means of per-answer values when aggregated by mean_scores.
+    Answers retain source choice labels and numerical formats; no gold-dependent
+    abstention rewrite, synonym mapping, or choice reordering is applied.
+    """
+    if len(references) != len(hypotheses):
+        raise ValueError("References and hypotheses must have equal lengths")
+    if bert_scorer is None:
+        raise ValueError("A BERTScore scorer is required for the nine SciVQA metrics")
+    from rouge_score.rouge_scorer import RougeScorer
+
+    rouge = RougeScorer(["rouge1", "rougeL"], use_stemmer=False)
+    rows = []
+    for reference, hypothesis in zip(references, hypotheses):
+        scores = rouge.score(_as_text(reference), _as_text(hypothesis))
+        row = {}
+        for source, target in (("rouge1", "rouge_1"), ("rougeL", "rouge_l")):
+            score = scores[source]
+            row.update({f"{target}_f1": score.fmeasure,
+                        f"{target}_precision": score.precision,
+                        f"{target}_recall": score.recall})
+        rows.append(row)
+    _add_bertscores(rows, references, hypotheses, bert_scorer,
+                   ("precision", "recall", "f1"))
     return rows
 
 
