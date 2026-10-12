@@ -320,11 +320,19 @@ count as incorrect, and resume retries them. `--max-tokens` (default 64) and
 that reached the token limit. Temperature 0 and a seed reduce sampling variation,
 but results can still vary between model quantizations and server versions.
 
-The report's `accuracy` is binary exact-match accuracy (0–1), using the
-[GQA accuracy definition](https://cs.stanford.edu/people/dorarad/gqa/evaluate.html).
-It trims response whitespace without extracting answers from explanations.
-`normalized_accuracy` additionally ignores case and repeated whitespace.
-Use `accuracy` for comparisons with this repository's GQA training and testing.
+The report's `accuracy` is binary exact-match accuracy (0–1) after formatting
+cleanup of predictions and references. Actual and literal escaped newlines/tabs
+become spaces; repeated whitespace collapses; Markdown emphasis (`**red**`),
+inline code, code fences, headings, and bullet markers are removed.
+For example, `**red**\n` becomes `red`, and `leaf\nspot` becomes `leaf spot`.
+Case and meaningful punctuation (decimals, hyphens, apostrophes) are preserved.
+`normalized_accuracy` additionally ignores case. Answers are not extracted from
+explanations. The trained repository model's GQA scorer still uses strict exact
+match with surrounding whitespace trimmed, so this LLM cleanup should be noted
+when comparing results. Original LLM text remains in `raw_response` in
+`predictions.jsonl`; exported predictions contain the cleaned answer.
+Resuming an older run cleans and rescores saved predictions without regenerating
+successful answers. The report and run configuration record the normalization.
 Partial reports score attempted questions and explicitly indicate `complete: false`.
 This computes answer accuracy, not GQA's other scene-graph-based metrics.
 
@@ -377,6 +385,8 @@ and examples are never sent to the model.
 
 The report's `generated_metrics` contains `em`, `token_f1`, `bleu_1`, `bleu_2`,
 `rouge_l`, and `bertscore_f1`, using the same scoring functions as `test.py`.
+The LLM evaluator applies the formatting cleanup described above to predictions
+and references before all six metrics, including BERTScore.
 `predictions.csv` includes per-question metrics and available `question_category`,
 `question_type`, `crop`, and `disease` fields for analysis. PlantExpert does not
 write the GQA-specific prediction JSON. Scores are fractions; rescaled BERTScore

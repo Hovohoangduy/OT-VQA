@@ -30,7 +30,8 @@ from urllib.parse import urlsplit
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from utils.metrics import PAPER_METRICS, build_bertscore_scorer, lexical_scores, score_pairs
+from utils.metrics import (PAPER_METRICS, build_bertscore_scorer, lexical_scores,
+                           normalize_llm_answer, score_pairs)
 
 
 SYSTEM_PROMPT = (
@@ -45,6 +46,12 @@ PLANTEXPERT_SYSTEM_PROMPT = (
     "prefix, unrelated information, or discussion of your reasoning process."
 )
 METADATA_FIELDS = ("question_type", "question_category", "crop", "disease")
+ANSWER_NORMALIZATION = "whitespace_markdown_v1"
+NORMALIZATION_DESCRIPTION = (
+    "Predictions and references have actual/literal escaped newlines and tabs, "
+    "repeated whitespace, and Markdown emphasis, code fences, headings, and bullets "
+    "normalized before scoring. Meaningful punctuation and case are preserved."
+)
 
 
 @dataclass(frozen=True)
@@ -174,7 +181,7 @@ class LMStudioClient:
             raise RuntimeError("The model returned no answer text. Check max-tokens and model settings.")
         return {
             "raw_response": raw,
-            "prediction": raw.strip(),
+            "prediction": normalize_llm_answer(raw),
             "finish_reason": choice.get("finish_reason"),
             "latency_seconds": time.perf_counter() - start,
             "usage": response.get("usage", {}),
@@ -182,7 +189,7 @@ class LMStudioClient:
 
 
 def normalize(text: str) -> str:
-    return " ".join(text.casefold().split())
+    return normalize_llm_answer(text).casefold()
 
 
 def make_record(example: Example, result: dict | None = None, error: str = "",
@@ -194,18 +201,20 @@ def make_record(example: Example, result: dict | None = None, error: str = "",
     }
     record.update(example.metadata)
     record.update(result or {})
+    record["prediction"] = normalize_llm_answer(record["prediction"])
     labeled = example.answer is not None
+    reference = normalize_llm_answer(example.answer) if labeled else None
     if dataset == "plantexpert":
         if not labeled:
             scores = {metric: None for metric in PAPER_METRICS[:-1]}
         elif error:
             scores = {metric: 0.0 for metric in PAPER_METRICS[:-1]}
         else:
-            scores = lexical_scores(example.answer, record["prediction"])
+            scores = lexical_scores(reference, record["prediction"])
         record.update(scores)
         return record
     record["correct"] = (
-        bool(not error and record["prediction"].strip() == example.answer.strip()) if labeled else None
+        bool(not error and record["prediction"] == reference) if labeled else None
     )
     record["normalized_correct"] = (
         bool(not error and normalize(record["prediction"]) == normalize(example.answer))
@@ -252,11 +261,12 @@ def save_outputs(output: Path, records: dict[str, dict], config: dict,
                 sum(row["normalized_correct"] for row in labeled) / len(labeled) if labeled else None
             ),
             "scoring": {
-                "accuracy": "Exact match after trimming response whitespace; one point per correct answer.",
-                "normalized_accuracy": "Exact match ignoring case and repeated whitespace.",
+                "accuracy": "Exact match after answer formatting normalization; one point per correct answer.",
+                "normalized_accuracy": "Exact match after answer formatting normalization, also ignoring case.",
                 "errors": "Failed labeled requests count as incorrect; unattempted questions are excluded.",
             },
         })
+    report["scoring"]["answer_normalization"] = NORMALIZATION_DESCRIPTION
     # Save a report before semantic scoring, so scoring failures preserve inference results.
     (output / "report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     fields = ["question_id", "image", "question", "reference", "prediction"]
@@ -278,7 +288,7 @@ def save_outputs(output: Path, records: dict[str, dict], config: dict,
         if bert_scorer is not None:
             scored = [row for row in labeled if not row["error"]]
             if scored:
-                scores = score_pairs([row["reference"] for row in scored],
+                scores = score_pairs([normalize_llm_answer(row["reference"]) for row in scored],
                                      [row["prediction"] for row in scored], bert_scorer)
                 for row, metrics in zip(scored, scores):
                     row["bertscore_f1"] = metrics["bertscore_f1"]
@@ -316,6 +326,7 @@ def evaluate(args: argparse.Namespace, client: LMStudioClient) -> dict:
         "limit": args.limit, "seed": args.seed,
         "temperature": 0, "max_tokens": args.max_tokens,
         "system_prompt": system_prompt, "protocol": "zero-shot",
+        "answer_normalization": ANSWER_NORMALIZATION,
     }
     if getattr(args, "backend_config", None) is not None:
         config["backend"] = args.backend_config
@@ -332,6 +343,10 @@ def evaluate(args: argparse.Namespace, client: LMStudioClient) -> dict:
     records = {}
     if args.resume:
         saved_config = json.loads(manifest.read_text(encoding="utf-8")) if manifest.is_file() else None
+        manifest_config = saved_config.copy() if saved_config is not None else None
+        # Older journals retain raw predictions; rescore them with current cleanup.
+        if saved_config is not None:
+            saved_config.setdefault("answer_normalization", ANSWER_NORMALIZATION)
         # Managed llama.cpp runs can use a fresh local port without changing inference.
         # Keep all model, dataset, prompt, and backend checks intact.
         if saved_config is not None and getattr(args, "allow_server_port_change", False):
@@ -348,9 +363,12 @@ def evaluate(args: argparse.Namespace, client: LMStudioClient) -> dict:
         if saved_config != config:
             raise ValueError("Resume configuration differs or is missing. Use the original flags or a new output-dir.")
         if journal.is_file():
+            examples_by_id = {example.question_id: example for example in examples}
             for line in journal.read_text(encoding="utf-8").splitlines():
                 row = json.loads(line)
-                records[row["question_id"]] = row
+                records[row["question_id"]] = make_record(
+                    examples_by_id[row["question_id"]], row, error=row["error"], dataset=args.dataset,
+                )
     else:
         if any(output.iterdir()):
             raise ValueError(f"Output directory is not empty: {output}. Use --resume or a new output-dir.")
@@ -363,6 +381,9 @@ def evaluate(args: argparse.Namespace, client: LMStudioClient) -> dict:
         )
     if not args.resume:
         manifest.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+    elif "answer_normalization" not in manifest_config:
+        manifest_config["answer_normalization"] = ANSWER_NORMALIZATION
+        manifest.write_text(json.dumps(manifest_config, indent=2) + "\n", encoding="utf-8")
     print(f"Model: {args.model}; selected questions: {len(examples)}; zero-shot", flush=True)
     try:
         with journal.open("a", encoding="utf-8") as handle:

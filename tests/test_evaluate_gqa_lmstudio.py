@@ -14,7 +14,7 @@ from scripts.evaluate_gqa_lmstudio import (
     Example, LMStudioClient, PLANTEXPERT_SYSTEM_PROMPT, evaluate, load_examples,
     make_record, parse_args,
 )
-from utils.metrics import PAPER_METRICS
+from utils.metrics import PAPER_METRICS, normalize_llm_answer
 
 
 class LMStudioEvaluationTests(unittest.TestCase):
@@ -58,7 +58,7 @@ class LMStudioEvaluationTests(unittest.TestCase):
 
     def test_payload_is_image_question_only_and_nonstreaming(self):
         client = LMStudioClient("http://127.0.0.1:1234", timeout=10, retries=0)
-        response = {"choices": [{"message": {"content": " red\n"}, "finish_reason": "stop"}]}
+        response = {"choices": [{"message": {"content": " **red**\n"}, "finish_reason": "stop"}]}
         with patch.object(client, "request", return_value=response) as request:
             answer = client.answer(self.args.model, load_examples(self.questions)[0],
                                    self.images / "test/1.jpg", 64, 42)
@@ -75,7 +75,93 @@ class LMStudioEvaluationTests(unittest.TestCase):
         self.assertFalse(payload["stream"])
         self.assertEqual(payload["temperature"], 0)
         self.assertEqual(answer["prediction"], "red")
-        self.assertEqual(answer["raw_response"], " red\n")
+        self.assertEqual(answer["raw_response"], " **red**\n")
+
+    def test_answer_cleanup_preserves_content_and_word_boundaries(self):
+        for raw, expected in [
+            ("\n**red**\n", "red"),
+            (r"**leaf**\n\tspot\r\n", "leaf spot"),
+            ("leaf\n\tspot", "leaf spot"),
+            ("```text\n**Leaf spot**\n```", "Leaf spot"),
+            ("```red```", "red"),
+            ("# Disease\n- **leaf spot**\n* `yellow leaves`", "Disease leaf spot yellow leaves"),
+            ("__red__ _leaf_ ~~spot~~", "red leaf spot"),
+            ("pH 6.5, nitrogen-deficient; don't use 10% more.",
+             "pH 6.5, nitrogen-deficient; don't use 10% more."),
+            ("café β-carotene leaf_spot C++", "café β-carotene leaf_spot C++"),
+            ("2*3*4 = 24", "2*3*4 = 24"),
+            ("\n\t", ""),
+            ("", ""),
+        ]:
+            with self.subTest(raw=raw):
+                cleaned = normalize_llm_answer(raw)
+                self.assertEqual(cleaned, expected)
+                self.assertEqual(normalize_llm_answer(cleaned), expected)
+
+    def test_gqa_cleanup_affects_scoring_and_exports_but_retains_raw_text(self):
+        client = Mock(base_url="http://127.0.0.1:1234/v1")
+        client.answer.side_effect = [self.result(r"**red**\n"), self.result("`yes`\n")]
+        with patch("builtins.print"):
+            report = evaluate(self.args, client)
+        self.assertEqual(report["accuracy"], 1.0)
+        self.assertEqual(report["normalized_accuracy"], 1.0)
+        predictions = json.loads((self.args.output_dir / "gqa_predictions.json").read_text())
+        self.assertEqual([row["prediction"] for row in predictions], ["red", "yes"])
+        journal = [json.loads(line) for line in
+                   (self.args.output_dir / "predictions.jsonl").read_text().splitlines()]
+        self.assertEqual(journal[0]["raw_response"], r"**red**\n")
+        self.assertIn("answer_normalization", report["scoring"])
+
+    def test_resume_rescores_legacy_formatted_predictions_without_inference(self):
+        client = Mock(base_url="http://127.0.0.1:1234/v1")
+        client.answer.side_effect = [self.result("red"), self.result("yes")]
+        with patch("builtins.print"):
+            evaluate(self.args, client)
+        manifest = self.args.output_dir / "run_config.json"
+        config = json.loads(manifest.read_text())
+        del config["answer_normalization"]
+        manifest.write_text(json.dumps(config))
+        journal = self.args.output_dir / "predictions.jsonl"
+        rows = [json.loads(line) for line in journal.read_text().splitlines()]
+        rows[0].update(prediction=r"**red**\n", raw_response=r"**red**\n",
+                       correct=False, normalized_correct=False)
+        journal.write_text("".join(json.dumps(row) + "\n" for row in rows))
+        self.args.resume = True
+        client.answer.reset_mock()
+        with patch("builtins.print"):
+            report = evaluate(self.args, client)
+        client.answer.assert_not_called()
+        self.assertEqual(report["accuracy"], 1.0)
+        self.assertIn("answer_normalization", json.loads(manifest.read_text()))
+
+    def test_plant_cleanup_is_applied_to_all_metrics_and_bertscore_inputs(self):
+        self.questions.write_text(
+            'anno_id,image,question,answer\n001,test/1.jpg,What disease?,"**Leaf**\\nspot"\n'
+        )
+        args = self.plant_args()
+        client = Mock(base_url="http://localhost:1234/v1")
+        client.answer.return_value = self.result("```text\nLeaf\n**spot**\n```")
+        scorer = Mock(hash="test-encoder-hash")
+        scorer.score.return_value = (None, None, [1.0])
+        with patch("builtins.print"), patch(
+            "scripts.evaluate_gqa_lmstudio.build_bertscore_scorer", return_value=scorer,
+        ):
+            report = evaluate(args, client)
+        self.assertTrue(all(value == 1.0 for value in report["generated_metrics"].values()))
+        scorer.score.assert_called_once_with(["Leaf spot"], ["Leaf spot"])
+
+    def test_empty_formatted_answer_is_scored_without_bertscore_call(self):
+        self.questions.write_text('image,question,answer\ntest/1.jpg,What?,""\n')
+        args = self.plant_args()
+        client = Mock(base_url="http://localhost:1234/v1")
+        client.answer.return_value = self.result("```\n```\n")
+        scorer = Mock(hash="test-encoder-hash")
+        with patch("builtins.print"), patch(
+            "scripts.evaluate_gqa_lmstudio.build_bertscore_scorer", return_value=scorer,
+        ):
+            report = evaluate(args, client)
+        self.assertTrue(all(value == 1.0 for value in report["generated_metrics"].values()))
+        scorer.score.assert_not_called()
 
     def test_scoring_does_not_extract_answer_from_prose(self):
         example = Example("1", "1.jpg", "What color?", "red")
