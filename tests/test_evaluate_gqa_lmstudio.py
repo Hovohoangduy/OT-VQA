@@ -64,7 +64,7 @@ class LMStudioEvaluationTests(unittest.TestCase):
                                    self.images / "test/1.jpg", 64, 42)
         endpoint, payload = request.call_args.args
         self.assertEqual(endpoint, "/chat/completions")
-        self.assertEqual(payload["model"], "lmstudio-community/gemma-3n-E4B-it-MLX-4bit")
+        self.assertEqual(payload["model"], self.args.model)
         self.assertEqual(client.base_url, "http://127.0.0.1:1234/v1")
         self.assertEqual([item["role"] for item in payload["messages"]], ["system", "user"])
         content = payload["messages"][1]["content"]
@@ -166,15 +166,15 @@ class LMStudioEvaluationTests(unittest.TestCase):
 
     def test_dataset_defaults_and_overrides(self):
         gqa = parse_args([])
-        self.assertEqual(gqa.model, "lmstudio-community/gemma-3n-E4B-it-MLX-4bit")
-        self.assertEqual(gqa.output_dir, Path("results/gemma3n_e4b_mlx_4bit_gqa_zero_shot"))
+        self.assertEqual(gqa.model, "qwen3-vl-2b-instruct")
+        self.assertEqual(gqa.output_dir, Path("results/qwen3_vl_2b_gqa_zero_shot"))
         self.assertEqual(gqa.max_tokens, 64)
         self.assertEqual(gqa.questions, Path("data/gqa_dataset/test.csv"))
         plant = parse_args(["--dataset", "plantexpert"])
         self.assertEqual(plant.questions, Path("data/plantexpert_dataset/test.csv"))
         self.assertEqual(plant.images, Path("data/plantexpert_dataset/images"))
         self.assertEqual(plant.model, gqa.model)
-        self.assertEqual(plant.output_dir, Path("results/gemma3n_e4b_mlx_4bit_plantexpert_zero_shot"))
+        self.assertEqual(plant.output_dir, Path("results/qwen3_vl_2b_plantexpert_zero_shot"))
         self.assertEqual(plant.max_tokens, 256)
         self.assertFalse(plant.no_bertscore)
         self.assertEqual(self.plant_args("--max-tokens", "512").max_tokens, 512)

@@ -193,6 +193,74 @@ validation on your dataset.
 
 ## Evaluate
 
+### GGUF vision models on Kaggle with two GPUs
+
+Import [the self-contained Kaggle notebook](notebooks/evaluate_ministral_3_8b_kaggle.ipynb)
+into Kaggle, select **GPU T4 x2**, enable **Internet**, and attach your dataset.
+Set `QUESTIONS` and `IMAGES` in the first code cell, then run all cells. The
+notebook defaults to the PlantExpertVQA Kaggle paths used above; set
+`DATASET = "gqa"` and the corresponding paths for GQA.
+
+It downloads the official
+[Ministral 3 8B GGUF](https://huggingface.co/mistralai/Ministral-3-8B-Instruct-2512-GGUF/tree/main)
+Q4_K_M weights and BF16 vision projector, builds CUDA-enabled llama.cpp
+`v0.6.0`, and runs five questions before the full evaluation. Q5_K_M and Q8_0
+are automatically detected when available. The model is split across both GPUs using
+`--split-mode layer --tensor-split 1,1`; questions run sequentially through one
+server. This uses llama.cpp model splitting rather than PyTorch `torchrun`.
+The server log shows CUDA offload and device allocations.
+
+To switch models, change only `MODEL_DIR`:
+
+```python
+MODEL_DIR = "mistralai/Ministral-3-8B-Instruct-2512-GGUF"  # Hugging Face repo ID or URL
+# Or: MODEL_DIR = "/kaggle/input/my-vision-model/gguf"     # Local model folder
+# Or: MODEL_DIR = "owner/model-GGUF:Q8_0"                # Explicit HF quantization
+```
+
+The runner discovers GGUF weights and the matching vision projector, derives
+the server alias, and creates model-specific results and download folders.
+Automatic selection prefers Q4_K_M, Q5_K_M, then Q8_0; a single available
+quantization also works. A local folder must contain one model family and its
+matching `mmproj` or `projector` GGUF. Model weight shards are supported.
+Local files are used directly without a Hugging Face download. Missing or
+ambiguous files produce an error before starting the server. Models must
+support vision and be compatible with the selected llama.cpp version.
+
+The notebook bundles the existing evaluator and metrics, so no repository
+upload is needed. GQA uses exact-match accuracy; PlantExpert uses the same six
+repository metrics described below. BERTScore runs on CPU by default. Set
+`NO_BERTSCORE = True` to skip it. Results and server logs are saved under
+`/kaggle/working`, with a ZIP download in the last cell. Save a Kaggle notebook
+version to preserve these files.
+
+Set `RESUME = True` to resume the full evaluation with identical settings.
+For a new session, copy the saved full-run directory back to its original
+working path. Resume checks include the resolved HF revision, llama.cpp
+version, quantization and context size. Prefer a fixed `HF_REVISION` commit
+for comparisons using the same HF model. Local weights and projectors are
+fingerprinted with SHA-256 to guard against changed files. Failed requests
+stop by default, preserve partial results, and are retried on resume.
+
+With the repository files already available and llama.cpp built, the runner
+can also be invoked directly from a notebook cell:
+
+```python
+!python -u -m scripts.evaluate_kaggle_ministral \
+  --model-dir mistralai/Ministral-3-8B-Instruct-2512-GGUF \
+  --dataset plantexpert \
+  --questions /kaggle/input/datasets/duyho0511chill/plantexpert-dataset/plantexpert_dataset/test.csv \
+  --images /kaggle/input/datasets/duyho0511chill/plantexpert-dataset/plantexpert_dataset/images \
+  --output-dir /kaggle/working/results/ministral_plantexpert
+```
+
+This accepts the evaluator's existing flags, including `--limit`, `--resume`,
+`--max-tokens` and `--no-bertscore`. Add `--llama-server` for a different binary
+path, `--quantization Q8_0` for another quantization, or `--context-size 4096`
+for a smaller context. The default binary path is
+`/kaggle/working/llama.cpp/build/bin/llama-server`. Regenerate the bundled notebook
+after source edits with `python3 -m scripts.build_kaggle_notebook`.
+
 ### Zero-shot Gemma 3n E4B with LM Studio
 
 Load `lmstudio-community/gemma-3n-E4B-it-MLX-4bit` in LM Studio and start its local

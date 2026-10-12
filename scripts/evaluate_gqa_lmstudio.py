@@ -111,12 +111,14 @@ def image_data_url(path: Path) -> str:
 
 
 class LMStudioClient:
-    def __init__(self, base_url: str, timeout: float, retries: int):
+    def __init__(self, base_url: str, timeout: float, retries: int,
+                 server_name: str = "LM Studio"):
         self.base_url = base_url.rstrip("/")
         if not self.base_url.endswith("/v1"):
             self.base_url += "/v1"
         self.timeout = timeout
         self.retries = retries
+        self.server_name = server_name
 
     def request(self, endpoint: str, payload: dict | None = None) -> dict:
         headers = {"Content-Type": "application/json"}
@@ -135,12 +137,12 @@ class LMStudioClient:
             except urllib.error.HTTPError as error:
                 detail = error.read().decode("utf-8", errors="replace")[:1000]
                 if error.code not in {429, 500, 502, 503, 504} or attempt == self.retries:
-                    raise RuntimeError(f"LM Studio HTTP {error.code}: {detail}") from error
+                    raise RuntimeError(f"{self.server_name} HTTP {error.code}: {detail}") from error
             except (urllib.error.URLError, TimeoutError, ConnectionError) as error:
                 if attempt == self.retries:
                     raise RuntimeError(
                         f"Cannot reach {self.base_url}: {error}. "
-                        "Check that LM Studio's server is running and the vision model is loaded."
+                        f"Check that the {self.server_name} server is running and the vision model is loaded."
                     ) from error
             time.sleep(min(2 ** attempt, 8))
         raise RuntimeError("Request exhausted its retry attempts.")
@@ -314,6 +316,8 @@ def evaluate(args: argparse.Namespace, client: LMStudioClient) -> dict:
         "temperature": 0, "max_tokens": args.max_tokens,
         "system_prompt": system_prompt, "protocol": "zero-shot",
     }
+    if getattr(args, "backend_config", None) is not None:
+        config["backend"] = args.backend_config
     if plantexpert:
         config.update({"dataset": "plantexpert", "bertscore": {
             "enabled": not args.no_bertscore, "model": args.bertscore_model,
