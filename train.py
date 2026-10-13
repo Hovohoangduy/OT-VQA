@@ -1,4 +1,4 @@
-"""Train OT VQA, report dataset answer metrics, and select checkpoints by validation loss.
+"""Train OT VQA, report answer metrics, and select checkpoints by a validation metric.
 
 GQA reports binary generated-answer accuracy for training and validation.
 SciVQA reports ROUGE-1/L and BERTScore precision, recall and F1.
@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import hashlib
 import os
+import math
 from datetime import timedelta
 from pathlib import Path
 
@@ -17,7 +18,7 @@ import torch
 import torch.distributed as dist
 from torch import nn, optim
 from torch.nn.parallel import DistributedDataParallel
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 from torch.utils.data.distributed import DistributedSampler
 from transformers import get_linear_schedule_with_warmup
 
@@ -40,7 +41,7 @@ def _forward_batch(model, batch, device):
 
 def _format_epoch_metrics(epoch, total_epochs, split, loss, scores):
     metrics = ", ".join(f"{name}={value:.4f}" for name, value in scores.items())
-    return f"Epoch {epoch}/{total_epochs} {split}: loss={loss:.4f}, {metrics}"
+    return f"Epoch {epoch}/{total_epochs} {split}: loss={loss:.4f}" + (f", {metrics}" if metrics else "")
 
 
 def train(model, train_loader, num_epochs, optimizer, scheduler, criterion,
@@ -102,7 +103,59 @@ def _make_loader(args, split, shuffle, text_model, image_model, rank=0, world_si
                                   shuffle=shuffle, seed=args.seed)
                if world_size > 1 and split == "train" else None)
     return DataLoader(dataset, batch_size=args.batch_size,
-                      shuffle=shuffle and sampler is None, sampler=sampler)
+                      shuffle=shuffle and sampler is None, sampler=sampler,
+                      num_workers=args.num_workers,
+                      pin_memory=args.device in {"cuda", "auto"} and torch.cuda.is_available())
+
+
+def _make_train_eval_loader(dataset, args, device):
+    if args.train_eval_samples == 0:
+        return None
+    if 0 < args.train_eval_samples < len(dataset):
+        generator = torch.Generator().manual_seed(args.seed)
+        indices = torch.randperm(len(dataset), generator=generator)[:args.train_eval_samples]
+        dataset = Subset(dataset, indices.tolist())
+    return DataLoader(dataset, batch_size=args.batch_size, shuffle=False,
+                      num_workers=args.num_workers, pin_memory=device.type == "cuda")
+
+
+def _build_optimizer(model, args, resume=None):
+    lr = args.lr if args.lr is not None else Config.lr
+    trainable = [parameter for parameter in model.parameters() if parameter.requires_grad]
+    saved = (resume or {}).get("optimizer_state_dict")
+    saved_groups = saved["param_groups"] if saved else []
+    separate = args.encoder_lr is not None or any(
+        group.get("group_name") == "encoder" for group in saved_groups)
+    if separate and saved_groups and len(saved_groups) != 2:
+        raise ValueError("--encoder_lr requires a fresh run when resuming a single-LR checkpoint")
+    if separate:
+        encoder_ids = {id(parameter) for module in
+                       (model.question_encoder, model.answer_embedding)
+                       for parameter in module.parameters()}
+        groups = [
+            {"params": [p for p in trainable if id(p) not in encoder_ids],
+             "lr": lr, "group_name": "decoder"},
+            {"params": [p for p in trainable if id(p) in encoder_ids],
+             "lr": args.encoder_lr if args.encoder_lr is not None else lr,
+             "group_name": "encoder"},
+        ]
+    else:
+        groups = trainable
+    return optim.AdamW(groups, lr=lr, weight_decay=args.weight_decay)
+
+
+def _validation_selection(validation, epoch, metric, best):
+    value = validation["loss"] if metric == "loss" else validation["metrics"][metric]
+    if not math.isfinite(value):
+        raise FloatingPointError(f"Validation {metric} is NaN or infinity")
+    current = {"loss": validation["loss"], "epoch": epoch,
+               "selection_metric": metric, "value": value}
+    if best is None:
+        return current, True
+    if best.get("selection_metric", "loss") != metric:
+        raise ValueError("--selection_metric does not match the resume checkpoint")
+    best_value = best.get("value", best["loss"])
+    return current, value < best_value if metric == "loss" else value > best_value
 
 
 def _training_device(requested):
@@ -136,6 +189,14 @@ def _run_training(args, device, rank, world_size):
     metric_names = metrics_for_dataset(dataset_name)
     if args.batch_size < 1 or args.epochs < 1:
         raise ValueError("batch_size and epochs must be positive")
+    if args.lr is not None and (not math.isfinite(args.lr) or args.lr <= 0):
+        raise ValueError("lr must be finite and positive")
+    if args.encoder_lr is not None and (not math.isfinite(args.encoder_lr) or args.encoder_lr <= 0):
+        raise ValueError("encoder_lr must be finite and positive")
+    if not 0 <= args.warmup_ratio < 1:
+        raise ValueError("warmup_ratio must be in [0, 1)")
+    if args.train_eval_samples < -1 or args.num_workers < 0:
+        raise ValueError("train_eval_samples must be >= -1 and num_workers must be >= 0")
     if args.max_answer_tokens is not None and args.max_answer_tokens < 2:
         raise ValueError("max_answer_tokens must be at least 2")
     if args.max_question_tokens is not None and args.max_question_tokens < 2:
@@ -169,6 +230,12 @@ def _run_training(args, device, rank, world_size):
         print(f"Dataset: {dataset_name}; generated-answer metrics: {', '.join(metric_names)}")
 
     resume = read_checkpoint(args.resume, device) if args.resume else None
+    resumed_best = (resume or {}).get("best_metric") or {}
+    selection_metric = args.selection_metric or resumed_best.get("selection_metric", "loss")
+    if selection_metric != "loss" and selection_metric not in metric_names:
+        raise ValueError(f"Selection metric {selection_metric} is unavailable for {dataset_name}")
+    if resume is not None and selection_metric != resumed_best.get("selection_metric", "loss"):
+        raise ValueError("--selection_metric does not match the resume checkpoint")
     if resume is not None:
         if resume["format_version"] not in {3, 4}:
             raise ValueError("Training can resume only from a version-3/4 checkpoint")
@@ -234,8 +301,8 @@ def _run_training(args, device, rank, world_size):
                   if rank == 0 else None)
     if not len(train_loader) or (rank == 0 and not len(dev_loader)):
         raise ValueError("Training and development datasets must be non-empty")
-    train_eval_loader = (DataLoader(train_loader.dataset, batch_size=args.batch_size,
-                                    shuffle=False) if rank == 0 else None)
+    train_eval_loader = (_make_train_eval_loader(train_loader.dataset, args, device)
+                         if rank == 0 else None)
     train_criterion = nn.CrossEntropyLoss(
         ignore_index=model.pad_token_id, label_smoothing=args.label_smoothing
     )
@@ -248,15 +315,13 @@ def _run_training(args, device, rank, world_size):
     ) if rank == 0 and dataset_name != "gqa" else None
     trainable_parameters = [parameter for parameter in model.parameters()
                             if parameter.requires_grad]
-    optimizer = optim.AdamW(
-        trainable_parameters,
-        lr=args.lr if args.lr is not None else Config.lr,
-        weight_decay=args.weight_decay,
-    )
+    optimizer = _build_optimizer(model, args, resume)
     if rank == 0:
         print(f"Trainable parameters: {sum(parameter.numel() for parameter in trainable_parameters):,}")
+    total_steps = len(train_loader) * args.epochs
+    warmup_steps = math.ceil(args.warmup_ratio * total_steps)
     scheduler = get_linear_schedule_with_warmup(
-        optimizer, num_warmup_steps=0, num_training_steps=len(train_loader) * args.epochs
+        optimizer, num_warmup_steps=warmup_steps, num_training_steps=total_steps
     )
     start_epoch = global_step = 0
     best_metric = None
@@ -268,6 +333,12 @@ def _run_training(args, device, rank, world_size):
         epochs_without_improvement = int(resume.get("epochs_without_improvement", 0))
     if start_epoch >= args.epochs:
         raise ValueError("Resume checkpoint has already reached the requested epoch count")
+    if rank == 0:
+        print(f"Global batch size: {args.batch_size * world_size}; "
+              f"warmup steps: {warmup_steps}; checkpoint selection: {selection_metric}")
+        print("Peak learning rates: " + ", ".join(
+            f"{group.get('group_name', 'all')}={group['initial_lr']:g}"
+            for group in optimizer.param_groups))
     training_model = (DistributedDataParallel(
         model, device_ids=[device.index], output_device=device.index,
         find_unused_parameters=True,
@@ -287,6 +358,11 @@ def _run_training(args, device, rank, world_size):
             "torch_version": torch.__version__,
             "dataset": dataset_name,
             "generated_metrics": list(metric_names),
+            "selection_metric": selection_metric,
+            "world_size": world_size,
+            "global_batch_size": args.batch_size * world_size,
+            "warmup_steps": warmup_steps,
+            "train_eval_examples": len(train_eval_loader.dataset) if train_eval_loader else 0,
         }
         if bert_scorer is not None:
             manifest["bertscore_hash"] = bert_scorer.hash
@@ -327,20 +403,22 @@ def _run_training(args, device, rank, world_size):
         global_step += len(train_loader)
         stop = False
         if rank == 0:
-            training = evaluation(
-                model, train_eval_loader, validation_criterion, device=device,
-                bert_scorer=bert_scorer,
-            )
-            train_scores = training["metrics"]
+            train_scores = {}
+            if train_eval_loader is not None:
+                training = evaluation(
+                    model, train_eval_loader, validation_criterion, device=device,
+                    bert_scorer=bert_scorer, dataset=dataset_name,
+                )
+                train_scores = training["metrics"]
             print(_format_epoch_metrics(epoch + 1, args.epochs, "Train", train_loss,
                                         train_scores))
             validation = evaluation(
                 model, dev_loader, validation_criterion, device=device,
-                bert_scorer=bert_scorer,
+                bert_scorer=bert_scorer, dataset=dataset_name,
             )
             val_loss, val_scores = validation["loss"], validation["metrics"]
-            current = {"loss": val_loss, "epoch": epoch + 1}
-            improved = best_metric is None or val_loss < best_metric["loss"]
+            current, improved = _validation_selection(
+                validation, epoch + 1, selection_metric, best_metric)
             if improved:
                 best_metric = current
                 epochs_without_improvement = 0
@@ -358,10 +436,15 @@ def _run_training(args, device, rank, world_size):
             if improved:
                 save_checkpoint(destination / "best.pt", **checkpoint_args)
             row = {"epoch": epoch + 1, "train_loss": train_loss,
-                   **{f"train_{name}": train_scores[name] for name in metric_names},
+                   **{f"train_{name}": score for name, score in train_scores.items()},
                    "val_loss": val_loss,
                    **{f"val_{name}": val_scores[name] for name in metric_names},
                    "learning_rate": scheduler.get_last_lr()[0],
+                   "learning_rates": {group.get("group_name", "all"): group["lr"]
+                                      for group in optimizer.param_groups},
+                   "selection_metric": selection_metric,
+                   "selection_value": current["value"],
+                   "train_eval_examples": len(train_eval_loader.dataset) if train_eval_loader else 0,
                    "improved": improved,
                    "epochs_without_improvement": epochs_without_improvement}
             history.append(row)
@@ -370,11 +453,13 @@ def _run_training(args, device, rank, world_size):
             print(_format_epoch_metrics(epoch + 1, args.epochs, "Validation", val_loss,
                                         val_scores) +
                   f", best epoch={best_metric['epoch']}, "
+                  f"selection={selection_metric}, "
                   f"patience={epochs_without_improvement}/{args.early_stopping_patience or 'off'}")
             if (args.early_stopping_patience and
                     epochs_without_improvement >= args.early_stopping_patience):
                 print(f"Early stopping at epoch {epoch + 1}; best checkpoint is epoch "
-                      f"{best_metric['epoch']} with validation loss={best_metric['loss']:.4f}.")
+                      f"{best_metric['epoch']} with validation {selection_metric}="
+                      f"{best_metric.get('value', best_metric['loss']):.4f}.")
                 stop = True
         if world_size > 1:
             stop_signal = torch.tensor([int(stop)], device=device)
@@ -386,9 +471,11 @@ def _run_training(args, device, rank, world_size):
     if rank == 0:
         plt.figure(figsize=(10, 6))
         for metric in metric_names:
-            plt.plot([row["epoch"] for row in history],
-                     [row[f"train_{metric}"] for row in history],
-                     label=f"train_{metric}", linestyle="--")
+            training_rows = [row for row in history if f"train_{metric}" in row]
+            if training_rows:
+                plt.plot([row["epoch"] for row in training_rows],
+                         [row[f"train_{metric}"] for row in training_rows],
+                         label=f"train_{metric}", linestyle="--")
             plt.plot([row["epoch"] for row in history],
                      [row[f"val_{metric}"] for row in history], label=f"val_{metric}")
         plt.xlabel("Epoch")

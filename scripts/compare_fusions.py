@@ -107,7 +107,8 @@ def write_comparison(output_dir, rows):
     per_seed_headers = ["Fusion", "Seed", "Status", "Trainable parameters", "Loss",
                         *(metric_labels[name] for name in metric_names), "ms/example"]
     lines = ["# Fusion comparison", "",
-             "Each run uses its lowest validation-loss checkpoint. Metrics come from generated answers.",
+             "Each run uses its best checkpoint under the configured validation selection metric "
+             "(loss by default). Metrics come from generated answers.",
              "", "## Per-seed results", "",
              "| " + " | ".join(per_seed_headers) + " |",
              "|" + "|".join(["---", "---:", "---", *["---:"] * (len(per_seed_headers) - 3)]) + "|"]

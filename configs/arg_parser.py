@@ -2,7 +2,7 @@ import argparse
 
 from configs.config import Config
 from model.fusion import FUSION_METHODS
-from utils.metrics import bertscore_defaults, resolve_dataset
+from utils.metrics import ALL_METRICS, bertscore_defaults, resolve_dataset
 
 
 def apply_dataset_defaults(parser, argv):
@@ -42,6 +42,16 @@ def get_args(argv=None, *, evaluation=False):
                         help="Keep epoch_0001.pt, epoch_0002.pt, ... in addition to last.pt and best.pt")
     parser.add_argument("--seed", type=int, default=1105)
     parser.add_argument("--lr", type=float, default=None)
+    parser.add_argument("--encoder_lr", type=float, default=None,
+                        help="Separate LR for pretrained text/answer embeddings; --lr applies to fusion/decoder")
+    parser.add_argument("--warmup_ratio", type=float, default=0.0,
+                        help="Fraction of total optimization steps used for linear LR warmup")
+    parser.add_argument("--selection_metric", choices=("loss", *ALL_METRICS), default=None,
+                        help="Validation metric for best.pt and early stopping; default loss, or resume setting")
+    parser.add_argument("--train_eval_samples", type=int, default=-1,
+                        help="Training examples to score each epoch: -1 all, 0 skip, positive fixed random subset")
+    parser.add_argument("--num_workers", type=int, default=0,
+                        help="DataLoader worker processes per GPU")
     parser.add_argument(
         "--weight_decay", type=float, default=0.05,
         help="AdamW weight decay; the small GQA subset benefits from stronger regularization",

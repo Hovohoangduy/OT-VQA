@@ -125,6 +125,55 @@ python test.py --dataset scivqa --split test \
   --predictions_csv results/scivqa/test_predictions.csv
 ```
 
+For a SciVQA optimization experiment on two Kaggle GPUs, start a fresh run with:
+
+```bash
+!torchrun --standalone --nnodes=1 --nproc_per_node=2 train.py \
+  --dataset scivqa --device cuda --fusion ot \
+  --epochs 60 --batch_size 16 \
+  --lr 1e-4 --encoder_lr 1e-5 --warmup_ratio 0.05 \
+  --weight_decay 0.01 --label_smoothing 0.05 --drop_prob 0.1 \
+  --gradient_clip 1.0 --early_stopping_patience 10 \
+  --selection_metric rouge_l_f1 --train_eval_samples 512 --num_workers 2 \
+  --train_csv_path /kaggle/input/datasets/duyho2907/sci-vqa-dataset-nganga01/scivqa_dataset/train.csv \
+  --dev_csv_path /kaggle/input/datasets/duyho2907/sci-vqa-dataset-nganga01/scivqa_dataset/val.csv \
+  --img_path /kaggle/input/datasets/duyho2907/sci-vqa-dataset-nganga01/scivqa_dataset/images \
+  --model_path /kaggle/working/scivqa_model_tuned
+```
+
+Use the updated repository for these flags. Remove the leading `!` outside a
+notebook. These values are a starting experiment, not a measured improvement.
+With two workers, batch size 16 means 32 examples per optimizer update.
+`--lr` trains the new fusion, projections, decoder, and vocabulary head;
+`--encoder_lr` trains the pretrained question encoder and any unfrozen answer
+embeddings. The image encoder remains frozen. Warmup takes 5% of the planned
+optimization steps, followed by linear decay. The smaller batch provides twice
+as many updates per epoch as batch size 32 on the same two GPUs.
+
+`--selection_metric rouge_l_f1` maximizes full-validation ROUGE-L F1 for both
+`best.pt` and early stopping. Use `bertscore_f1` if that is your primary objective.
+The default still minimizes validation loss. `--train_eval_samples 512` scores a
+fixed, seeded random training subset each epoch; it does not reduce the examples
+used for optimization or validation. Use `0` to skip training-answer scoring, or
+`-1` (default) to score the full training set. Subset training metrics should only
+be compared across runs with the same seed and sample count. `--num_workers`
+controls image-loading processes per GPU. BERTScore remains on CPU by default;
+`--bertscore_device cuda --bertscore_batch_size 4` can speed it up if the primary
+GPU has enough memory for both models.
+
+Compare fresh runs with decoder learning rates `5e-5`, `1e-4`, and `2e-4`, keeping
+the encoder LR and remaining settings fixed. Choose on validation, repeat the
+winner with multiple seeds, then evaluate the held-out test split once. A longer
+200-epoch limit alone does not guarantee better answers. The current frozen
+256-pixel image encoder and center crop may limit reading small chart labels or
+content near figure edges; learning-rate tuning cannot restore missing pixels.
+
+For resuming, keep the schedule settings and total epoch target from the
+original run. Optimizer state restores its saved learning rates. A checkpoint
+with separate encoder/decoder groups recreates those groups automatically; an
+older single-LR checkpoint needs a fresh run to use `--encoder_lr`. The stored
+selection metric is inherited on resume, and switching it is rejected.
+
 To train the OT model on this PlantExpertVQA subset:
 
 ```bash

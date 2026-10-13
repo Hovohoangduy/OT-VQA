@@ -35,12 +35,17 @@ def _latest_run(path: Path) -> list[dict]:
 def _history_report(rows: list[dict]) -> dict:
     if not rows:
         return {}
-    best = min(rows, key=lambda row: row["val_loss"])
+    selection_metric = rows[-1].get("selection_metric", "loss")
+    if selection_metric == "loss":
+        best = min(rows, key=lambda row: row["val_loss"])
+    else:
+        best = max(rows, key=lambda row: row[f"val_{selection_metric}"])
     last = rows[-1]
     metric_names = ALL_METRICS
     return {
         "epochs_logged": len(rows),
         "best_epoch": best["epoch"],
+        "selection_metric": selection_metric,
         "best_val_loss": best["val_loss"],
         "best_train_generated_metrics": {name: best[f"train_{name}"] for name in metric_names
                                          if f"train_{name}" in best},

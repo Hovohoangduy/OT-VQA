@@ -23,7 +23,9 @@ from utils.vqa_dataset import VQADataset, resolve_image_root
 from utils.metrics import PAPER_METRICS, lexical_scores, score_pairs, mean_scores
 from utils.json_to_csv import convert_json_folder
 from utils.checkpoint import load_model, save_checkpoint
-from train import _format_epoch_metrics, train
+from train import (_build_optimizer, _format_epoch_metrics, _make_train_eval_loader,
+                   _run_training, _validation_selection, train)
+from configs.arg_parser import get_args
 from test import evaluation
 from diagnose_training import _history_report, _lexical_summary
 
@@ -54,6 +56,99 @@ class ModelLogicTests(unittest.TestCase):
     def make_model(self):
         return VQAModel(text_model=str(self.text), image_model=str(self.visual),
                         output_size=16, d_model=16, ffn_hidden=32, num_layers=2, drop_prob=0)
+
+    def test_separate_learning_rates_update_new_layers_more_and_resume(self):
+        model = self.make_model()
+        args = get_args(["--lr", "0.001", "--encoder_lr", "0.00001",
+                         "--weight_decay", "0"])
+        optimizer = _build_optimizer(model, args)
+        encoder = model.question_encoder.text_encoder.embeddings.word_embeddings.weight
+        decoder = model.mlp[-1].weight
+        before_encoder, before_decoder = encoder.detach().clone(), decoder.detach().clone()
+        for group in optimizer.param_groups:
+            for parameter in group["params"]:
+                parameter.grad = torch.ones_like(parameter)
+        optimizer.step()
+        self.assertAlmostEqual((before_decoder - decoder).abs().mean().item(), 0.001, places=6)
+        self.assertAlmostEqual((before_encoder - encoder).abs().mean().item(), 0.00001, places=7)
+        trained_ids = [id(p) for group in optimizer.param_groups for p in group["params"]]
+        self.assertEqual(len(trained_ids), len(set(trained_ids)))
+        self.assertEqual(set(trained_ids), {id(p) for p in model.parameters() if p.requires_grad})
+        saved = {"optimizer_state_dict": optimizer.state_dict()}
+        resumed = _build_optimizer(model, get_args([]), saved)
+        resumed.load_state_dict(saved["optimizer_state_dict"])
+        self.assertEqual([g["lr"] for g in resumed.param_groups], [0.001, 0.00001])
+        legacy = {"optimizer_state_dict": _build_optimizer(model, get_args([])).state_dict()}
+        with self.assertRaisesRegex(ValueError, "fresh run"):
+            _build_optimizer(model, args, legacy)
+
+    def test_validation_selection_maximizes_answers_and_minimizes_loss(self):
+        validation = {"loss": 2.0, "metrics": {"rouge_l_f1": 0.7}}
+        best = {"loss": 1.0, "epoch": 1, "selection_metric": "rouge_l_f1", "value": 0.6}
+        current, improved = _validation_selection(validation, 2, "rouge_l_f1", best)
+        self.assertTrue(improved)
+        self.assertEqual(current["epoch"], 2)
+        self.assertFalse(_validation_selection(validation, 2, "loss", {"loss": 1.0})[1])
+        self.assertFalse(_validation_selection(validation, 3, "rouge_l_f1", current)[1])
+        with self.assertRaisesRegex(ValueError, "does not match"):
+            _validation_selection(validation, 2, "loss", best)
+        with self.assertRaises(FloatingPointError):
+            _validation_selection({"loss": float("nan")}, 1, "loss", None)
+
+    def test_training_scoring_subset_is_fixed_and_does_not_change_rng(self):
+        args = get_args(["--train_eval_samples", "7"])
+        rng = torch.get_rng_state().clone()
+        first = _make_train_eval_loader(list(range(100)), args, torch.device("cpu"))
+        second = _make_train_eval_loader(list(range(100)), args, torch.device("cpu"))
+        self.assertEqual(first.dataset.indices, second.dataset.indices)
+        self.assertEqual(len(first.dataset), 7)
+        self.assertEqual(len(set(first.dataset.indices)), 7)
+        self.assertFalse(torch.equal(torch.tensor(first.dataset.indices), torch.arange(7)))
+        self.assertTrue(torch.equal(torch.get_rng_state(), rng))
+        args.train_eval_samples = 0
+        self.assertIsNone(_make_train_eval_loader(list(range(100)), args, torch.device("cpu")))
+
+    def test_training_selects_answer_quality_and_logs_full_validation_when_train_scoring_skipped(self):
+        from utils.metrics import SCIVQA_METRICS
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory)
+            csv_path = destination / "input.csv"
+            csv_path.write_text("question,answer\nwhat color,red\n")
+            args = get_args([
+                "--dataset", "scivqa", "--epochs", "5", "--batch_size", "1",
+                "--text_model", str(self.text), "--image_model", str(self.visual),
+                "--d_model", "16", "--ffn_hidden", "32", "--num_layers", "1",
+                "--max_question_tokens", "8", "--max_answer_tokens", "6",
+                "--lr", "0.001", "--encoder_lr", "0.00001", "--warmup_ratio", "0.2",
+                "--selection_metric", "rouge_l_f1", "--train_eval_samples", "0",
+                "--early_stopping_patience", "1", "--model_path", str(destination),
+                "--train_csv_path", str(csv_path), "--dev_csv_path", str(csv_path),
+            ])
+            loader = DataLoader([(0, torch.rand(3, 32, 32), "what color ?", "red")])
+            evaluations = [{"loss": loss, "metrics": {name: score for name in SCIVQA_METRICS}}
+                           for loss, score in ((1.0, 0.6), (2.0, 0.7), (0.5, 0.65))]
+            scorer = type("Scorer", (), {"hash": "offline"})()
+            with patch("train._make_loader", return_value=loader), \
+                 patch("train.build_bertscore_scorer", return_value=scorer), \
+                 patch("test.evaluation", side_effect=evaluations) as evaluate, \
+                 redirect_stdout(io.StringIO()):
+                _run_training(args, torch.device("cpu"), 0, 1)
+            self.assertEqual(evaluate.call_count, 3)
+            self.assertTrue(all(call.kwargs["dataset"] == "scivqa" for call in evaluate.call_args_list))
+            best = torch.load(destination / "best.pt", weights_only=True)
+            last = torch.load(destination / "last.pt", weights_only=True)
+            self.assertEqual(best["epoch"], 2)
+            self.assertEqual(last["epoch"], 3)
+            self.assertEqual(last["epochs_without_improvement"], 1)
+            rows = [json.loads(line) for line in (destination / "metrics.jsonl").read_text().splitlines()]
+            self.assertEqual(rows[-1]["val_rouge_l_f1"], 0.65)
+            self.assertNotIn("train_rouge_l_f1", rows[-1])
+            self.assertEqual(_history_report(rows)["best_epoch"], 2)
+            manifest = json.loads((destination / "run_config.json").read_text())
+            self.assertEqual(manifest["warmup_steps"], 1)
+            self.assertEqual(manifest["train_eval_examples"], 0)
+            self.assertEqual(rows[0]["learning_rates"], {"decoder": 0.001, "encoder": 0.00001})
+            self.assertTrue((destination / "evaluation_metrics_plot.png").is_file())
 
     def test_shifted_targets_and_backward_for_single_image(self):
         model = self.make_model()
