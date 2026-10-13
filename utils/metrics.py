@@ -56,24 +56,6 @@ def normalize_text(text):
     return " ".join(str(text).casefold().strip().split())
 
 
-def normalize_llm_answer(text: str) -> str:
-    """Remove LLM whitespace/Markdown formatting while retaining answer content.
-
-    Handle actual and literal escaped newlines/tabs without decoding arbitrary
-    escapes or removing meaningful punctuation, numbers, Unicode, or case.
-    """
-    text = re.sub(r"\\(?:r\\n|[nrt])", "\n", text)
-    text = re.sub(r"(?m)^[ \t]*(?:`{3,}|~{3,})[ \t]*(?:[\w+-]+)?[ \t]*$", "", text)
-    text = re.sub(r"(?m)^[ \t]{0,3}(?:#{1,6}[ \t]+|>[ \t]?|[-+*][ \t]+)", "", text)
-    for marker in ("**", "__", "~~", "```", "``", "`", "*", "_"):
-        escaped = re.escape(marker)
-        boundary = r"(?<!\w)" if marker in {"*", "_", "__"} else ""
-        ending = r"(?!\w)" if marker in {"*", "_", "__"} else ""
-        text = re.sub(boundary + escaped + r"(.+?)" + escaped + ending,
-                      r"\1", text, flags=re.DOTALL)
-    return " ".join(text.split())
-
-
 def gqa_accuracy(reference, hypothesis):
     """Binary GQA exact match against one reference, with surrounding whitespace trimmed.
 

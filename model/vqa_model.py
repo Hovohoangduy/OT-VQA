@@ -8,8 +8,6 @@ from torch import nn
 from configs.config import Config
 from model.decoder_model import Decoder
 from model.features_extraction import AnswerEmbedding, ImageEmbedding, QuestionEmbedding, validate_english_text_model
-from model.fusion import (FUSION_METHODS, BANFusion, CrossAttentionFusion,
-                          QFormerFusion, SANFusion)
 from model.optimal_transport import PartialTransportFusion
 
 
@@ -22,8 +20,7 @@ class VQAModel(nn.Module):
                  freeze_answer_embeddings=False, ot_epsilon=0.05,
                  ot_iterations=20, ot_dustbin_mass=0.2, ot_dustbin_cost=1.0,
                  max_answer_tokens=Config.MAX_LEN_ANS,
-                 max_question_tokens=Config.MAX_LEN_QUES, fusion='ot',
-                 fusion_glimpses=2, fusion_queries=8, fusion_layers=2):
+                 max_question_tokens=Config.MAX_LEN_QUES, fusion='ot'):
         super().__init__()
         if output_size != d_model:
             raise ValueError('output_size must equal d_model')
@@ -31,8 +28,8 @@ class VQAModel(nn.Module):
             raise ValueError('max_answer_tokens must be at least 2')
         if max_question_tokens < 2:
             raise ValueError('max_question_tokens must be at least 2')
-        if fusion not in FUSION_METHODS:
-            raise ValueError(f'Unknown fusion: {fusion}; choose from {FUSION_METHODS}')
+        if fusion != 'ot':
+            raise ValueError('Only OT fusion is supported')
         if d_model % num_heads:
             raise ValueError('d_model must be divisible by num_heads')
         validate_english_text_model(text_model)
@@ -46,8 +43,7 @@ class VQAModel(nn.Module):
             output_size=output_size, d_model=d_model, num_heads=num_heads,
             ffn_hidden=ffn_hidden, drop_prob=drop_prob, num_layers=num_layers,
             freeze_answer_embeddings=freeze_answer_embeddings,
-            fusion=fusion, fusion_glimpses=fusion_glimpses,
-            fusion_queries=fusion_queries, fusion_layers=fusion_layers,
+            fusion=fusion,
             ot_epsilon=ot_epsilon, ot_iterations=ot_iterations,
             ot_dustbin_mass=ot_dustbin_mass, ot_dustbin_cost=ot_dustbin_cost,
             max_answer_tokens=max_answer_tokens,
@@ -73,21 +69,11 @@ class VQAModel(nn.Module):
         self.image_projection = nn.Identity() if image_dim == d_model else nn.Linear(image_dim, d_model)
         self.answer_projection = nn.Identity() if answer_dim == d_model else nn.Linear(answer_dim, d_model)
         text_dim = self.question_encoder.text_encoder.config.hidden_size
-        if fusion == 'ot':
-            self.ot_fusion = PartialTransportFusion(
-                text_dim=text_dim, d_model=d_model, epsilon=ot_epsilon,
-                iterations=ot_iterations, dustbin_mass=ot_dustbin_mass,
-                dustbin_cost=ot_dustbin_cost,
-            )
-        elif fusion == 'san':
-            self.fusion_module = SANFusion(text_dim, d_model, drop_prob, fusion_glimpses)
-        elif fusion == 'ban':
-            self.fusion_module = BANFusion(text_dim, d_model, drop_prob, fusion_glimpses)
-        elif fusion == 'cross_attention':
-            self.fusion_module = CrossAttentionFusion(text_dim, d_model, num_heads, drop_prob)
-        else:
-            self.fusion_module = QFormerFusion(text_dim, d_model, num_heads, drop_prob,
-                                               fusion_queries, fusion_layers)
+        self.ot_fusion = PartialTransportFusion(
+            text_dim=text_dim, d_model=d_model, epsilon=ot_epsilon,
+            iterations=ot_iterations, dustbin_mass=ot_dustbin_mass,
+            dustbin_cost=ot_dustbin_cost,
+        )
         self.decoder = Decoder(d_model, ffn_hidden, num_heads, drop_prob, num_layers)
         actual_vocab = self.answer_embedding.token_embeddings.word_embeddings.num_embeddings
         if vocab_size is not None and vocab_size != actual_vocab:
@@ -101,14 +87,11 @@ class VQAModel(nn.Module):
         image_embeddings, _ = self.image_model(images, image_ids=anno_ids)
         projected_images = self.image_projection(image_embeddings)
         question_tokens, blocked, _, question_global = self.question_encoder.encode_tokens(questions)
-        if return_transport and self.fusion != 'ot':
-            raise ValueError('Transport diagnostics are available only for OT fusion')
         kwargs = {'return_transport': True} if return_transport else {}
-        module = self.ot_fusion if self.fusion == 'ot' else self.fusion_module
         image_tokens = (projected_images[:, 1:] if self.image_model.has_cls_token
                         else projected_images)
-        return module(image_tokens, question_tokens, ~blocked,
-                      question_global=question_global, **kwargs)
+        return self.ot_fusion(image_tokens, question_tokens, ~blocked,
+                              question_global=question_global, **kwargs)
 
     def decode(self, input_ids, memory, causal=True, memory_blocked=None):
         target = self.answer_projection(self.answer_embedding.embed_ids(input_ids))

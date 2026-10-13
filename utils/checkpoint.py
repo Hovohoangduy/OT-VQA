@@ -7,7 +7,6 @@ import torch
 
 from configs.config import Config
 from model.vqa_model import VQAModel
-from model.fusion import FUSION_METHODS
 
 
 LEGACY_MAX_QUESTION_TOKENS = 28
@@ -19,7 +18,7 @@ MODEL_CONFIG_KEYS = {
     "drop_prob", "num_layers", "mode",
     "freeze_answer_embeddings", "ot_epsilon", "ot_iterations",
     "ot_dustbin_mass", "ot_dustbin_cost", "max_answer_tokens", "max_question_tokens",
-    "fusion", "fusion_glimpses", "fusion_queries", "fusion_layers",
+    "fusion",
 }
 
 
@@ -107,8 +106,8 @@ def read_checkpoint(checkpoint_path, device):
             "Legacy checkpoint was trained with the incorrect decoder/objective. "
             "Retrain with the corrected train.py before generating answers."
         )
-    if checkpoint.get("model_config", {}).get("fusion") not in FUSION_METHODS:
-        raise ValueError("Checkpoint must contain an OT model or a supported fusion baseline")
+    if checkpoint.get("model_config", {}).get("fusion", "ot") != "ot":
+        raise ValueError("Only OT checkpoints are supported; use compare-fusions for baseline checkpoints")
     return checkpoint
 
 

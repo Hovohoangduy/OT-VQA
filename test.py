@@ -99,8 +99,6 @@ def main():
     default = Path(args.model_path) / "best.pt"
     checkpoint = Path(args.checkpoint) if args.checkpoint else default
     model = load_model(checkpoint, device)
-    if args.fusion is not None and args.fusion != model.fusion:
-        raise ValueError(f"--fusion {args.fusion} does not match checkpoint fusion {model.fusion}")
     print(f"Fusion method: {model.fusion}")
     csv_path = args.dev_csv_path if args.split == "dev" else args.test_csv_path
     dataset_name = resolve_dataset(args.dataset, csv_path)

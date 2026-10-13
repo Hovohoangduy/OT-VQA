@@ -1,7 +1,7 @@
 # OT-VQA
 
 Visual question answering with a frozen MobileViTV2 image encoder, MiniLM question tokens,
-selectable multimodal fusion, and autoregressive answer generation.
+question-conditioned partial optimal transport fusion, and autoregressive answer generation.
 For a code-level walkthrough with diagrams and an interactive transport example,
 open [the architecture guide](docs/optimal_transport_architecture.html).
 
@@ -17,7 +17,7 @@ The default encoders are `apple/mobilevitv2-2.0-imagenet1k-256` for images and
 `sentence-transformers/all-MiniLM-L12-v2` for text. Images are resized to a
 288-pixel shortest edge, then center cropped to 256×256;
 the image encoder supplies spatial features, and MiniLM supplies token features
-plus a mean-pooled question vector. Existing checkpoints retain their saved
+plus a mean-pooled question vector. Existing OT checkpoints retain their saved
 encoder names and can still be loaded.
 
 To download random GQA subsets of 10,000 training, 1,000 validation, and 2,000
@@ -206,41 +206,10 @@ python test.py --dataset plantexpert --split dev \
 
 ## Train
 
-Choose a fusion method with `--fusion ot|san|ban|cross_attention|qformer`.
-The default is `ot`. SAN uses stacked question-guided image attention;
-BAN uses low-rank bilinear token-patch attention; cross attention uses
-question-to-image multihead attention; and Q-Former uses learned query tokens
-that interact with question tokens before attending to image patches. These
-are compact baselines in this shared VQA architecture, not reproductions of
-every component in the original SAN, BAN, or BLIP-2 systems. All methods use
-the same MobileViTV2, MiniLM, decoder, training loss, data splits, and answer metrics.
-The fusion method and its settings are saved in each checkpoint. `test.py`
-loads them automatically; an optional `--fusion` there checks that the
-checkpoint matches the requested method. `--resume` also checks the method.
-
-`--fusion_glimpses` sets SAN/BAN attention steps (default 2).
-`--fusion_queries` and `--fusion_layers` set Q-Former learned queries (8)
-and blocks (2). OT options apply only to `--fusion ot`.
-
-To train and evaluate all five methods on the same GQA splits and seed:
-
-```bash
-python -m scripts.compare_fusions --output_dir results/fusion_comparison \
-  --device cuda --epochs 10 --batch_size 4 --seeds 1105 1106 1107
-```
-
-The runner trains each method into its own directory, selects `best.pt` by
-lowest validation loss, evaluates the held-out test split, and writes
-`comparison.csv`, `summary.csv`, and `comparison.md`. It also saves per-run predictions,
-reports, manifests, and checkpoints. Use `--split dev` for a development-only
-comparison. Training flags not defined by the runner (such as `--d_model`,
-`--lr`, `--fusion_glimpses`, and `--text_model`) are passed to `train.py`.
-Completed checkpoints and reports are reused when rerunning the command;
-`--force` retrains and reevaluates the selected runs. Ensure identical flags
-and data when reusing an output directory. Throughput measurements depend on
-the machine and are not model-quality scores. The repository does not include
-trained checkpoints for these five methods, so the table is generated after
-the comparison run; the older CSVs in `results/` are separate experiments.
+Training uses OT fusion with the MobileViTV2 image encoder, MiniLM question
+encoder, and autoregressive answer decoder. OT settings are saved in each
+checkpoint and restored for evaluation and resumed training. `--fusion ot`
+remains accepted for existing commands; OT is the only supported method.
 
 For NVIDIA GPU training on Windows, install a CUDA-enabled `torch` and matching
 `torchvision` in your active environment using the
@@ -304,135 +273,7 @@ validation on your dataset.
 
 ## Evaluate
 
-### Zero-shot native LLM/VLM evaluation
-
-Use `scripts/evaluate_llm.py` for all pretrained vision-language models. It loads
-native Hugging Face Transformers checkpoints directly with the model's own
-processor. One evaluator handles GQA and PlantExpertVQA, with no server or GGUF
-backend. The old GGUF/LM Studio runners, Keye adapter, notebook generator, and
-bundled GGUF notebook have been removed.
-
-Install or update evaluation dependencies:
-
-```bash
-pip install -U -r requirements.txt
-python3 -m scripts.evaluate_llm --list-models
-```
-
-Change only `--model` to select a preset alias or its native repository ID:
-
-| Alias | Native checkpoint |
-| --- | --- |
-| `qwen3-vl-8b` (default) | [Qwen/Qwen3-VL-8B-Instruct](https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct) |
-| `internvl3.5-8b` | [OpenGVLab/InternVL3_5-8B-HF](https://huggingface.co/OpenGVLab/InternVL3_5-8B-HF) |
-| `ministral-3-8b` | [mistralai/Ministral-3-8B-Instruct-2512](https://huggingface.co/mistralai/Ministral-3-8B-Instruct-2512) |
-| `glm-4.6v-flash` | [zai-org/GLM-4.6V-Flash](https://huggingface.co/zai-org/GLM-4.6V-Flash) |
-| `gemma-4-e4b` | [google/gemma-4-E4B-it](https://huggingface.co/google/gemma-4-E4B-it) |
-
-Use InternVL's `-HF` checkpoint for the native Transformers architecture. GLM's
-9B Flash model uses the repository ID above. Gemma requires accepting Google's
-model license on Hugging Face and providing `HF_TOKEN` in your environment.
-Native checkpoint folders are also accepted through `--model` (or `--model-dir`).
-GGUF files, GGUF-only repositories, and `:Q4_K_M` suffixes are rejected. When a
-folder contains both formats, only native weights are loaded.
-
-Run a five-question GQA smoke evaluation, then evaluate the full split in a
-separate output folder:
-
-```bash
-python3 -m scripts.evaluate_llm --model Qwen/Qwen3-VL-8B-Instruct \
-  --limit 5 --output-dir results/qwen_smoke
-python3 -m scripts.evaluate_llm --model qwen3-vl-8b
-python3 -m scripts.evaluate_llm --model qwen3-vl-8b --resume
-```
-
-Defaults use `data/gqa_dataset/test.csv` and `data/gqa_dataset/images`.
-For PlantExpertVQA:
-
-```bash
-python3 -m scripts.evaluate_llm --model internvl3.5-8b --dataset plantexpert
-```
-
-For Kaggle, upload [evaluate_llm_kaggle.ipynb](notebooks/evaluate_llm_kaggle.ipynb),
-select **Settings → Accelerator → GPU T4 x2**, enable **Internet**, and attach your
-dataset. Edit `MODEL`, `DATASET`, `DATA_ROOT`, `QUESTIONS`, and `IMAGES` in the
-configuration cell, then **Run All**. Defaults use Qwen3-VL-8B-Instruct and the
-PlantExpert Kaggle path below. The notebook bundles the evaluator and metrics;
-no repository checkout is needed. It installs evaluation dependencies, checks
-exactly two visible GPUs, runs five smoke questions, then evaluates the full
-split. Model weights are balanced across both GPUs, and each run executes in a
-subprocess that releases memory when it exits. Separate smoke/full output folders
-live under `/kaggle/working/results`, with automatic resume for matching settings
-and reuse of the saved model commit. Restore saved results to the same path after
-starting a new Kaggle session. Set `RUN_SMOKE=False` to resume only the full run.
-For Gemma, add an `HF_TOKEN` Kaggle secret and enable `USE_KAGGLE_HF_TOKEN` after
-accepting the model license. Download the three result files from Kaggle's Output
-tab after saving a version. This is the only evaluation notebook; no separate
-notebook generator is retained.
-
-If you already have a repository checkout in Kaggle, the equivalent direct
-command for the attached PlantExpert dataset is:
-
-```bash
-!python -u -m scripts.evaluate_llm \
-  --model Qwen/Qwen3-VL-8B-Instruct --dataset plantexpert \
-  --questions /kaggle/input/datasets/duyho0511chill/plantexpert-dataset/plantexpert_dataset/test.csv \
-  --images /kaggle/input/datasets/duyho0511chill/plantexpert-dataset/plantexpert_dataset/images \
-  --output-dir /kaggle/working/results/qwen3_vl_8b_plantexpert
-```
-
-The evaluator uses every visible CUDA GPU, with Accelerate balancing weights
-and a default 12 GiB weight budget per GPU. To select two GPUs on a larger
-machine, set `CUDA_VISIBLE_DEVICES=0,1`. One sufficiently large CUDA GPU also
-works. Auto dtype selects FP16 on T4 and BF16 on Ampere or newer; override with
-`--dtype`. Attention defaults to PyTorch SDPA; `--attention-implementation eager`
-is available. The official Ministral checkpoint stores FP8 weights; the runner
-uses Transformers' `FineGrainedFP8Config(dequantize=True)` to load them in the
-selected floating-point dtype, including on T4. This increases weight memory.
-Weights must fit the selected GPUs without CPU/disk offload. Adjust
-`--gpu-memory-gib` for your hardware; images and generation need additional
-memory. The default prompt-plus-output limit is 8192 tokens (`--context-size`).
-Run a smoke evaluation on your GPUs before a full evaluation.
-
-Each example uses only the image, question, and fixed dataset instruction.
-Reference answers, dataset annotations, demonstrations, and chat history never
-enter the model prompt. Generation is greedy and requests thinking disabled
-through the model's chat template. Images use native processor preprocessing.
-GQA defaults to 64 output tokens; PlantExpert defaults to 256 (`--max-tokens`).
-Questions accept CSV (`image,question,answer`, with optional `question_id` or
-`anno_id`) or official GQA question JSON. Unlabeled examples produce predictions
-without scores. Use `--image-split` for images in a split subfolder.
-
-Only three result files are written per run:
-
-- `predictions.jsonl`: append-only per-question predictions, raw responses,
-  references, errors, latency, and lexical scores. On retries, the latest row for
-  a question ID takes precedence.
-- `report.json`: aggregate scores and completion status, including partial runs.
-- `run_config.json`: model identity, pinned revision (or local file hashes),
-  processor/model loading settings, prompt, dataset identity, and scoring options
-  checked by `--resume`.
-
-Default result folders are `results/<model>_<dataset>_zero_shot`. There are no
-CSV/JSON duplicate prediction exports, server logs, or ZIPs.
-`--resume` skips successful examples and retries failures; use identical flags
-and model files. For reproducible comparisons, use `--hf-revision <commit>`.
-A changed model revision, dataset, prompt, or loading/scoring configuration is
-rejected on resume. `--continue-on-error` records errors and continues; failed
-labeled examples count as wrong, while unattempted questions are excluded.
-
-GQA reports exact-match `accuracy` and case-insensitive `normalized_accuracy`.
-PlantExpert reports `em`, `token_f1`, `bleu_1`, `bleu_2`, `rouge_l`, and
-`bertscore_f1`, using the shared repository metrics. Formatting cleanup removes
-Markdown and repeated/escaped whitespace from predictions and references while
-preserving case, punctuation, and answer content. It does not extract answers
-from explanatory prose. Scores are fractions; rescaled BERTScore can be negative.
-BERTScore defaults to `bert-base-uncased` on CPU, batch size 16, with English
-baseline rescaling. Use `--no-bertscore` for lexical-only PlantExpert scoring,
-or configure `--bertscore-model`, `--bertscore-device`, `--bertscore-batch-size`,
-and `--no-bertscore-rescale`. The report records the scorer's model hash.
-
-### Evaluate a trained repository model
+### Evaluate a trained OT model
 
 ```bash
 python test.py --checkpoint data/gqa_model/best.pt --split dev \
@@ -468,7 +309,7 @@ or `scivqa` component (such as `data/scivqa_dataset/val.csv`) selects that
 dataset's scoring. Use `--dataset gqa` or `--dataset scivqa` for custom paths,
 or `--dataset plantexpert` to select the six PlantExpertVQA metrics explicitly.
 The same option works for
-`train.py`, `test.py`, and `python -m scripts.compare_fusions`.
+`train.py` and `test.py`.
 
 GQA uses [binary exact-match accuracy](https://cs.stanford.edu/people/dorarad/gqa/evaluate.html):
 each generated answer receives `1` if it matches the single reference answer
@@ -512,7 +353,7 @@ explicit project convention. Answers retain their original multiple-choice
 labels, numbers, and abstention text; scoring does not infer abstention from
 gold annotations or rewrite model responses to reproduce the paper's
 post-processing. Prediction exports retain `qa_pair_type` and `figure_type`.
-Training logs use `train_<metric>` and `val_<metric>`; fusion comparisons and
+Training logs use `train_<metric>` and `val_<metric>`;
 history diagnostics accept the same nine-score schema.
 
 For PlantExpertVQA and unrecognized dataset paths, evaluation reports the six PlantExpertVQA paper metrics: case-insensitive exact
@@ -551,10 +392,4 @@ python diagnose_training.py \
   --checkpoint data/gqa_model/best.pt \
   --dev_csv_path data/gqa_dataset/val.csv \
   --dev_img_path data/gqa_dataset/images
-```
-
-## Tests
-
-```bash
-python -m unittest discover -s tests
 ```

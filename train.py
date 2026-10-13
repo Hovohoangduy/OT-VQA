@@ -217,10 +217,6 @@ def _run_training(args, device, rank, world_size):
         raise ValueError("gradient_clip cannot be negative")
     if dataset_name != "gqa" and args.bertscore_batch_size < 1:
         raise ValueError("bertscore_batch_size must be positive")
-    for name in ("fusion_glimpses", "fusion_queries", "fusion_layers"):
-        value = getattr(args, name)
-        if value is not None and value < 1:
-            raise ValueError(f"{name} must be positive")
     seed_everything(args.seed + rank)
     if rank == 0:
         if world_size == 1:
@@ -241,13 +237,6 @@ def _run_training(args, device, rank, world_size):
             raise ValueError("Training can resume only from a version-3/4 checkpoint")
         text_model, image_model = resume["text_model"], resume["image_model"]
         stored_config = dict(resume["model_config"])
-        if args.fusion is not None and args.fusion != stored_config.get("fusion", "ot"):
-            raise ValueError("--fusion does not match the resume checkpoint")
-        for name, default in (("fusion_glimpses", 2), ("fusion_queries", 8),
-                              ("fusion_layers", 2)):
-            value = getattr(args, name)
-            if value is not None and value != stored_config.get(name, default):
-                raise ValueError(f"--{name} does not match the resume checkpoint")
         stored_answer_length = stored_config.get(
             "max_answer_tokens", resume.get("preprocessing", {}).get(
                 "max_answer_length", LEGACY_MAX_ANSWER_TOKENS)
@@ -279,10 +268,6 @@ def _run_training(args, device, rank, world_size):
                          output_size=args.d_model, d_model=args.d_model,
                          ffn_hidden=args.ffn_hidden, num_layers=args.num_layers,
                          num_heads=args.num_heads, drop_prob=args.drop_prob,
-                         fusion=args.fusion or 'ot',
-                         fusion_glimpses=args.fusion_glimpses or 2,
-                         fusion_queries=args.fusion_queries or 8,
-                         fusion_layers=args.fusion_layers or 2,
                          freeze_answer_embeddings=args.freeze_answer_embeddings,
                          ot_epsilon=args.ot_epsilon if args.ot_epsilon is not None else 0.05,
                          ot_iterations=args.ot_iterations if args.ot_iterations is not None else 20,

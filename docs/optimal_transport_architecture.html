@@ -111,7 +111,7 @@
       <a href="#learning">09 · Training &amp; generation</a>
       <a href="#configuration">10 · Configuration</a>
       <a href="#workflow">11 · Run &amp; evaluate</a>
-      <a href="#diagnostics">12 · Diagnostics &amp; tests</a>
+      <a href="#diagnostics">12 · Diagnostics</a>
       <a href="#source-map">13 · Source map</a>
       <a href="#comparison">14 · Comparing OT</a>
       <a href="#formal-method">15 · Formal methodology</a>
@@ -135,14 +135,14 @@
     <section id="overview">
       <div class="kicker">01 / The implemented system</div>
       <h2>Optimal transport is the fusion layer</h2>
-      <p class="lead">Given an image and an English question, <a href="../model/vqa_model.py"><code>VQAModel</code></a> extracts spatial image features and contextual question features. With <code>fusion='ot'</code>, <a href="../model/optimal_transport.py"><code>PartialTransportFusion</code></a> solves a differentiable matching problem between them. The matching determines which visual evidence enriches each question token.</p>
+      <p class="lead">Given an image and an English question, <a href="../model/vqa_model.py"><code>VQAModel</code></a> extracts spatial image features and contextual question features. The model always uses OT fusion: <a href="../model/optimal_transport.py"><code>PartialTransportFusion</code></a> solves a differentiable matching problem between them. The matching determines which visual evidence enriches each question token.</p>
       <div class="grid">
         <div class="card"><span class="tag">REPRESENT</span><h3>Keep local information</h3><p>Preserve spatial image locations and individual question tokens instead of reducing both inputs to a single vector before fusion.</p></div>
         <div class="card"><span class="tag">ALIGN</span><h3>Allocate shared mass</h3><p>Use one transport plan with prescribed row and column mass. Two dustbins give local content an alternative to matching directly.</p></div>
         <div class="card"><span class="tag">GENERATE</span><h3>Read grounded memory</h3><p>A causal answer decoder reads one global memory token plus visually enriched question tokens and predicts the next answer token.</p></div>
       </div>
       <div class="callout"><strong>What is learned?</strong><p>The question encoder, feature projections, memory construction, decoder, and vocabulary head learn from answer-token cross-entropy. The OT solver has no learnable weights of its own; gradients flow through its finite sequence of operations into the costs and features.</p></div>
-      <p class="small">This guide describes the checked-in OT implementation and its supporting pipeline. Other fusion implementations are outside the architecture walkthrough. The interactive example uses synthetic costs and is not a trained-model prediction.</p>
+      <p class="small">This guide describes the checked-in OT implementation and its supporting pipeline. The interactive example uses synthetic costs and is not a trained-model prediction.</p>
       <div class="callout"><strong>Reading path for writing a paper</strong><p>Read Sections 2–7 for the architecture, then <a href="#formal-method">formal methodology</a>, <a href="#derivations">derivations</a>, and the <a href="#algorithm">algorithm</a>. Use <a href="#paper-experiments">experiment design</a> to plan evidence and <a href="#manuscript">manuscript material</a> to draft the paper. Mathematical properties below are derived from this implementation; proposed experiments are explicitly labeled and no benchmark results are invented.</p></div>
     </section>
 
@@ -591,9 +591,6 @@ python diagnose_training.py --checkpoint data/gqa_ot/best.pt \
         </tbody>
       </table></div>
       <p><code>diagnose_training.py</code> summarizes OT mass/residuals and compares predictions after shuffling images or questions. It also detects repeated-answer collapse and rising validation loss. Its reliance/majority summaries use lexical metrics, so for GQA use <code>test.py --dataset gqa</code> for the primary exact-match answer metric.</p>
-      <h3>Existing tests covering this path</h3>
-      <p><a href="../tests/test_optimal_transport.py"><code>tests/test_optimal_transport.py</code></a> covers rectangular masked marginals, finite nonzero gradients, FP32 output from half-precision inputs, invalid masses, full OT, variable question lengths, grounded-memory masks, model generation, checkpoint round trips, learning a tiny answer, and training output artifacts. Tiny BERT/ViT backbones are initialized locally for those integration tests.</p>
-      <pre><code>python -m unittest discover -s tests -p 'test_optimal_transport.py'</code></pre>
       <details><summary>What does high dustbin flow mean?</summary><p>Local-to-global routes were favored under the current costs and capacity. This can reflect irrelevant content, poor representations, or the chosen hyperparameters. Inspect actual questions, residuals, and generated-answer quality before treating the flow as successful filtering.</p></details>
       <details><summary>What does low marginal residual prove?</summary><p>It indicates that the numerical plan closely satisfies its mass constraints. It does not prove semantic alignment, use of the correct image region, or improved VQA quality.</p></details>
       <details><summary>What are the main architectural limits?</summary><p>Local marginals are uniform; question tokenization may split a word into several equally weighted pieces. Cropping can remove visual evidence. Image features are frozen, and changing D does not fine-tune the image backbone. Fixed iteration counts can leave residuals. The global memory route can support answers without strong local grounding, so plan visualizations alone do not establish causal explanations.</p></details>
@@ -606,7 +603,7 @@ python diagnose_training.py --checkpoint data/gqa_ot/best.pt \
         <thead><tr><th>Source</th><th>Role in this architecture</th></tr></thead>
         <tbody>
           <tr><td><a href="../model/optimal_transport.py">model/optimal_transport.py</a></td><td><code>log_sinkhorn</code> and <code>PartialTransportFusion</code>: cost matrix, marginals, transport, visual gates, memory, diagnostics.</td></tr>
-          <tr><td><a href="../model/vqa_model.py">model/vqa_model.py</a></td><td>Model assembly, OT selection, image/answer projections, encode/decode, teacher forcing, greedy generation, vocabulary output head.</td></tr>
+          <tr><td><a href="../model/vqa_model.py">model/vqa_model.py</a></td><td>Model assembly, OT fusion, image/answer projections, encode/decode, teacher forcing, greedy generation, vocabulary output head.</td></tr>
           <tr><td><a href="../model/features_extraction.py">model/features_extraction.py</a></td><td>Image backbone and processor, question tokenizer/encoder/pooling, answer embeddings, English model-name validation.</td></tr>
           <tr><td><a href="../model/decoder_model.py">model/decoder_model.py</a></td><td>Scaled dot-product attention, answer self-attention, memory cross-attention, feed-forward, normalization, decoder stack.</td></tr>
           <tr><td><a href="../configs/config.py">configs/config.py</a> / <a href="../configs/arg_parser.py">arg_parser.py</a></td><td>Backbone names, transforms, length limits, training and evaluation flags, OT options.</td></tr>
@@ -619,7 +616,6 @@ python diagnose_training.py --checkpoint data/gqa_ot/best.pt \
           <tr><td><a href="../utils/checkpoint.py">utils/checkpoint.py</a></td><td>Atomic saving, supported-format loading, legacy-key adaptation, strict state restoration and resumable optimizer/RNG state.</td></tr>
           <tr><td><a href="../utils/device.py">utils/device.py</a> / <a href="../utils/metrics.py">metrics.py</a></td><td>Device selection and seed setup / generated-answer dataset metrics and BERTScore setup.</td></tr>
           <tr><td><a href="../diagnose_training.py">diagnose_training.py</a></td><td>OT mass and residual summaries, learning-history checks, shuffled-input sensitivity and prediction diversity.</td></tr>
-          <tr><td><a href="../tests/test_optimal_transport.py">tests/test_optimal_transport.py</a></td><td>Core solver, fusion, OT model and training/checkpoint integration coverage.</td></tr>
           <tr><td><a href="../requirements.txt">requirements.txt</a></td><td>PyTorch/Transformers, data/image tools, plotting and answer-metric dependencies.</td></tr>
         </tbody>
       </table></div>
@@ -629,8 +625,6 @@ python diagnose_training.py --checkpoint data/gqa_ot/best.pt \
       <div class="kicker">14 / Compare optimal transport</div>
       <h2>Measure the contribution of partial matching</h2>
       <p>Start with the full-OT ablation: train another OT run using <code>--ot_dustbin_mass 0</code> while holding encoders, splits, token limits, decoder, optimizer, epochs, and seeds fixed. This compares partial local matching with full local matching within the same OT architecture.</p>
-      <p><a href="../scripts/compare_fusions.py"><code>scripts/compare_fusions.py</code></a> can compare OT with the repository’s SAN, BAN, cross-attention, and Q-Former baselines. Those methods serve only as comparison labels here. Their component designs are outside this guide.</p>
-      <p>The runner chooses each run’s lowest-validation-loss checkpoint, evaluates the same chosen split, checks dataset hashes/counts and metric compatibility, and exports <code>comparison.csv</code>, <code>summary.csv</code>, and <code>comparison.md</code>. Multiple seeds support mean and sample standard deviation. No benchmark values are embedded in this architecture guide.</p>
       <p>Report generated-answer quality alongside runtime, trainable parameter count, and OT residual/mass diagnostics. Keep the test split for final comparison and tune OT settings on validation data. Stronger local alignment or lower transport costs alone do not establish better generated answers.</p>
     </section>
     <section id="formal-method">
@@ -859,7 +853,7 @@ For T=D=384:               592,512 parameters</div>
       </table></div>
       <p>For PlantExpert, use a separate table with EM, token F1, BLEU-1/2, ROUGE-L, and BERTScore F1; do not put those labels on GQA results. Add mean ± standard deviation across seeds, checkpoint epoch, trainable parameters, CUDA peak memory when applicable, and both residuals in a supplementary table. A low teacher-forced loss and good greedy answers measure different behavior and should not be interchanged.</p>
       <h3>Uncertainty and fair timing</h3>
-      <p>Use the same seed list and data partitions across compared configurations. Three or more seeds is a reasonable proposed starting point if compute permits; two suffice only to define a sample standard deviation. Standard deviation across training seeds is not a confidence interval over examples. If estimating uncertainty in paired prediction differences, retain per-example predictions; use image-level resampling when several questions share an image. Bootstrap and significance analysis require additional analysis beyond the current comparison runner.</p>
+      <p>Use the same seed list and data partitions across compared configurations. Three or more seeds is a reasonable proposed starting point if compute permits; two suffice only to define a sample standard deviation. Standard deviation across training seeds is not a confidence interval over examples. If estimating uncertainty in paired prediction differences, retain per-example predictions; use image-level resampling when several questions share an image. Bootstrap and significance analysis require additional analysis beyond the current evaluation pipeline.</p>
       <p>Report hardware, software versions, precision, batch size, actual generated lengths, token limits, and timing scope. <code>test.py</code> measures a pass containing data iteration, encoding, teacher-forced decoding, and generation; this is not pure single-answer inference latency. It excludes subsequent answer scoring. Its timing explicitly synchronizes CUDA, but does not explicitly synchronize MPS, so dedicated warmup/synchronization controls are needed for precise device comparisons.</p>
       <h3>Transport and behavioral figures</h3>
       <ol class="steps">
@@ -925,7 +919,7 @@ h_0 &amp;= \operatorname{LN}_{\mathrm{glob}}(W_0[\bar x;\bar q]+b_0),
       <h3>Suggested manuscript outline</h3>
       <ol class="steps">
         <li><strong>Introduction.</strong> Explain incomplete local correspondence in VQA, state the hypothesis that constrained partial matching may help, and identify the adaptation and evaluation questions without asserting unmeasured gains.</li>
-        <li><strong>Related work.</strong> Cover VQA grounding, entropic transport, and global-feature partial matching. Mention other repository methods only as comparison baselines; their implementations do not need architecture sections in this guide.</li>
+        <li><strong>Related work.</strong> Cover VQA grounding, entropic transport, and global-feature partial matching. Discuss relevant prior fusion methods in the literature.</li>
         <li><strong>Method.</strong> Problem definition → features/masks → extended costs/marginals → finite solver → gated memory → answer objective. Include Algorithm 1, the architecture figure, and the dustbin mass identity.</li>
         <li><strong>Experiments.</strong> Dataset provenance and actual subsets, train/validation/test protocol, primary metrics, hyperparameter selection budget, software/hardware, parameter counts, and matched comparison settings.</li>
         <li><strong>Results and analysis.</strong> Main answer-quality table, OT ablations, convergence/runtime, representative successes/failures, and input-reliance diagnostics. Keep planned rows marked pending until measurements exist.</li>
