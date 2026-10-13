@@ -9,15 +9,8 @@ def apply_dataset_defaults(parser, argv):
     """Select built-in Python defaults before parsing explicit CLI overrides."""
     bootstrap = argparse.ArgumentParser(add_help=False)
     bootstrap.add_argument("--dataset", type=str.lower)
-    bootstrap.add_argument("--resume")
     selected = bootstrap.parse_known_args(argv)[0]
-    defaults = dict(Config.DATASET_DEFAULTS.get(selected.dataset, {}))
-    if selected.resume:
-        # Let training recover optimizer groups and selection from the checkpoint.
-        # Explicit flags are still parsed below and checked for compatibility.
-        defaults.pop("encoder_lr", None)
-        defaults.pop("selection_metric", None)
-    parser.set_defaults(**defaults)
+    parser.set_defaults(**Config.DATASET_DEFAULTS.get(selected.dataset, {}))
 
 
 def get_args(argv=None, *, evaluation=False):
@@ -73,7 +66,7 @@ def get_args(argv=None, *, evaluation=False):
     )
     parser.add_argument(
         "--early_stopping_patience", type=int, default=8,
-        help="Stop after this many epochs without improvement in the selection metric; 0 disables",
+        help="Stop after this many epochs without lower validation loss; 0 disables",
     )
     parser.add_argument("--d_model", type=int, default=384)
     parser.add_argument("--ffn_hidden", type=int, default=1024)
