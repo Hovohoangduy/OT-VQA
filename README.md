@@ -88,14 +88,24 @@ python train.py --dataset scivqa
 ```
 
 [`configs/config.py`](configs/config.py) supplies the split/image paths,
-OT fusion, MiniLM/MobileViTV2 backbones, batch size 4, up to 30 epochs, AdamW
-learning rate `1e-5`, weight decay `0.05`, label smoothing `0.1`, gradient clipping
-at `1.0`, and patience 8. These are project training choices. The reference
+CUDA device, and output directory for the Kaggle SciVQA dataset. Edit
+`Config.SCIVQA_DATA_ROOT` to change the dataset folder; checkpoints and logs
+default to `/kaggle/working/scivqa_model_tuned`. For a local run, override the
+CSV/image paths, `--model_path`, and `--device` to match your machine.
+The preset uses
+OT fusion, MiniLM/MobileViTV2 backbones, batch size 16 per GPU, up to 60 epochs,
+AdamW learning rates `1e-4` for the new decoder/fusion layers and `1e-5` for
+the pretrained text encoder, 5% warmup, weight decay `0.01`, label smoothing
+`0.05`, dropout `0.1`, gradient clipping at `1.0`, and patience 10. Training
+answer metrics use a fixed 512-example subset; image loading uses two workers
+per GPU. These are starting tuning choices, not a measured score improvement.
+The reference
 [SciVQA paper](https://arxiv.org/html/2507.06183v1) primarily evaluates prompting
 and ensembles; Appendix D mentions LoRA on 5,000 Bespoke MiniChart examples
 but provides no full OT training recipe. This preset trains on the complete
 15,120/1,680 train/validation splits and reserves the 4,200 test examples for
-final evaluation. Checkpoints still use the lowest validation loss.
+final evaluation. SciVQA checkpoints maximize validation ROUGE-L F1 by default;
+pass `--selection_metric loss` to select by validation loss instead.
 
 The preset allows 256 question tokens and 64 answer tokens, including special
 tokens. The downloaded splits reach 210/37 tokens with the default MiniLM
@@ -111,7 +121,7 @@ use the shared defaults. Explicit CLI flags override these settings; for example
 add `--device cuda --batch_size 2` to reduce GPU memory. Edit `configs/config.py`
 to change the dataset defaults.
 Training records the resolved arguments and all nine SciVQA metrics in
-`run_config.json` and `metrics.jsonl` under `data/scivqa_model`.
+`run_config.json` and `metrics.jsonl` under `/kaggle/working/scivqa_model_tuned`.
 
 Evaluate the best checkpoint on validation or test:
 
@@ -128,22 +138,12 @@ python test.py --dataset scivqa --split test \
 For a SciVQA optimization experiment on two Kaggle GPUs, start a fresh run with:
 
 ```bash
-!torchrun --standalone --nnodes=1 --nproc_per_node=2 train.py \
-  --dataset scivqa --device cuda --fusion ot \
-  --epochs 60 --batch_size 16 \
-  --lr 1e-4 --encoder_lr 1e-5 --warmup_ratio 0.05 \
-  --weight_decay 0.01 --label_smoothing 0.05 --drop_prob 0.1 \
-  --gradient_clip 1.0 --early_stopping_patience 10 \
-  --selection_metric rouge_l_f1 --train_eval_samples 512 --num_workers 2 \
-  --train_csv_path /kaggle/input/datasets/duyho2907/sci-vqa-dataset-nganga01/scivqa_dataset/train.csv \
-  --dev_csv_path /kaggle/input/datasets/duyho2907/sci-vqa-dataset-nganga01/scivqa_dataset/val.csv \
-  --img_path /kaggle/input/datasets/duyho2907/sci-vqa-dataset-nganga01/scivqa_dataset/images \
-  --model_path /kaggle/working/scivqa_model_tuned
+!torchrun --standalone --nnodes=1 --nproc_per_node=2 train.py --dataset scivqa
 ```
 
 Use the updated repository for these flags. Remove the leading `!` outside a
 notebook. These values are a starting experiment, not a measured improvement.
-With two workers, batch size 16 means 32 examples per optimizer update.
+With two GPUs, batch size 16 means 32 examples per optimizer update.
 `--lr` trains the new fusion, projections, decoder, and vocabulary head;
 `--encoder_lr` trains the pretrained question encoder and any unfrozen answer
 embeddings. The image encoder remains frozen. Warmup takes 5% of the planned
@@ -152,10 +152,11 @@ as many updates per epoch as batch size 32 on the same two GPUs.
 
 `--selection_metric rouge_l_f1` maximizes full-validation ROUGE-L F1 for both
 `best.pt` and early stopping. Use `bertscore_f1` if that is your primary objective.
-The default still minimizes validation loss. `--train_eval_samples 512` scores a
-fixed, seeded random training subset each epoch; it does not reduce the examples
+SciVQA defaults to ROUGE-L F1; other datasets minimize validation loss.
+`--train_eval_samples 512` scores a fixed, seeded random training subset each
+epoch; it does not reduce the examples
 used for optimization or validation. Use `0` to skip training-answer scoring, or
-`-1` (default) to score the full training set. Subset training metrics should only
+`-1` to score the full training set (the default for other datasets). Subset training metrics should only
 be compared across runs with the same seed and sample count. `--num_workers`
 controls image-loading processes per GPU. BERTScore remains on CPU by default;
 `--bertscore_device cuda --bertscore_batch_size 4` can speed it up if the primary
@@ -169,7 +170,8 @@ winner with multiple seeds, then evaluate the held-out test split once. A longer
 content near figure edges; learning-rate tuning cannot restore missing pixels.
 
 For resuming, keep the schedule settings and total epoch target from the
-original run. Optimizer state restores its saved learning rates. A checkpoint
+original run; for older runs without warmup, pass `--warmup_ratio 0`. Optimizer
+state restores its saved learning rates. A checkpoint
 with separate encoder/decoder groups recreates those groups automatically; an
 older single-LR checkpoint needs a fresh run to use `--encoder_lr`. The stored
 selection metric is inherited on resume, and switching it is rejected.
@@ -262,7 +264,8 @@ stops with an error instead of training on CPU. Reduce `--batch_size` from its
 default of 4 if the GPU runs out of memory. `--device auto` also uses CUDA when
 available, but can fall back to another device.
 
-Training writes `last.pt`, the lowest-validation-loss checkpoint as `best.pt`, a JSONL
+Training writes `last.pt`, the best checkpoint under the validation selection
+metric as `best.pt` (ROUGE-L F1 for SciVQA, loss for other datasets), a JSONL
 metric history, an evaluation plot, and `run_config.json` with dataset hashes.
 Add `--save_every_epoch` to retain `epoch_0001.pt`, `epoch_0002.pt`, and so on.
 Each epoch file is a full resumable checkpoint, so 100 files can use substantial disk space.
@@ -301,264 +304,133 @@ validation on your dataset.
 
 ## Evaluate
 
-### GGUF and Transformers vision models on Kaggle with two GPUs
+### Zero-shot native LLM/VLM evaluation
 
-Import [the self-contained Kaggle notebook](notebooks/evaluate_ministral_3_8b_kaggle.ipynb)
-into Kaggle, select **GPU T4 x2**, enable **Internet**, and attach your dataset.
-Set `QUESTIONS` and `IMAGES` in the first code cell, then run all cells. The
-notebook defaults to the PlantExpertVQA Kaggle paths used above; set
-`DATASET = "gqa"` and the corresponding paths for GQA.
+Use `scripts/evaluate_llm.py` for all pretrained vision-language models. It loads
+native Hugging Face Transformers checkpoints directly with the model's own
+processor. One evaluator handles GQA and PlantExpertVQA, with no server or GGUF
+backend. The old GGUF/LM Studio runners, Keye adapter, notebook generator, and
+bundled GGUF notebook have been removed.
 
-The default downloads the official
-[Ministral 3 8B GGUF](https://huggingface.co/mistralai/Ministral-3-8B-Instruct-2512-GGUF/tree/main)
-Q4_K_M weights and BF16 vision projector, builds CUDA-enabled llama.cpp
-`v0.6.0`, and runs five questions before the full evaluation. Q5_K_M and Q8_0
-are automatically detected when available. The model is split across both GPUs using
-`--split-mode layer --tensor-split 1,1`; questions run sequentially through one
-server. This uses llama.cpp model splitting rather than PyTorch `torchrun`.
-The server log shows CUDA offload and device allocations.
+Install or update evaluation dependencies:
 
-If a Kaggle build reports `CUDA::cuda_driver` was not found, add
-`"-DGGML_CUDA_NO_VMM=ON"` to the CMake configuration arguments and rerun the
-build cell. The notebook includes this flag: it disables CUDA virtual memory
-management while retaining CUDA inference and model splitting across both GPUs.
-The existing llama.cpp clone and build directory can be reused.
-
-Each GGUF run automatically chooses a free local server port. The port check enables
-`SO_REUSEADDR` so closing smoke-test connections do not block the next run.
-Use `--server-port 8081` to set a specific port or `--server-port 0` for automatic
-selection. Resume permits a different local port while checking every other
-model and evaluation setting.
-
-To switch models, change only `MODEL_DIR`:
-
-```python
-MODEL_DIR = "mistralai/Ministral-3-8B-Instruct-2512-GGUF"  # Hugging Face repo ID or URL
-# Or: MODEL_DIR = "/kaggle/input/my-vision-model/gguf"     # Local model folder
-# Or: MODEL_DIR = "owner/model-GGUF:Q8_0"                # Explicit HF quantization
-# CapRL: MODEL_DIR = "Jobaar/CapRL-InternVL3.5-8B-GGUF:Q4_K_M"
-# Original CapRL Safetensors: MODEL_DIR = "internlm/CapRL-InternVL3.5-8B"
+```bash
+pip install -U -r requirements.txt
+python3 -m scripts.evaluate_llm --list-models
 ```
 
-The notebook uses `scripts.evaluate_kaggle_vlm` to detect model files and select
-the backend. `BACKEND = "auto"` prefers GGUF when both formats are present;
-set `BACKEND = "transformers"` or `"gguf"` to override this. Re-run the backend
-selection and build cells after changing the model or backend settings.
+Change only `--model` to select a preset alias or its native repository ID:
 
-For GGUF, the runner discovers weights and the matching vision projector, derives
-the server alias, and creates model-specific results and download folders.
-Automatic selection prefers Q4_K_M, Q5_K_M, then Q8_0; a single available
-quantization also works. A local folder must contain one model family and its
-matching `mmproj` or `projector` GGUF. Model weight shards are supported.
-Local files are used directly without a Hugging Face download. Missing or
-ambiguous files produce an error before starting the server. Models must
-support vision and be compatible with the selected llama.cpp version.
+| Alias | Native checkpoint |
+| --- | --- |
+| `qwen3-vl-8b` (default) | [Qwen/Qwen3-VL-8B-Instruct](https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct) |
+| `internvl3.5-8b` | [OpenGVLab/InternVL3_5-8B-HF](https://huggingface.co/OpenGVLab/InternVL3_5-8B-HF) |
+| `ministral-3-8b` | [mistralai/Ministral-3-8B-Instruct-2512](https://huggingface.co/mistralai/Ministral-3-8B-Instruct-2512) |
+| `glm-4.6v-flash` | [zai-org/GLM-4.6V-Flash](https://huggingface.co/zai-org/GLM-4.6V-Flash) |
+| `gemma-4-e4b` | [google/gemma-4-E4B-it](https://huggingface.co/google/gemma-4-E4B-it) |
 
-For native Transformers/Safetensors repositories, such as
-`internlm/CapRL-InternVL3.5-8B`, the notebook skips the llama.cpp build and uses
-`AutoProcessor` and `AutoModelForImageTextToText` with Accelerate. Dependencies
-are installed automatically. The processor and weight shards use the same pinned
-HF revision. On T4 GPUs, FP16 weights are balanced across both GPUs with a 12 GiB
-weight budget per GPU, leaving room for image processing and the generation cache.
-Weights must fit on the GPUs; CPU/disk offload is not used. These models need
-a compatible multimodal chat processor and a supported Transformers architecture;
-legacy custom architectures may require additional integration. The CLI supports
-`--dtype float16` and `--gpu-memory-gib 12` for explicit settings. Custom repository
-code is disabled unless `TRUST_REMOTE_CODE = True` is set in the notebook or
-`--trust-remote-code` is supplied. Registered custom model classes are selected
-from `config.json` when custom code is enabled. The older
-`scripts.evaluate_kaggle_ministral` entry point remains GGUF-only.
+Use InternVL's `-HF` checkpoint for the native Transformers architecture. GLM's
+9B Flash model uses the repository ID above. Gemma requires accepting Google's
+model license on Hugging Face and providing `HF_TOKEN` in your environment.
+Native checkpoint folders are also accepted through `--model` (or `--model-dir`).
+GGUF files, GGUF-only repositories, and `:Q4_K_M` suffixes are rejected. When a
+folder contains both formats, only native weights are loaded.
 
-For `Kwai-Keye/Keye-VL-1_5-8B`, set `TRUST_REMOTE_CODE = True`. This model uses
-its registered `AutoModel` and separate image preprocessing; the runner appends
-`/no_think` to each question, as documented by the
-[model author](https://huggingface.co/Kwai-Keye/Keye-VL-1_5-8B#keye-vl-15-inference),
-and records that setting for resume checks. Its
-[upstream model code](https://huggingface.co/Kwai-Keye/Keye-VL-1_5-8B/blob/b4d413e4f42a3999af1f5ba0e281c7d51d6b93de/modeling_keye_vl_1_5.py)
-requires FlashAttention-2 even when SDPA is requested. The runner now stages
-a local adaptation when `ATTENTION_IMPLEMENTATION = "auto"` or `"sdpa"`:
-the text decoder uses upstream SDPA, vision rotary embeddings use PyTorch, and
-each packed image sequence receives separate SDPA attention. **Use this path
-for Keye on Kaggle T4 x2; no `flash-attn` installation is needed.** Original
-model files and weights are unchanged. The original and adapted code hashes
-are recorded in the run configuration so resume detects implementation changes.
-Run the five-question smoke test to validate inference on your Kaggle session.
+Run a five-question GQA smoke evaluation, then evaluate the full split in a
+separate output folder:
 
-Explicit `ATTENTION_IMPLEMENTATION = "flash_attention_2"` retains upstream
-code and installs FlashAttention. The stock CUDA
-[FlashAttention-2 implementation](https://github.com/Dao-AILab/flash-attention#nvidia-cuda-support)
-requires Ampere-or-newer GPUs; Kaggle T4 x2 cannot run that attention backend.
-The notebook rejects explicit FlashAttention on incompatible hardware before
-downloading weights. Native CapRL InternVL continues to use SDPA on T4 GPUs.
+```bash
+python3 -m scripts.evaluate_llm --model Qwen/Qwen3-VL-8B-Instruct \
+  --limit 5 --output-dir results/qwen_smoke
+python3 -m scripts.evaluate_llm --model qwen3-vl-8b
+python3 -m scripts.evaluate_llm --model qwen3-vl-8b --resume
+```
 
-A `CalledProcessError` only reports that the evaluation subprocess failed. The
-updated smoke and full-run cells stream both stdout and stderr and save them to
-`/kaggle/working/vlm-smoke.log` and `vlm-full.log`. Their failure exceptions include
-the last 30 lines, exposing the actual model-loading or inference error.
+Defaults use `data/gqa_dataset/test.csv` and `data/gqa_dataset/images`.
+For PlantExpertVQA:
 
-The notebook bundles the existing evaluator and metrics, so no repository
-upload is needed. GQA uses exact-match accuracy; PlantExpert uses the same six
-repository metrics described below. BERTScore runs on CPU by default. Set
-`NO_BERTSCORE = True` to skip it. Results and server logs are saved under
-`/kaggle/working`, with a ZIP download in the last cell. Save a Kaggle notebook
-version to preserve these files.
+```bash
+python3 -m scripts.evaluate_llm --model internvl3.5-8b --dataset plantexpert
+```
 
-The full-run cell automatically adds `--resume` when `run_config.json` exists,
-reusing successful predictions and retrying failed or unfinished questions.
-Run it with identical model and evaluation settings. Set `RESUME = True` to
-require a saved run explicitly. A nonempty folder without `run_config.json`
-stops before starting the server; preserve its files and use a new output directory.
-For a new session, copy the saved full-run directory back to its original
-working path. Resume checks include the resolved HF revision, backend versions,
-dtype or GGUF quantization, GPU placement and context size. Prefer a fixed `HF_REVISION` commit
-for comparisons using the same HF model. Local weights and projectors are
-fingerprinted with SHA-256 to guard against changed files. Failed requests
-stop by default, preserve partial results, and are retried on resume.
+For Kaggle, upload [evaluate_llm_kaggle.ipynb](notebooks/evaluate_llm_kaggle.ipynb),
+select **Settings → Accelerator → GPU T4 x2**, enable **Internet**, and attach your
+dataset. Edit `MODEL`, `DATASET`, `DATA_ROOT`, `QUESTIONS`, and `IMAGES` in the
+configuration cell, then **Run All**. Defaults use Qwen3-VL-8B-Instruct and the
+PlantExpert Kaggle path below. The notebook bundles the evaluator and metrics;
+no repository checkout is needed. It installs evaluation dependencies, checks
+exactly two visible GPUs, runs five smoke questions, then evaluates the full
+split. Model weights are balanced across both GPUs, and each run executes in a
+subprocess that releases memory when it exits. Separate smoke/full output folders
+live under `/kaggle/working/results`, with automatic resume for matching settings
+and reuse of the saved model commit. Restore saved results to the same path after
+starting a new Kaggle session. Set `RUN_SMOKE=False` to resume only the full run.
+For Gemma, add an `HF_TOKEN` Kaggle secret and enable `USE_KAGGLE_HF_TOKEN` after
+accepting the model license. Download the three result files from Kaggle's Output
+tab after saving a version. This is the only evaluation notebook; no separate
+notebook generator is retained.
 
-With the repository files and backend dependencies already available, the runner
-can also be invoked directly from a notebook cell:
+If you already have a repository checkout in Kaggle, the equivalent direct
+command for the attached PlantExpert dataset is:
 
-```python
-!python -u -m scripts.evaluate_kaggle_vlm \
-  --model-dir internlm/CapRL-InternVL3.5-8B \
-  --dataset plantexpert \
+```bash
+!python -u -m scripts.evaluate_llm \
+  --model Qwen/Qwen3-VL-8B-Instruct --dataset plantexpert \
   --questions /kaggle/input/datasets/duyho0511chill/plantexpert-dataset/plantexpert_dataset/test.csv \
   --images /kaggle/input/datasets/duyho0511chill/plantexpert-dataset/plantexpert_dataset/images \
-  --output-dir /kaggle/working/results/caprl_plantexpert
+  --output-dir /kaggle/working/results/qwen3_vl_8b_plantexpert
 ```
 
-This accepts the evaluator's existing flags, including `--limit`, `--resume`,
-`--max-tokens` and `--no-bertscore`. Add `--llama-server` for a different binary
-path (GGUF only), `--quantization Q8_0` for another GGUF quantization, or `--context-size 4096`
-for a smaller context. The default binary path is
-`/kaggle/working/llama.cpp/build/bin/llama-server`. Regenerate the bundled notebook
-after source edits with `python3 -m scripts.build_kaggle_notebook`.
+The evaluator uses every visible CUDA GPU, with Accelerate balancing weights
+and a default 12 GiB weight budget per GPU. To select two GPUs on a larger
+machine, set `CUDA_VISIBLE_DEVICES=0,1`. One sufficiently large CUDA GPU also
+works. Auto dtype selects FP16 on T4 and BF16 on Ampere or newer; override with
+`--dtype`. Attention defaults to PyTorch SDPA; `--attention-implementation eager`
+is available. The official Ministral checkpoint stores FP8 weights; the runner
+uses Transformers' `FineGrainedFP8Config(dequantize=True)` to load them in the
+selected floating-point dtype, including on T4. This increases weight memory.
+Weights must fit the selected GPUs without CPU/disk offload. Adjust
+`--gpu-memory-gib` for your hardware; images and generation need additional
+memory. The default prompt-plus-output limit is 8192 tokens (`--context-size`).
+Run a smoke evaluation on your GPUs before a full evaluation.
 
-### Zero-shot Gemma 3n E4B with LM Studio
+Each example uses only the image, question, and fixed dataset instruction.
+Reference answers, dataset annotations, demonstrations, and chat history never
+enter the model prompt. Generation is greedy and requests thinking disabled
+through the model's chat template. Images use native processor preprocessing.
+GQA defaults to 64 output tokens; PlantExpert defaults to 256 (`--max-tokens`).
+Questions accept CSV (`image,question,answer`, with optional `question_id` or
+`anno_id`) or official GQA question JSON. Unlabeled examples produce predictions
+without scores. Use `--image-split` for images in a split subfolder.
 
-Load `lmstudio-community/gemma-3n-E4B-it-MLX-4bit` in LM Studio and start its local
-server on port 1234. This evaluator uses Python 3.9+. GQA scoring and PlantExpert
-lexical scoring use only the standard library; PlantExpert BERTScore also needs
-`bert-score` and its dependencies. The OpenAI Python package is not required.
-LM Studio supports the
-[OpenAI-compatible chat endpoint](https://lmstudio.ai/docs/developer/openai-compat/chat-completions).
-Run these commands from the repository root:
+Only three result files are written per run:
 
-```bash
-# Check the exact API model identifier.
-python3 -m scripts.evaluate_gqa_lmstudio --list-models
+- `predictions.jsonl`: append-only per-question predictions, raw responses,
+  references, errors, latency, and lexical scores. On retries, the latest row for
+  a question ID takes precedence.
+- `report.json`: aggregate scores and completion status, including partial runs.
+- `run_config.json`: model identity, pinned revision (or local file hashes),
+  processor/model loading settings, prompt, dataset identity, and scoring options
+  checked by `--resume`.
 
-# First check five examples in a separate output directory.
-python3 -m scripts.evaluate_gqa_lmstudio --limit 5 --output-dir results/gemma_smoke
+Default result folders are `results/<model>_<dataset>_zero_shot`. There are no
+CSV/JSON duplicate prediction exports, server logs, or ZIPs.
+`--resume` skips successful examples and retries failures; use identical flags
+and model files. For reproducible comparisons, use `--hf-revision <commit>`.
+A changed model revision, dataset, prompt, or loading/scoring configuration is
+rejected on resume. `--continue-on-error` records errors and continues; failed
+labeled examples count as wrong, while unattempted questions are excluded.
 
-# Evaluate every row in data/gqa_dataset/test.csv (2,000 in the downloaded subset).
-python3 -m scripts.evaluate_gqa_lmstudio
-
-# Resume the full run after an interruption, using its original flags.
-python3 -m scripts.evaluate_gqa_lmstudio --resume
-```
-
-Each question gets a fresh request containing the original image and question,
-with a short-answer instruction, temperature 0, and no examples or reference
-answers. The server handles image preprocessing. The default URL is
-`http://127.0.0.1:1234/v1`; override it with `--base-url`. If the model identifier
-differs, pass the exact ID printed by `--list-models` with `--model`.
-If server authentication is enabled, set `LM_STUDIO_API_KEY` in your environment.
-
-Results go to `results/gemma3n_e4b_mlx_4bit_gqa_zero_shot/`: `predictions.jsonl` retains
-the raw responses and token usage as each request finishes, `predictions.csv`
-contains predictions and per-question scores, and `report.json` contains
-aggregate metrics and the run settings. `run_config.json` guards resume against
-changed question files or inference settings. Existing outputs require
-`--resume` or a fresh directory. The script stops on errors by default;
-`--continue-on-error` records failures and continues. Failed labeled requests
-count as incorrect, and resume retries them. `--max-tokens` (default 64) and
-`--timeout` (default 180 seconds) are configurable; the report counts responses
-that reached the token limit. Temperature 0 and a seed reduce sampling variation,
-but results can still vary between model quantizations and server versions.
-
-The report's `accuracy` is binary exact-match accuracy (0–1) after formatting
-cleanup of predictions and references. Actual and literal escaped newlines/tabs
-become spaces; repeated whitespace collapses; Markdown emphasis (`**red**`),
-inline code, code fences, headings, and bullet markers are removed.
-For example, `**red**\n` becomes `red`, and `leaf\nspot` becomes `leaf spot`.
-Case and meaningful punctuation (decimals, hyphens, apostrophes) are preserved.
-`normalized_accuracy` additionally ignores case. Answers are not extracted from
-explanations. The trained repository model's GQA scorer still uses strict exact
-match with surrounding whitespace trimmed, so this LLM cleanup should be noted
-when comparing results. Original LLM text remains in `raw_response` in
-`predictions.jsonl`; exported predictions contain the cleaned answer.
-Resuming an older run cleans and rescores saved predictions without regenerating
-successful answers. The report and run configuration record the normalization.
-Partial reports score attempted questions and explicitly indicate `complete: false`.
-This computes answer accuracy, not GQA's other scene-graph-based metrics.
-
-The repository's `test.csv` is a held-out subset of the **labeled validation
-split**, not the official GQA hidden test split. To evaluate official question
-JSON and its image directory instead:
-
-```bash
-python3 -m scripts.evaluate_gqa_lmstudio \
-  --questions /path/to/val_balanced_questions.json \
-  --images /path/to/gqa/images \
-  --output-dir results/gemma_official_val
-```
-
-Official JSON maps question IDs to objects containing `imageId`, `question`,
-and optionally `answer`. Unlabeled files produce predictions without accuracy.
-`gqa_predictions.json` uses GQA's `questionId`/`prediction` format; use official
-question JSON for official evaluation, because this repository's CSV `anno_id`
-values identify images rather than official questions. `--limit N` always selects
-the first N rows, so a smoke run is not a randomly sampled benchmark score.
-
-### Zero-shot PlantExpertVQA with LM Studio
-
-Use the same evaluator with `--dataset plantexpert`. This selects
-`data/plantexpert_dataset/test.csv`, `data/plantexpert_dataset/images`, and
-`results/gemma3n_e4b_mlx_4bit_plantexpert_zero_shot/` by default. Load the vision model
-and start the LM Studio server as above.
-
-```bash
-# Check five questions using lexical metrics, with no extra dependencies.
-python3 -m scripts.evaluate_gqa_lmstudio \
-  --dataset plantexpert --no-bertscore --limit 5 \
-  --output-dir results/gemma_plantexpert_smoke
-
-# Install BERTScore in the Python environment used for the full run.
-python3 -m pip install bert-score==0.3.13
-
-# Evaluate all PlantExpert test questions with all six repository metrics.
-python3 -m scripts.evaluate_gqa_lmstudio --dataset plantexpert
-
-# Resume using the same flags as the original run.
-python3 -m scripts.evaluate_gqa_lmstudio --dataset plantexpert --resume
-```
-
-PlantExpert requests use a concise, complete-answer instruction rather than
-GQA's one-word/short-phrase instruction. The default `--max-tokens` is 256
-for PlantExpert and remains 64 for GQA. Each request contains only the image,
-question, and fixed instruction: reference answers, crop/disease annotations,
-and examples are never sent to the model.
-
-The report's `generated_metrics` contains `em`, `token_f1`, `bleu_1`, `bleu_2`,
-`rouge_l`, and `bertscore_f1`, using the same scoring functions as `test.py`.
-The LLM evaluator applies the formatting cleanup described above to predictions
-and references before all six metrics, including BERTScore.
-`predictions.csv` includes per-question metrics and available `question_category`,
-`question_type`, `crop`, and `disease` fields for analysis. PlantExpert does not
-write the GQA-specific prediction JSON. Scores are fractions; rescaled BERTScore
-can be negative. Failed labeled requests receive zero for every metric, and
-partial runs score only attempted questions. A missing `answer` column produces
-unscored predictions; empty reference strings are scored as empty answers.
-
-BERTScore defaults to `bert-base-uncased`, CPU, batch size 16, and English
-baseline rescaling. The report records its model hash. Configure it with
-`--bertscore-model`, `--bertscore-device`, `--bertscore-batch-size`, and
-`--no-bertscore-rescale`. Its first run may download the scoring model; it is
-loaded before inference so missing dependencies fail early. `--no-bertscore`
-computes the five lexical metrics and records `bertscore_f1` as `null`.
-Keep this flag when resuming a lexical-only run. As with GQA, a five-question
-smoke run checks the workflow and does not establish benchmark performance.
+GQA reports exact-match `accuracy` and case-insensitive `normalized_accuracy`.
+PlantExpert reports `em`, `token_f1`, `bleu_1`, `bleu_2`, `rouge_l`, and
+`bertscore_f1`, using the shared repository metrics. Formatting cleanup removes
+Markdown and repeated/escaped whitespace from predictions and references while
+preserving case, punctuation, and answer content. It does not extract answers
+from explanatory prose. Scores are fractions; rescaled BERTScore can be negative.
+BERTScore defaults to `bert-base-uncased` on CPU, batch size 16, with English
+baseline rescaling. Use `--no-bertscore` for lexical-only PlantExpert scoring,
+or configure `--bertscore-model`, `--bertscore-device`, `--bertscore-batch-size`,
+and `--no-bertscore-rescale`. The report records the scorer's model hash.
 
 ### Evaluate a trained repository model
 

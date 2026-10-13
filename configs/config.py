@@ -8,16 +8,30 @@ class Config:
     SEED = 1105
     MAX_LEN_QUES = 32
     MAX_LEN_ANS = 112
+    SCIVQA_DATA_ROOT = "/kaggle/input/datasets/duyho2907/sci-vqa-dataset-nganga01/scivqa_dataset"
     # Dataset-specific CLI defaults; remaining training settings are shared.
     DATASET_DEFAULTS = {
         "scivqa": {
-            "train_csv_path": "data/scivqa_dataset/train.csv",
-            "dev_csv_path": "data/scivqa_dataset/val.csv",
-            "test_csv_path": "data/scivqa_dataset/test.csv",
-            "img_path": "data/scivqa_dataset/images",
-            "model_path": "data/scivqa_model",
-            "epochs": 30,
-            "lr": lr,
+            "train_csv_path": f"{SCIVQA_DATA_ROOT}/train.csv",
+            "dev_csv_path": f"{SCIVQA_DATA_ROOT}/val.csv",
+            "test_csv_path": f"{SCIVQA_DATA_ROOT}/test.csv",
+            "img_path": f"{SCIVQA_DATA_ROOT}/images",
+            "model_path": "/kaggle/working/scivqa_model_tuned",
+            "device": "cuda",
+            # Starting tuning recipe; validate scores before final test evaluation.
+            "epochs": 60,
+            "batch_size": 16,  # Per GPU: global batch is 32 with two GPUs.
+            "lr": 1e-4,  # New fusion, projections, decoder, and vocabulary head.
+            "encoder_lr": 1e-5,
+            "warmup_ratio": 0.05,
+            "weight_decay": 0.01,
+            "label_smoothing": 0.05,
+            "drop_prob": 0.1,
+            "gradient_clip": 1.0,
+            "early_stopping_patience": 10,
+            "selection_metric": "rouge_l_f1",
+            "train_eval_samples": 512,
+            "num_workers": 2,
             "fusion": "ot",
             "max_question_tokens": 256,
             "max_answer_tokens": 64,
