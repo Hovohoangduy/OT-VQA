@@ -59,6 +59,13 @@ def select_gguf_files(names: list[str], quantization: str | None = None) -> tupl
     weights = [name for name in files if name not in projectors]
     candidates = [name for name in weights if not _SHARD.search(name) or int(_SHARD.search(name).group(1)) == 1]
     if not candidates:
+        if any(name.lower().endswith((".safetensors", ".bin")) for name in names):
+            raise ValueError(
+                "MODEL_DIR contains Transformers/Safetensors weights, but this runner uses "
+                "llama.cpp and requires GGUF model weights plus a matching vision projector. "
+                "Select a GGUF conversion of the same model, or use a Transformers/vLLM backend "
+                "for the original weights. Changing MODEL_DIR does not change the backend."
+            )
         raise ValueError("MODEL_DIR must contain GGUF model weights (or the first shard).")
     if not projectors:
         raise ValueError("VQA requires a vision GGUF projector named mmproj or projector in MODEL_DIR.")
@@ -168,7 +175,10 @@ def resolve_model(model_dir: str, cache_dir: Path, quantization: str | None = No
         raise RuntimeError("Install huggingface-hub before downloading GGUF files.") from error
     api = HfApi()
     resolved = api.model_info(repo, revision=revision).sha
-    model, projector, shards = select_gguf_files(api.list_repo_files(repo, revision=resolved), quantization)
+    try:
+        model, projector, shards = select_gguf_files(api.list_repo_files(repo, revision=resolved), quantization)
+    except ValueError as error:
+        raise ValueError(f"{repo}@{resolved}: {error}") from error
     destination = cache_dir / model_identifier(repo) / resolved
     paths = {name: Path(hf_hub_download(
         repo_id=repo, filename=name, revision=resolved, local_dir=str(destination),

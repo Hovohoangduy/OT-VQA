@@ -252,7 +252,7 @@ validation on your dataset.
 
 ## Evaluate
 
-### GGUF vision models on Kaggle with two GPUs
+### GGUF and Transformers vision models on Kaggle with two GPUs
 
 Import [the self-contained Kaggle notebook](notebooks/evaluate_ministral_3_8b_kaggle.ipynb)
 into Kaggle, select **GPU T4 x2**, enable **Internet**, and attach your dataset.
@@ -260,7 +260,7 @@ Set `QUESTIONS` and `IMAGES` in the first code cell, then run all cells. The
 notebook defaults to the PlantExpertVQA Kaggle paths used above; set
 `DATASET = "gqa"` and the corresponding paths for GQA.
 
-It downloads the official
+The default downloads the official
 [Ministral 3 8B GGUF](https://huggingface.co/mistralai/Ministral-3-8B-Instruct-2512-GGUF/tree/main)
 Q4_K_M weights and BF16 vision projector, builds CUDA-enabled llama.cpp
 `v0.6.0`, and runs five questions before the full evaluation. Q5_K_M and Q8_0
@@ -275,7 +275,7 @@ build cell. The notebook includes this flag: it disables CUDA virtual memory
 management while retaining CUDA inference and model splitting across both GPUs.
 The existing llama.cpp clone and build directory can be reused.
 
-Each run automatically chooses a free local server port. The port check enables
+Each GGUF run automatically chooses a free local server port. The port check enables
 `SO_REUSEADDR` so closing smoke-test connections do not block the next run.
 Use `--server-port 8081` to set a specific port or `--server-port 0` for automatic
 selection. Resume permits a different local port while checking every other
@@ -287,9 +287,16 @@ To switch models, change only `MODEL_DIR`:
 MODEL_DIR = "mistralai/Ministral-3-8B-Instruct-2512-GGUF"  # Hugging Face repo ID or URL
 # Or: MODEL_DIR = "/kaggle/input/my-vision-model/gguf"     # Local model folder
 # Or: MODEL_DIR = "owner/model-GGUF:Q8_0"                # Explicit HF quantization
+# CapRL: MODEL_DIR = "Jobaar/CapRL-InternVL3.5-8B-GGUF:Q4_K_M"
+# Original CapRL Safetensors: MODEL_DIR = "internlm/CapRL-InternVL3.5-8B"
 ```
 
-The runner discovers GGUF weights and the matching vision projector, derives
+The notebook uses `scripts.evaluate_kaggle_vlm` to detect model files and select
+the backend. `BACKEND = "auto"` prefers GGUF when both formats are present;
+set `BACKEND = "transformers"` or `"gguf"` to override this. Re-run the backend
+selection and build cells after changing the model or backend settings.
+
+For GGUF, the runner discovers weights and the matching vision projector, derives
 the server alias, and creates model-specific results and download folders.
 Automatic selection prefers Q4_K_M, Q5_K_M, then Q8_0; a single available
 quantization also works. A local folder must contain one model family and its
@@ -297,6 +304,48 @@ matching `mmproj` or `projector` GGUF. Model weight shards are supported.
 Local files are used directly without a Hugging Face download. Missing or
 ambiguous files produce an error before starting the server. Models must
 support vision and be compatible with the selected llama.cpp version.
+
+For native Transformers/Safetensors repositories, such as
+`internlm/CapRL-InternVL3.5-8B`, the notebook skips the llama.cpp build and uses
+`AutoProcessor` and `AutoModelForImageTextToText` with Accelerate. Dependencies
+are installed automatically. The processor and weight shards use the same pinned
+HF revision. On T4 GPUs, FP16 weights are balanced across both GPUs with a 12 GiB
+weight budget per GPU, leaving room for image processing and the generation cache.
+Weights must fit on the GPUs; CPU/disk offload is not used. These models need
+a compatible multimodal chat processor and a supported Transformers architecture;
+legacy custom architectures may require additional integration. The CLI supports
+`--dtype float16` and `--gpu-memory-gib 12` for explicit settings. Custom repository
+code is disabled unless `TRUST_REMOTE_CODE = True` is set in the notebook or
+`--trust-remote-code` is supplied. Registered custom model classes are selected
+from `config.json` when custom code is enabled. The older
+`scripts.evaluate_kaggle_ministral` entry point remains GGUF-only.
+
+For `Kwai-Keye/Keye-VL-1_5-8B`, set `TRUST_REMOTE_CODE = True`. This model uses
+its registered `AutoModel` and separate image preprocessing; the runner appends
+`/no_think` to each question, as documented by the
+[model author](https://huggingface.co/Kwai-Keye/Keye-VL-1_5-8B#keye-vl-15-inference),
+and records that setting for resume checks. Its
+[upstream model code](https://huggingface.co/Kwai-Keye/Keye-VL-1_5-8B/blob/b4d413e4f42a3999af1f5ba0e281c7d51d6b93de/modeling_keye_vl_1_5.py)
+requires FlashAttention-2 even when SDPA is requested. The runner now stages
+a local adaptation when `ATTENTION_IMPLEMENTATION = "auto"` or `"sdpa"`:
+the text decoder uses upstream SDPA, vision rotary embeddings use PyTorch, and
+each packed image sequence receives separate SDPA attention. **Use this path
+for Keye on Kaggle T4 x2; no `flash-attn` installation is needed.** Original
+model files and weights are unchanged. The original and adapted code hashes
+are recorded in the run configuration so resume detects implementation changes.
+Run the five-question smoke test to validate inference on your Kaggle session.
+
+Explicit `ATTENTION_IMPLEMENTATION = "flash_attention_2"` retains upstream
+code and installs FlashAttention. The stock CUDA
+[FlashAttention-2 implementation](https://github.com/Dao-AILab/flash-attention#nvidia-cuda-support)
+requires Ampere-or-newer GPUs; Kaggle T4 x2 cannot run that attention backend.
+The notebook rejects explicit FlashAttention on incompatible hardware before
+downloading weights. Native CapRL InternVL continues to use SDPA on T4 GPUs.
+
+A `CalledProcessError` only reports that the evaluation subprocess failed. The
+updated smoke and full-run cells stream both stdout and stderr and save them to
+`/kaggle/working/vlm-smoke.log` and `vlm-full.log`. Their failure exceptions include
+the last 30 lines, exposing the actual model-loading or inference error.
 
 The notebook bundles the existing evaluator and metrics, so no repository
 upload is needed. GQA uses exact-match accuracy; PlantExpert uses the same six
@@ -311,27 +360,27 @@ Run it with identical model and evaluation settings. Set `RESUME = True` to
 require a saved run explicitly. A nonempty folder without `run_config.json`
 stops before starting the server; preserve its files and use a new output directory.
 For a new session, copy the saved full-run directory back to its original
-working path. Resume checks include the resolved HF revision, llama.cpp
-version, quantization and context size. Prefer a fixed `HF_REVISION` commit
+working path. Resume checks include the resolved HF revision, backend versions,
+dtype or GGUF quantization, GPU placement and context size. Prefer a fixed `HF_REVISION` commit
 for comparisons using the same HF model. Local weights and projectors are
 fingerprinted with SHA-256 to guard against changed files. Failed requests
 stop by default, preserve partial results, and are retried on resume.
 
-With the repository files already available and llama.cpp built, the runner
+With the repository files and backend dependencies already available, the runner
 can also be invoked directly from a notebook cell:
 
 ```python
-!python -u -m scripts.evaluate_kaggle_ministral \
-  --model-dir mistralai/Ministral-3-8B-Instruct-2512-GGUF \
+!python -u -m scripts.evaluate_kaggle_vlm \
+  --model-dir internlm/CapRL-InternVL3.5-8B \
   --dataset plantexpert \
   --questions /kaggle/input/datasets/duyho0511chill/plantexpert-dataset/plantexpert_dataset/test.csv \
   --images /kaggle/input/datasets/duyho0511chill/plantexpert-dataset/plantexpert_dataset/images \
-  --output-dir /kaggle/working/results/ministral_plantexpert
+  --output-dir /kaggle/working/results/caprl_plantexpert
 ```
 
 This accepts the evaluator's existing flags, including `--limit`, `--resume`,
 `--max-tokens` and `--no-bertscore`. Add `--llama-server` for a different binary
-path, `--quantization Q8_0` for another quantization, or `--context-size 4096`
+path (GGUF only), `--quantization Q8_0` for another GGUF quantization, or `--context-size 4096`
 for a smaller context. The default binary path is
 `/kaggle/working/llama.cpp/build/bin/llama-server`. Regenerate the bundled notebook
 after source edits with `python3 -m scripts.build_kaggle_notebook`.

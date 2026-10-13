@@ -14,6 +14,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from scripts import evaluate_kaggle_ministral as runner
+from scripts import evaluate_kaggle_vlm as vlm
 from scripts.build_kaggle_notebook import BUNDLED_FILES, ROOT, build_notebook
 from scripts.evaluate_gqa_lmstudio import LMStudioClient, evaluate
 
@@ -176,6 +177,28 @@ class KaggleEvaluationTests(unittest.TestCase):
             with self.subTest(files=files), self.assertRaisesRegex(ValueError, error):
                 runner.select_gguf_files(files)
 
+    def test_original_caprl_weights_explain_backend_mismatch_without_download(self):
+        fake_hub = Mock()
+        fake_hub.HfApi.return_value.model_info.return_value.sha = "fixed-commit"
+        fake_hub.HfApi.return_value.list_repo_files.return_value = [
+            "config.json", "model-00001-of-00004.safetensors", "model.safetensors.index.json",
+        ]
+        with patch.dict("sys.modules", {"huggingface_hub": fake_hub}), \
+                self.assertRaisesRegex(ValueError, "internlm/CapRL-InternVL3.5-8B@fixed-commit:.*Transformers/Safetensors") as raised:
+            runner.resolve_model("internlm/CapRL-InternVL3.5-8B", self.root)
+        self.assertIn("Changing MODEL_DIR does not change the backend", str(raised.exception))
+        fake_hub.hf_hub_download.assert_not_called()
+
+    def test_caprl_gguf_conversion_selects_q4_weights_and_f16_projector(self):
+        model, projector, shards = runner.select_gguf_files([
+            "CapRL-InternVL3.5-8B-Q4_K_M.gguf", "CapRL-InternVL3.5-8B-Q6_K.gguf",
+            "CapRL-InternVL3.5-8B-bf16.gguf", "CapRL-InternVL3.5-8B-mmproj-bf16.gguf",
+            "CapRL-InternVL3.5-8B-mmproj-f16.gguf", "README.md",
+        ], "Q4_K_M")
+        self.assertEqual(model, "CapRL-InternVL3.5-8B-Q4_K_M.gguf")
+        self.assertEqual(projector, "CapRL-InternVL3.5-8B-mmproj-f16.gguf")
+        self.assertEqual(shards, [model])
+
     def test_changing_only_notebook_model_dir_changes_commands_and_outputs(self):
         cell = next(cell for cell in build_notebook()["cells"]
                     if "".join(cell["source"]).startswith("def evaluation_command():"))
@@ -185,16 +208,21 @@ class KaggleEvaluationTests(unittest.TestCase):
             "IMAGES": self.root, "IMAGE_SPLIT": "test", "MAX_TOKENS": 64,
             "NO_BERTSCORE": True, "RESULTS_ROOT": self.root / "results",
             "model_identifier": runner.model_identifier, "MODEL_DIR": runner.DEFAULT_MODEL_DIR,
+            "BACKEND": "auto", "SELECTED_BACKEND": "gguf", "SELECTED_MODEL": {},
+            "SELECTED_HF_REVISION": "main", "SELECTED_BACKEND_SETTING": "auto",
+            "TRUST_REMOTE_CODE": False, "SELECTED_TRUST_REMOTE_CODE": False,
+            "ATTENTION_IMPLEMENTATION": "auto", "SELECTED_ATTENTION_IMPLEMENTATION": "auto",
         }
         exec("".join(cell["source"]), namespace)
         original_output = namespace["evaluation_output"]()
         for value in ("different/Other-GGUF", str(self.root)):
             namespace["MODEL_DIR"] = value
+            namespace["SELECTED_MODEL_DIR"] = value
             command = namespace["evaluation_command"]()
             self.assertEqual(command[command.index("--model-dir") + 1], value)
             self.assertNotIn("--quantization", command)
             self.assertNotEqual(namespace["evaluation_output"](), original_output)
-            _, args = runner.parse_args(command[4:])
+            _, _, args, _ = vlm.parse_args(command[4:])
             self.assertEqual(namespace["evaluation_output"]().name, args.output_dir.name)
 
     def test_integration_reports_predictions_and_guards_model_revision(self):
@@ -246,6 +274,7 @@ class KaggleEvaluationTests(unittest.TestCase):
             "evaluation_command": lambda: [sys.executable, "-m", "scripts.evaluate_kaggle_ministral"],
             "WORK": self.root, "EVAL_ROOT": self.root, "FULL_LIMIT": None,
             "RESUME": resume, "subprocess": subprocess,
+            "run_logged_evaluation": lambda command, cwd, log: subprocess.run(command, cwd=cwd, check=True),
         }
         return source, namespace
 
@@ -339,6 +368,7 @@ class KaggleEvaluationTests(unittest.TestCase):
 
         namespace = {
             "WORK": self.root, "LLAMA_CPP_REF": "v0.6.0", "CUDA_ARCHS": "75",
+            "SELECTED_BACKEND": "gguf",
             "subprocess": subprocess, "os": Mock(cpu_count=Mock(return_value=4)),
         }
         with patch.object(subprocess, "run", side_effect=run), \
