@@ -11,7 +11,6 @@ from torch import nn
 from torch.utils.data import DataLoader
 
 from configs.arg_parser import get_args
-from configs.config import Config
 from utils.checkpoint import load_model
 from utils.data_processing import load_dataframe
 from utils.device import resolve_device
@@ -19,6 +18,7 @@ from utils.metrics import (bertscore_defaults, build_bertscore_scorer, gqa_score
                            metrics_for_dataset, resolve_dataset, score_pairs,
                            scivqa_score_pairs)
 from utils.vqa_dataset import VQADataset, resolve_image_root
+from utils.answer_text import ANSWER_POSTPROCESSING
 
 
 def evaluation(model, test_loader, criterion, vocab_swap=None, device=None,
@@ -80,6 +80,15 @@ def evaluation(model, test_loader, criterion, vocab_swap=None, device=None,
             })
     result = {"loss": total_loss / max(tokens, 1), "metrics": scores,
               "examples": examples}
+    frame = getattr(test_loader.dataset, "data", None)
+    if frame is not None and "qa_pair_type" in frame and len(frame) == len(rows):
+        groups = {}
+        for kind, row in zip(frame["qa_pair_type"], rows):
+            groups.setdefault(str(kind), []).append(row)
+        result["metrics_by_qa_pair_type"] = {
+            kind: {"examples": len(group), "metrics": mean_scores(group, metrics_for_dataset(dataset_name))}
+            for kind, group in groups.items()
+        }
     if measure_performance:
         result["performance"] = {
             "examples": examples,
@@ -99,6 +108,11 @@ def main():
     default = Path(args.model_path) / "best.pt"
     checkpoint = Path(args.checkpoint) if args.checkpoint else default
     model = load_model(checkpoint, device)
+    for name in ("image_size", "image_preprocessing", "ot_visual_memory"):
+        requested = getattr(args, name)
+        stored = model.model_config[name]
+        if requested is not None and requested != stored:
+            raise ValueError(f"--{name} must match the checkpoint ({stored})")
     print(f"Fusion method: {model.fusion}")
     csv_path = args.dev_csv_path if args.split == "dev" else args.test_csv_path
     dataset_name = resolve_dataset(args.dataset, csv_path)
@@ -108,7 +122,7 @@ def main():
         frame, args.img_path, args.split,
         override=(args.dev_img_path if args.split == "dev" else args.test_img_path),
     )
-    dataset = VQADataset(frame, transform=Config.transforms, img_path=split_image_path,
+    dataset = VQADataset(frame, transform=model.image_transform, img_path=split_image_path,
                          dataset_name=dataset_name)
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False)
     predictions = [] if args.predictions_csv else None
@@ -150,6 +164,9 @@ def main():
             "trainable_parameters": sum(p.numel() for p in model.parameters() if p.requires_grad),
             "loss": result["loss"], "generated_metrics": result["metrics"],
             "performance": performance,
+            "model_config": model.model_config,
+            "answer_postprocessing": ANSWER_POSTPROCESSING,
+            "metrics_by_qa_pair_type": result.get("metrics_by_qa_pair_type", {}),
         }
         if scorer is not None:
             report["bertscore"] = {

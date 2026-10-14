@@ -10,7 +10,6 @@ from statistics import fmean
 
 import torch
 
-from configs.config import Config
 from utils.checkpoint import load_model
 from utils.data_processing import load_dataframe
 from utils.device import resolve_device, seed_everything
@@ -115,25 +114,38 @@ def _roll(values):
     return values[-1:] + values[:-1]
 
 
+def _different_image_sources(image_names):
+    """Choose a different figure for every counterfactual, across the whole sample.
+
+    SciVQA has seven adjacent questions per figure; rolling images inside a
+    batch can otherwise compare a figure with itself. Sources may be reused
+    when the sampled figures are imbalanced.
+    """
+    if len(set(image_names)) < 2:
+        raise ValueError("Image reliance requires at least two distinct figures")
+    return [next((i + offset) % len(image_names) for offset in range(1, len(image_names))
+                 if image_names[(i + offset) % len(image_names)] != name)
+            for i, name in enumerate(image_names)]
+
+
 def _reliance_report(model, dataset, samples: int, batch_size: int,
                      device: torch.device) -> dict:
     count = min(samples, len(dataset))
     if count < 2:
         raise ValueError("At least two validation examples are required")
-    records = [dataset[index] for index in range(count)]
+    indices = torch.randperm(len(dataset))[:count].tolist()
+    records = [dataset[index] for index in indices]
+    image_names = [str(dataset.data.iloc[index]["image"]) for index in indices]
+    image_indices = _different_image_sources(image_names)
+    question_records = _roll(records)
     original_predictions: list[str] = []
     image_shuffled_predictions: list[str] = []
     question_shuffled_predictions: list[str] = []
     answers: list[str] = []
     for start in range(0, count, batch_size):
         batch = records[start:start + batch_size]
-        if len(batch) == 1:
-            # Pair a final singleton with the preceding image/question.
-            image_source = [records[(start - 1) % count]]
-            question_source = image_source
-        else:
-            image_source = _roll(batch)
-            question_source = _roll(batch)
+        image_source = [records[index] for index in image_indices[start:start + batch_size]]
+        question_source = question_records[start:start + batch_size]
         anno_ids = [row[0] for row in batch]
         images = torch.stack([row[1] for row in batch]).to(device)
         shuffled_images = torch.stack([row[1] for row in image_source]).to(device)
@@ -149,6 +161,8 @@ def _reliance_report(model, dataset, samples: int, batch_size: int,
         question_shuffled_predictions.extend(model.answers_from_ids(question_shuffled))
     result = {
         "samples": count,
+        "sample_indices": indices,
+        "image_counterfactual": "next distinct figure in the sampled records; sources may repeat",
         "original": _prediction_summary(answers, original_predictions),
         "image_shuffled": _prediction_summary(answers, image_shuffled_predictions),
         "question_shuffled": _prediction_summary(answers, question_shuffled_predictions),
@@ -207,7 +221,7 @@ def main():
     metrics = Path(args.metrics) if args.metrics else checkpoint.parent / "metrics.jsonl"
     model = load_model(checkpoint, device)
     frame = load_dataframe(args.dev_csv_path)
-    dataset = VQADataset(frame, Config.transforms, args.dev_img_path)
+    dataset = VQADataset(frame, model.image_transform, args.dev_img_path)
     trainable = sum(parameter.numel() for parameter in model.parameters()
                     if parameter.requires_grad)
     report = {

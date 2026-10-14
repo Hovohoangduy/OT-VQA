@@ -19,6 +19,7 @@ MODEL_CONFIG_KEYS = {
     "freeze_answer_embeddings", "ot_epsilon", "ot_iterations",
     "ot_dustbin_mass", "ot_dustbin_cost", "max_answer_tokens", "max_question_tokens",
     "fusion",
+    "image_size", "image_preprocessing", "ot_visual_memory",
 }
 
 
@@ -57,11 +58,13 @@ def _adapt_vision_state_dict(state_dict, target_keys):
 def checkpoint_payload(
     model, text_model, image_model, optimizer=None, scheduler=None,
     epoch=0, global_step=0, best_metric=None, epochs_without_improvement=0,
+    training_config=None,
 ):
     return {
         "format_version": 4,
         "model_state_dict": model.state_dict(),
         "model_config": model.model_config,
+        "training_config": training_config or {},
         "text_model": text_model,
         "image_model": image_model,
         "encoder_revisions": {
@@ -71,6 +74,8 @@ def checkpoint_payload(
         "preprocessing": {
             "max_question_length": model.max_question_tokens,
             "max_answer_length": getattr(model, "max_answer_tokens", Config.MAX_LEN_ANS),
+            "image_size": model.image_size,
+            "image_preprocessing": model.image_preprocessing,
         },
         "optimizer_state_dict": optimizer.state_dict() if optimizer is not None else None,
         "scheduler_state_dict": scheduler.state_dict() if scheduler is not None else None,

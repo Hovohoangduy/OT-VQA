@@ -32,6 +32,9 @@ from utils.data_processing import load_dataframe
 from utils.device import resolve_device, seed_everything
 from utils.metrics import build_bertscore_scorer, metrics_for_dataset, resolve_dataset
 from utils.vqa_dataset import VQADataset, resolve_image_root
+from utils.answer_text import ANSWER_POSTPROCESSING
+from utils.image_processing import build_image_transform
+from utils.losses import AnswerCrossEntropyLoss
 
 
 def _forward_batch(model, batch, device):
@@ -58,7 +61,7 @@ def train(model, train_loader, num_epochs, optimizer, scheduler, criterion,
         displayed_total = total_epochs if total_epochs is not None else epoch_offset + num_epochs
         model.train()
         total_loss = 0.0
-        tokens = 0
+        total_weight = 0
         for batch_idx, batch in enumerate(train_loader):
             logits, targets = _forward_batch(model, batch, device)
             loss = criterion(logits.transpose(1, 2), targets)
@@ -73,22 +76,24 @@ def train(model, train_loader, num_epochs, optimizer, scheduler, criterion,
                 )
             optimizer.step()
             scheduler.step()
-            batch_tokens = targets.ne(base_model.pad_token_id).sum().item()
-            total_loss += loss.item() * batch_tokens
-            tokens += batch_tokens
+            batch_weight = (targets.size(0) if getattr(criterion, "normalization", "token") == "example"
+                            else targets.ne(base_model.pad_token_id).sum().item())
+            total_loss += loss.item() * batch_weight
+            total_weight += batch_weight
             losses.append(loss.item())
             if (batch_idx + 1) % 2000 == 0:
                 print(f"Epoch {displayed_epoch}/{displayed_total}, "
                       f"batch {batch_idx + 1}: loss={loss.item():.4f}")
         if dist.is_available() and dist.is_initialized():
-            totals = torch.tensor([total_loss, tokens], dtype=torch.float64, device=device)
+            totals = torch.tensor([total_loss, total_weight], dtype=torch.float64, device=device)
             dist.all_reduce(totals, op=dist.ReduceOp.SUM)
-            total_loss, tokens = totals.tolist()
-        epoch_losses.append(total_loss / max(tokens, 1))
+            total_loss, total_weight = totals.tolist()
+        epoch_losses.append(total_loss / max(total_weight, 1))
     return losses, epoch_losses
 
 
-def _make_loader(args, split, shuffle, text_model, image_model, rank=0, world_size=1):
+def _make_loader(args, split, shuffle, text_model, image_model, rank=0, world_size=1,
+                 image_size=256, image_preprocessing="crop"):
     csv_path = getattr(args, f"{split}_csv_path")
     frame = load_dataframe(csv_path)
     image_path = resolve_image_root(
@@ -97,7 +102,7 @@ def _make_loader(args, split, shuffle, text_model, image_model, rank=0, world_si
         split,
         override=getattr(args, f"{split}_img_path"),
     )
-    dataset = VQADataset(frame, transform=Config.transforms, img_path=image_path,
+    dataset = VQADataset(frame, transform=build_image_transform(image_size, image_preprocessing), img_path=image_path,
                          dataset_name=resolve_dataset(args.dataset, args.train_csv_path))
     sampler = (DistributedSampler(dataset, num_replicas=world_size, rank=rank,
                                   shuffle=shuffle, seed=args.seed)
@@ -226,8 +231,13 @@ def _run_training(args, device, rank, world_size):
         print(f"Dataset: {dataset_name}; generated-answer metrics: {', '.join(metric_names)}")
 
     resume = read_checkpoint(args.resume, device) if args.resume else None
+    saved_normalization = (resume or {}).get("training_config", {}).get("loss_normalization", "token")
+    loss_normalization = args.loss_normalization or saved_normalization
+    if resume is not None and loss_normalization != saved_normalization:
+        raise ValueError("--loss_normalization does not match the resume checkpoint; start a fresh run")
     resumed_best = (resume or {}).get("best_metric") or {}
-    selection_metric = args.selection_metric or resumed_best.get("selection_metric", "loss")
+    default_selection = "rouge_l_f1" if dataset_name == "scivqa" and resume is None else "loss"
+    selection_metric = args.selection_metric or resumed_best.get("selection_metric", default_selection)
     if selection_metric != "loss" and selection_metric not in metric_names:
         raise ValueError(f"Selection metric {selection_metric} is unavailable for {dataset_name}")
     if resume is not None and selection_metric != resumed_best.get("selection_metric", "loss"):
@@ -237,6 +247,11 @@ def _run_training(args, device, rank, world_size):
             raise ValueError("Training can resume only from a version-3/4 checkpoint")
         text_model, image_model = resume["text_model"], resume["image_model"]
         stored_config = dict(resume["model_config"])
+        for name, default in (("image_size", 256), ("image_preprocessing", "crop"),
+                              ("ot_visual_memory", False)):
+            value = getattr(args, name)
+            if value is not None and value != stored_config.get(name, default):
+                raise ValueError(f"--{name} does not match the resume checkpoint; start a fresh run")
         stored_answer_length = stored_config.get(
             "max_answer_tokens", resume.get("preprocessing", {}).get(
                 "max_answer_length", LEGACY_MAX_ANSWER_TOKENS)
@@ -278,18 +293,24 @@ def _run_training(args, device, rank, world_size):
                          max_answer_tokens=(args.max_answer_tokens if args.max_answer_tokens is not None
                                             else Config.MAX_LEN_ANS),
                          max_question_tokens=(args.max_question_tokens if args.max_question_tokens is not None
-                                              else Config.MAX_LEN_QUES)).to(device)
+                                              else Config.MAX_LEN_QUES),
+                         image_size=args.image_size if args.image_size is not None else 256,
+                         image_preprocessing=args.image_preprocessing or "crop",
+                         ot_visual_memory=bool(args.ot_visual_memory)).to(device)
 
     train_loader = _make_loader(args, "train", True, text_model, image_model,
-                                rank=rank, world_size=world_size)
-    dev_loader = (_make_loader(args, "dev", False, text_model, image_model)
+                                rank=rank, world_size=world_size,
+                                image_size=model.image_size, image_preprocessing=model.image_preprocessing)
+    dev_loader = (_make_loader(args, "dev", False, text_model, image_model,
+                               image_size=model.image_size, image_preprocessing=model.image_preprocessing)
                   if rank == 0 else None)
     if not len(train_loader) or (rank == 0 and not len(dev_loader)):
         raise ValueError("Training and development datasets must be non-empty")
     train_eval_loader = (_make_train_eval_loader(train_loader.dataset, args, device)
                          if rank == 0 else None)
-    train_criterion = nn.CrossEntropyLoss(
-        ignore_index=model.pad_token_id, label_smoothing=args.label_smoothing
+    train_criterion = AnswerCrossEntropyLoss(
+        ignore_index=model.pad_token_id, label_smoothing=args.label_smoothing,
+        normalization=loss_normalization,
     )
     validation_criterion = nn.CrossEntropyLoss(ignore_index=model.pad_token_id)
     bert_scorer = build_bertscore_scorer(
@@ -321,6 +342,7 @@ def _run_training(args, device, rank, world_size):
     if rank == 0:
         print(f"Global batch size: {args.batch_size * world_size}; "
               f"warmup steps: {warmup_steps}; checkpoint selection: {selection_metric}")
+        print(f"Training loss normalization: {loss_normalization}; validation loss normalization: token")
         print("Peak learning rates: " + ", ".join(
             f"{group.get('group_name', 'all')}={group['initial_lr']:g}"
             for group in optimizer.param_groups))
@@ -348,6 +370,8 @@ def _run_training(args, device, rank, world_size):
             "global_batch_size": args.batch_size * world_size,
             "warmup_steps": warmup_steps,
             "train_eval_examples": len(train_eval_loader.dataset) if train_eval_loader else 0,
+            "answer_postprocessing": ANSWER_POSTPROCESSING,
+            "loss_normalization": loss_normalization,
         }
         if bert_scorer is not None:
             manifest["bertscore_hash"] = bert_scorer.hash
@@ -414,6 +438,7 @@ def _run_training(args, device, rank, world_size):
                 optimizer=optimizer, scheduler=scheduler,
                 epoch=epoch + 1, global_step=global_step, best_metric=best_metric,
                 epochs_without_improvement=epochs_without_improvement,
+                training_config={"loss_normalization": loss_normalization},
             )
             save_checkpoint(destination / "last.pt", **checkpoint_args)
             if args.save_every_epoch:
@@ -421,8 +446,10 @@ def _run_training(args, device, rank, world_size):
             if improved:
                 save_checkpoint(destination / "best.pt", **checkpoint_args)
             row = {"epoch": epoch + 1, "train_loss": train_loss,
+                   "train_loss_normalization": loss_normalization,
                    **{f"train_{name}": score for name, score in train_scores.items()},
                    "val_loss": val_loss,
+                   "val_metrics_by_qa_pair_type": validation.get("metrics_by_qa_pair_type", {}),
                    **{f"val_{name}": val_scores[name] for name in metric_names},
                    "learning_rate": scheduler.get_last_lr()[0],
                    "learning_rates": {group.get("group_name", "all"): group["lr"]

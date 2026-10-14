@@ -1,4 +1,5 @@
 import argparse
+import sys
 
 from configs.config import Config
 from utils.metrics import ALL_METRICS, bertscore_defaults, resolve_dataset
@@ -35,6 +36,12 @@ def get_args(argv=None, *, evaluation=False):
     parser.add_argument("--text_model", default=Config.text_model,
                         help="English Hugging Face tokenizer and text encoder")
     parser.add_argument("--image_model", default=Config.image_model)
+    parser.add_argument("--image_size", type=int, default=None,
+                        help="Square image side; default 256. MobileViTV2 supports multiples of 32")
+    parser.add_argument("--image_preprocessing", choices=("crop", "pad"), default=None,
+                        help="crop: legacy center crop; pad: preserve the complete figure and aspect ratio")
+    parser.add_argument("--ot_visual_memory", action=argparse.BooleanOptionalAction, default=None,
+                        help="Append spatial image tokens conditioned by the same OT plan; default off")
     parser.add_argument("--split", choices=["dev", "test"], default="dev")
     parser.add_argument("--resume", default=None, help="Version-3/4 training checkpoint to resume")
     parser.add_argument("--save_every_epoch", action="store_true",
@@ -45,8 +52,12 @@ def get_args(argv=None, *, evaluation=False):
                         help="Separate LR for pretrained text/answer embeddings; --lr applies to fusion/decoder")
     parser.add_argument("--warmup_ratio", type=float, default=0.0,
                         help="Fraction of total optimization steps used for linear LR warmup")
+    parser.add_argument("--loss_normalization", choices=("token", "example"), default=None,
+                        help="Training CE averaging: token (legacy), or equal weight per answer; "
+                             "resume inherits the saved setting")
     parser.add_argument("--selection_metric", choices=("loss", *ALL_METRICS), default=None,
-                        help="Validation metric for best.pt and early stopping; default loss, or resume setting")
+                        help="Validation metric for best.pt and early stopping; new SciVQA runs use "
+                             "rouge_l_f1, others loss; resume inherits the saved metric")
     parser.add_argument("--train_eval_samples", type=int, default=-1,
                         help="Training examples to score each epoch: -1 all, 0 skip, positive fixed random subset")
     parser.add_argument("--num_workers", type=int, default=0,
@@ -65,7 +76,7 @@ def get_args(argv=None, *, evaluation=False):
     )
     parser.add_argument(
         "--early_stopping_patience", type=int, default=8,
-        help="Stop after this many epochs without lower validation loss; 0 disables",
+        help="Stop after this many epochs without improving the selection metric; 0 disables",
     )
     parser.add_argument("--d_model", type=int, default=384)
     parser.add_argument("--ffn_hidden", type=int, default=1024)
@@ -110,6 +121,14 @@ def get_args(argv=None, *, evaluation=False):
     )
     apply_dataset_defaults(parser, argv)
     args = parser.parse_args(argv)
+    # Preset image choices apply only to fresh training. Evaluation and resume
+    # inherit the checkpoint unless the user explicitly supplies an override.
+    if evaluation or args.resume:
+        supplied = {item.split("=", 1)[0] for item in (sys.argv[1:] if argv is None else argv)
+                    if item.startswith("--")}
+        for name in ("image_size", "image_preprocessing"):
+            if f"--{name}" not in supplied:
+                setattr(args, name, None)
     dataset_path = args.train_csv_path
     if evaluation:
         dataset_path = args.dev_csv_path if args.split == "dev" else args.test_csv_path

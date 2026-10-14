@@ -14,8 +14,9 @@ pip install -r requirements.txt
 The default paths expect GQA CSV files under `data/gqa_dataset` and images under
 `data/gqa_dataset/images`. Run `python train.py --help` to see path overrides.
 The default encoders are `apple/mobilevitv2-2.0-imagenet1k-256` for images and
-`sentence-transformers/all-MiniLM-L12-v2` for text. Images are resized to a
-288-pixel shortest edge, then center cropped to 256×256;
+`sentence-transformers/all-MiniLM-L12-v2` for text. The legacy pipeline resizes
+to a 288-pixel shortest edge, then center crops to 256×256. New SciVQA runs
+preserve the complete figure with aspect-ratio-preserving padding at 512×512;
 the image encoder supplies spatial features, and MiniLM supplies token features
 plus a mean-pooled question vector. Existing OT checkpoints retain their saved
 encoder names and can still be loaded.
@@ -87,16 +88,14 @@ Train the OT model with the SciVQA preset:
 python train.py --dataset scivqa
 ```
 
-[`configs/config.py`](configs/config.py) supplies the split/image paths,
-CUDA device, and output directory for the Kaggle SciVQA dataset. Edit
-`Config.SCIVQA_DATA_ROOT` to change the dataset folder; checkpoints and logs
-default to `/kaggle/working/scivqa_model_tuned`. For a local run, override the
-CSV/image paths, `--model_path`, and `--device` to match your machine.
+[`configs/config.py`](configs/config.py) supplies local dataset paths and
+training defaults. For Kaggle, override the CSV/image paths and `--model_path`
+with your input dataset and a directory under `/kaggle/working`.
 The preset uses
-OT fusion, MiniLM/MobileViTV2 backbones, batch size 16 per GPU, up to 60 epochs,
-AdamW learning rates `1e-4` for the new decoder/fusion layers and `1e-5` for
-the pretrained text encoder, 5% warmup, weight decay `0.01`, label smoothing
-`0.05`, dropout `0.1`, gradient clipping at `1.0`, and patience 10. Training
+OT fusion, MiniLM/MobileViTV2 backbones, batch size 8 per GPU, up to 30 epochs,
+AdamW learning rates `1e-5` for the new decoder/fusion layers and `2e-6` for
+the pretrained text encoder, 5% warmup, weight decay `0.05`, label smoothing
+`0.1`, dropout `0.2`, gradient clipping at `1.0`, and patience 8. Training
 answer metrics use a fixed 512-example subset; image loading uses two workers
 per GPU. These are starting tuning choices, not a measured score improvement.
 The reference
@@ -111,17 +110,21 @@ The preset allows 256 question tokens and 64 answer tokens, including special
 tokens. The downloaded splits reach 210/37 tokens with the default MiniLM
 tokenizer, preserving the choice context and unanswerable targets. If exporting
 with `--include-caption`, use `--max_question_tokens 512` and check lengths for
-your dataset revision. The preset uses the existing image preprocessing and
-256-pixel vision backbone; it does not reproduce the paper's high-resolution VLMs.
+your dataset revision. New SciVQA runs use full-figure padding at 512 pixels
+with the frozen MobileViTV2 weights; this does not reproduce the paper's VLMs.
 
 `--dataset scivqa` and `--dataset plantexpert` select built-in Python defaults
 from `Config.DATASET_DEFAULTS` for both training and evaluation. Each selects
 its own paths, token limits, and evaluation metrics. Other training settings
-use the shared defaults. Explicit CLI flags override these settings; for example,
+use shared defaults, except for SciVQA's training overrides described above.
+Explicit CLI flags override these settings; for example,
 add `--device cuda --batch_size 2` to reduce GPU memory. Edit `configs/config.py`
 to change the dataset defaults.
 Training records the resolved arguments and all nine SciVQA metrics in
-`run_config.json` and `metrics.jsonl` under `/kaggle/working/scivqa_model_tuned`.
+`run_config.json` and `metrics.jsonl` under `--model_path`.
+The resolved model configuration records image size and preprocessing. Each
+validation history row also includes `val_metrics_by_qa_pair_type` so numerical
+answers and abstention can be inspected separately.
 
 Evaluate the best checkpoint on validation or test:
 
@@ -143,12 +146,30 @@ For a SciVQA optimization experiment on two Kaggle GPUs, start a fresh run with:
 
 Use the updated repository for these flags. Remove the leading `!` outside a
 notebook. These values are a starting experiment, not a measured improvement.
-With two GPUs, batch size 16 means 32 examples per optimizer update.
+With two GPUs, batch size 8 means 16 examples per optimizer update.
 `--lr` trains the new fusion, projections, decoder, and vocabulary head;
 `--encoder_lr` trains the pretrained question encoder and any unfrozen answer
 embeddings. The image encoder remains frozen. Warmup takes 5% of the planned
-optimization steps, followed by linear decay. The smaller batch provides twice
-as many updates per epoch as batch size 32 on the same two GPUs.
+optimization steps, followed by linear decay. Batch size is per GPU.
+
+For an independent OT visual-memory experiment, add `--ot_visual_memory` and
+use a fresh output directory. The SciVQA preset already uses
+`--image_preprocessing pad --image_size 512`. Padding preserves figure edges
+and aspect ratio; MobileViTV2
+receives the full 512-pixel tensor without its processor recropping to 256.
+The decoder receives the original OT-grounded question tokens plus spatial
+image tokens conditioned using the reverse direction of the same OT plan,
+with a visual residual path and learned 2D position projection. This increases
+visual token count from 64 to 256. The image encoder remains frozen. Try 384
+pixels or reduce batch size if memory is tight. The default retains
+question-only OT memory. Use explicit `--image_size 256 --image_preprocessing crop`
+only for a comparison with the legacy preprocessing. Cropping is not a validated
+SciVQA improvement; a training-figure geometry audit found that the legacy crop
+retains only 50.1% of image area at the median, and 4.6% for the widest figure.
+Those numbers describe area, not useful information or accuracy.
+
+See [the SciVQA experiment guide](SCIVQA_TUNING.md) for the diagnosis,
+copyable Kaggle commands, and a validation-only ablation sequence.
 
 `--selection_metric rouge_l_f1` maximizes full-validation ROUGE-L F1 for both
 `best.pt` and early stopping. Use `bertscore_f1` if that is your primary objective.
@@ -162,12 +183,23 @@ controls image-loading processes per GPU. BERTScore remains on CPU by default;
 `--bertscore_device cuda --bertscore_batch_size 4` can speed it up if the primary
 GPU has enough memory for both models.
 
-Compare fresh runs with decoder learning rates `5e-5`, `1e-4`, and `2e-4`, keeping
+Compare fresh runs with decoder learning rates `5e-6`, `1e-5`, and `3e-5`, keeping
 the encoder LR and remaining settings fixed. Choose on validation, repeat the
 winner with multiple seeds, then evaluate the held-out test split once. A longer
 200-epoch limit alone does not guarantee better answers. The current frozen
 256-pixel image encoder and center crop may limit reading small chart labels or
 content near figure edges; learning-rate tuning cannot restore missing pixels.
+The new image options address cropping and resolution; they do not add OCR or
+the pretrained numerical reasoning capabilities of a large VLM.
+
+`--loss_normalization example` is an independent training-loss experiment:
+average token CE within each answer, then average across answers. In the local
+SciVQA training data, unanswerable questions make up 14.3% of examples but 48.1%
+of non-padding targets under legacy token averaging. Equal-answer averaging
+reduces this length imbalance without changing targets or evaluation metrics.
+The default is `token`; validation loss always uses token averaging. Logs and
+checkpoints record the training objective, and resume rejects a conflicting
+loss-normalization override. This experiment still needs measured validation.
 
 For resuming, keep the schedule settings and total epoch target from the
 original run; for older runs without warmup, pass `--warmup_ratio 0`. Optimizer
@@ -175,6 +207,11 @@ state restores its saved learning rates. A checkpoint
 with separate encoder/decoder groups recreates those groups automatically; an
 older single-LR checkpoint needs a fresh run to use `--encoder_lr`. The stored
 selection metric is inherited on resume, and switching it is rejected.
+Image preprocessing, resolution, and visual-memory settings are also inherited
+from the checkpoint; conflicting overrides require a fresh run. Old checkpoints
+without these fields retain 256-pixel crop preprocessing and question-only OT
+memory. Evaluation, single-image prediction, and diagnostics use the checkpoint's
+image transform automatically.
 
 To train the OT model on this PlantExpertVQA subset:
 
@@ -353,6 +390,12 @@ explicit project convention. Answers retain their original multiple-choice
 labels, numbers, and abstention text; scoring does not infer abstention from
 gold annotations or rewrite model responses to reproduce the paper's
 post-processing. Prediction exports retain `qa_pair_type` and `figure_type`.
+Generated answers repair WordPiece numerical spacing (`0. 5` becomes `0.5`)
+using prediction text alone. Digits and answer choices are preserved; reports
+record `answer_postprocessing=wordpiece_numeric_spacing_v1`. This fixes
+presentation and can affect BERTScore/exact matching; the existing ROUGE
+tokenizer already ignores decimal punctuation and spaces. Reevaluate old
+checkpoints with the same code when comparing experiments.
 Training logs use `train_<metric>` and `val_<metric>`;
 history diagnostics accept the same nine-score schema.
 

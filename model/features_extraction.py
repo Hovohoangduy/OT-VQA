@@ -12,10 +12,18 @@ def validate_english_text_model(model_name):
 
 
 class ImageEmbedding(nn.Module):
-    def __init__(self, model_name=Config.image_model):
+    def __init__(self, model_name=Config.image_model, image_size=256):
         super().__init__()
         self.process = AutoImageProcessor.from_pretrained(model_name)
         self.model = AutoModel.from_pretrained(model_name)
+        self.image_size = image_size
+        configured_size = self.model.config.image_size
+        configured_size = ((configured_size, configured_size) if isinstance(configured_size, int)
+                           else tuple(configured_size))
+        if (self.model.config.model_type != 'mobilevitv2' and image_size != 256
+                and configured_size != (image_size, image_size)):
+            raise ValueError('Custom image_size is currently supported only for MobileViTV2; '
+                             'other encoders must use their configured image size')
         self.has_cls_token = self.model.config.model_type == 'vit'
         if self.model.config.model_type == 'mobilevitv2':
             self.output_dim = self.model.encoder.layer[-1].conv_projection.convolution.out_channels
@@ -31,10 +39,12 @@ class ImageEmbedding(nn.Module):
 
     def forward(self, image, image_ids=None):
         device = next(self.model.parameters()).device
-        expected_size = self.model.config.image_size
+        mobilevit = self.model.config.model_type == 'mobilevitv2'
+        expected_size = (self.image_size, self.image_size) if mobilevit else self.model.config.image_size
         if isinstance(expected_size, int):
             expected_size = (expected_size, expected_size)
-        # The dataset already resizes, crops and converts RGB images to float [0, 1].
+        # Dataset preprocessing is checkpoint-controlled. Never send a prepared
+        # high-resolution batch through the processor's default 256-pixel crop.
         # Apply the remaining processor operations on device for standard batches.
         if (image.ndim == 4 and image.shape[1] == 3 and image.shape[-2:] == tuple(expected_size)
                 and image.is_floating_point()):
@@ -48,8 +58,17 @@ class ImageEmbedding(nn.Module):
             pixel_values = image
         else:
             # Preserve the processor path for unusual input sizes or formats.
-            inputs = self.process(images=image.detach().cpu(), do_rescale=False,
-                                  return_tensors="pt")
+            if image.ndim != 4 or image.shape[1] != 3:
+                raise ValueError('Expected a batched RGB image tensor [B,3,H,W]')
+            if mobilevit:
+                image = torch.nn.functional.interpolate(image.float(), size=expected_size,
+                                                        mode='bilinear', align_corners=False)
+                inputs = self.process(images=image.detach().cpu(), do_rescale=False,
+                                      do_resize=False, do_center_crop=False,
+                                      return_tensors="pt")
+            else:
+                # Retain legacy fixed-resolution processor behavior for old ViT checkpoints.
+                inputs = self.process(images=image.detach().cpu(), do_rescale=False, return_tensors="pt")
             pixel_values = inputs["pixel_values"].to(device)
         with torch.no_grad():
             outputs = self.model(pixel_values=pixel_values)

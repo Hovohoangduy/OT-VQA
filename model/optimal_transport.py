@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -48,7 +49,7 @@ class PartialTransportFusion(nn.Module):
     """Align spatial image tokens with valid question tokens and build decoder memory."""
 
     def __init__(self, text_dim, d_model, epsilon=0.05, iterations=20,
-                 dustbin_mass=0.2, dustbin_cost=1.0):
+                 dustbin_mass=0.2, dustbin_cost=1.0, visual_memory=False):
         super().__init__()
         if not 0 <= dustbin_mass < 1:
             raise ValueError("dustbin_mass must be in [0, 1)")
@@ -65,6 +66,11 @@ class PartialTransportFusion(nn.Module):
         self.global_projection = nn.Linear(2 * d_model, d_model)
         self.token_norm = nn.LayerNorm(d_model)
         self.global_norm = nn.LayerNorm(d_model)
+        self.visual_memory = visual_memory
+        if visual_memory:
+            self.image_grounding_projection = nn.Linear(d_model, d_model)
+            self.image_position_projection = nn.Linear(2, d_model, bias=False)
+            self.image_norm = nn.LayerNorm(d_model)
 
     def forward(self, image_tokens, question_tokens, question_mask, question_global=None,
                 return_transport=False):
@@ -126,6 +132,27 @@ class PartialTransportFusion(nn.Module):
         memory = torch.cat((global_memory, grounded), dim=1)
         memory_blocked = torch.cat((torch.zeros((batch, 1), dtype=torch.bool, device=question_mask.device),
                                     ~question_mask), dim=1)
+        if self.visual_memory:
+            # Reverse conditioning reuses the same partial OT plan. Preserve a
+            # residual path for visual details lost by question-side averaging.
+            matched_per_patch = local_plan.sum(-1)
+            aligned_questions = torch.bmm(local_plan.to(question_values.dtype), question_values)
+            aligned_questions = aligned_questions / matched_per_patch.clamp_min(1e-8).unsqueeze(-1)
+            image_gate = (matched_per_patch / row_marginal[:, :-1].clamp_min(1e-8)).clamp(0, 1)
+            side = math.isqrt(patches)
+            if side * side != patches:
+                raise ValueError('Visual memory requires a square spatial token grid')
+            axis = torch.linspace(-1, 1, side, device=image_tokens.device, dtype=image_tokens.dtype)
+            y, x = torch.meshgrid(axis, axis, indexing='ij')
+            coordinates = torch.stack((x.flatten(), y.flatten()), dim=-1)
+            visual = self.image_norm(
+                image_tokens + image_gate.unsqueeze(-1).to(image_tokens.dtype)
+                * self.image_grounding_projection(aligned_questions.to(image_tokens.dtype))
+                + self.image_position_projection(coordinates).unsqueeze(0)
+            )
+            memory = torch.cat((memory, visual), dim=1)
+            memory_blocked = torch.cat((memory_blocked, torch.zeros(
+                (batch, patches), dtype=torch.bool, device=image_tokens.device)), dim=1)
         if not return_transport:
             return memory, memory_blocked
         diagnostics = {

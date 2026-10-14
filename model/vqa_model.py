@@ -9,6 +9,8 @@ from configs.config import Config
 from model.decoder_model import Decoder
 from model.features_extraction import AnswerEmbedding, ImageEmbedding, QuestionEmbedding, validate_english_text_model
 from model.optimal_transport import PartialTransportFusion
+from utils.answer_text import restore_numeric_spacing
+from utils.image_processing import build_image_transform
 
 
 class VQAModel(nn.Module):
@@ -20,7 +22,8 @@ class VQAModel(nn.Module):
                  freeze_answer_embeddings=False, ot_epsilon=0.05,
                  ot_iterations=20, ot_dustbin_mass=0.2, ot_dustbin_cost=1.0,
                  max_answer_tokens=Config.MAX_LEN_ANS,
-                 max_question_tokens=Config.MAX_LEN_QUES, fusion='ot'):
+                 max_question_tokens=Config.MAX_LEN_QUES, fusion='ot',
+                 image_size=256, image_preprocessing='crop', ot_visual_memory=False):
         super().__init__()
         if output_size != d_model:
             raise ValueError('output_size must equal d_model')
@@ -39,6 +42,9 @@ class VQAModel(nn.Module):
         self.max_question_tokens = max_question_tokens
         self.text_model_name = str(text_model)
         self.image_model_name = str(image_model)
+        self.image_size = image_size
+        self.image_preprocessing = image_preprocessing
+        self.image_transform = build_image_transform(image_size, image_preprocessing)
         self.model_config = dict(
             output_size=output_size, d_model=d_model, num_heads=num_heads,
             ffn_hidden=ffn_hidden, drop_prob=drop_prob, num_layers=num_layers,
@@ -48,8 +54,10 @@ class VQAModel(nn.Module):
             ot_dustbin_mass=ot_dustbin_mass, ot_dustbin_cost=ot_dustbin_cost,
             max_answer_tokens=max_answer_tokens,
             max_question_tokens=max_question_tokens,
+            image_size=image_size, image_preprocessing=image_preprocessing,
+            ot_visual_memory=ot_visual_memory,
         )
-        self.image_model = ImageEmbedding(image_model)
+        self.image_model = ImageEmbedding(image_model, image_size=image_size)
         self.question_encoder = QuestionEmbedding(model_name=text_model,
                                                   max_length=max_question_tokens)
         self.answer_embedding = AnswerEmbedding(model_name=text_model)
@@ -73,6 +81,7 @@ class VQAModel(nn.Module):
             text_dim=text_dim, d_model=d_model, epsilon=ot_epsilon,
             iterations=ot_iterations, dustbin_mass=ot_dustbin_mass,
             dustbin_cost=ot_dustbin_cost,
+            visual_memory=ot_visual_memory,
         )
         self.decoder = Decoder(d_model, ffn_hidden, num_heads, drop_prob, num_layers)
         actual_vocab = self.answer_embedding.token_embeddings.word_embeddings.num_embeddings
@@ -93,7 +102,7 @@ class VQAModel(nn.Module):
         return self.ot_fusion(image_tokens, question_tokens, ~blocked,
                               question_global=question_global, **kwargs)
 
-    def decode(self, input_ids, memory, causal=True, memory_blocked=None):
+    def decode(self, input_ids, memory, causal=True, memory_blocked=None, last_token_only=False):
         target = self.answer_projection(self.answer_embedding.embed_ids(input_ids))
         target_length = input_ids.size(1)
         blocked = input_ids.eq(self.pad_token_id)[:, None, None, :].expand(
@@ -106,7 +115,10 @@ class VQAModel(nn.Module):
             )
         cross_mask = (memory_blocked[:, None, None, :] if memory_blocked is not None
                       else None)
-        return self.mlp(self.decoder(memory, target, blocked, cross_mask))
+        hidden = self.decoder(memory, target, blocked, cross_mask)
+        # Autoregressive generation consumes only the newest position. Avoid
+        # projecting all previous positions into the 30k-token vocabulary again.
+        return self.mlp(hidden[:, -1:] if last_token_only else hidden)
 
     def forward(self, images, questions, answers=None, anno_ids=None, mask=True,
                 mode='train', max_len=None):
@@ -136,7 +148,8 @@ class VQAModel(nn.Module):
                          device=memory.device)
         finished = torch.zeros(memory.size(0), dtype=torch.bool, device=memory.device)
         for _ in range(max_len - 1):
-            logits = self.decode(ids, memory, memory_blocked=memory_blocked)[:, -1, :]
+            logits = self.decode(ids, memory, memory_blocked=memory_blocked,
+                                 last_token_only=True)[:, -1, :]
             logits[:, [self.pad_token_id, self.bos_token_id]] = float('-inf')
             next_ids = logits.argmax(-1).masked_fill(finished, self.pad_token_id)
             ids = torch.cat([ids, next_ids.unsqueeze(1)], dim=1)
@@ -164,4 +177,5 @@ class VQAModel(nn.Module):
             if self.eos_token_id in row:
                 row = row[:row.index(self.eos_token_id)]
             rows.append(row)
-        return self.tokenizer.batch_decode(rows, skip_special_tokens=True)
+        decoded = self.tokenizer.batch_decode(rows, skip_special_tokens=True)
+        return [restore_numeric_spacing(answer) for answer in decoded]

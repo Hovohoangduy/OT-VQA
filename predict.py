@@ -3,7 +3,6 @@ import argparse
 from PIL import Image
 import torch
 
-from configs.config import Config
 from utils.checkpoint import load_model
 from utils.data_processing import preprocess_text
 from utils.device import resolve_device
@@ -31,7 +30,7 @@ def main():
     model = load_model(args.checkpoint, device)
     with Image.open(args.image) as source:
         display_image = source.convert("RGB")
-        image = Config.transforms(display_image).unsqueeze(0).to(device)
+        image = model.image_transform(display_image).unsqueeze(0).to(device)
     question = preprocess_text(args.question)
     result = model.generate(image, [question])
     print(model.answers_from_ids(result)[0])
