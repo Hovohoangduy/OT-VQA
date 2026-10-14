@@ -8,7 +8,7 @@ from torch import nn
 from torch.nn import functional as F
 
 
-def log_sinkhorn(cost, row_marginal, column_marginal, epsilon=0.05, iterations=20):
+def log_sinkhorn(cost, row_marginal, column_marginal, epsilon=0.05, iterations=20, tol=1e-4):
     """Solve batched entropic OT in FP32; zero marginals denote padded entries."""
     if cost.ndim != 3 or row_marginal.shape != cost.shape[:2] or column_marginal.shape != (cost.size(0), cost.size(2)):
         raise ValueError("Cost and marginal shapes are incompatible")
@@ -34,13 +34,19 @@ def log_sinkhorn(cost, row_marginal, column_marginal, epsilon=0.05, iterations=2
     log_columns = column_marginal.clamp_min(1e-30).log()
     log_u = torch.zeros_like(row_marginal).masked_fill(~valid_rows, float("-inf"))
     log_v = torch.zeros_like(column_marginal).masked_fill(~valid_columns, float("-inf"))
-    for _ in range(iterations):
+    for step in range(iterations):
         log_u = (log_rows - torch.logsumexp(log_kernel + log_v.unsqueeze(-2), dim=-1)).masked_fill(
             ~valid_rows, float("-inf")
         )
         log_v = (log_columns - torch.logsumexp(log_kernel + log_u.unsqueeze(-1), dim=-2)).masked_fill(
             ~valid_columns, float("-inf")
         )
+        if tol is not None and step >= 4:
+            log_plan_cur = log_kernel + log_u.unsqueeze(-1) + log_v.unsqueeze(-2)
+            plan_cur = log_plan_cur.masked_fill(~valid_pairs, float("-inf")).exp()
+            row_err = (plan_cur.sum(-1) - row_marginal).abs().amax()
+            if bool(row_err < tol):
+                break
     log_plan = log_kernel + log_u.unsqueeze(-1) + log_v.unsqueeze(-2)
     return log_plan.masked_fill(~valid_pairs, float("-inf")).exp()
 
@@ -49,7 +55,8 @@ class PartialTransportFusion(nn.Module):
     """Align spatial image tokens with valid question tokens and build decoder memory."""
 
     def __init__(self, text_dim, d_model, epsilon=0.05, iterations=20,
-                 dustbin_mass=0.2, dustbin_cost=1.0, visual_memory=False):
+                 dustbin_mass=0.2, dustbin_cost=1.0, visual_memory=False,
+                 num_heads=1, tol=1e-4):
         super().__init__()
         if not 0 <= dustbin_mass < 1:
             raise ValueError("dustbin_mass must be in [0, 1)")
@@ -57,10 +64,15 @@ class PartialTransportFusion(nn.Module):
             raise ValueError("epsilon and iterations must be positive")
         if not 0 <= dustbin_cost <= 2:
             raise ValueError("dustbin_cost must be in [0, 2]")
+        if num_heads < 1 or d_model % num_heads != 0:
+            raise ValueError("d_model must be divisible by num_heads")
         self.epsilon = float(epsilon)
         self.iterations = int(iterations)
         self.dustbin_mass = float(dustbin_mass)
         self.dustbin_cost = float(dustbin_cost)
+        self.num_heads = int(num_heads)
+        self.head_dim = d_model // num_heads
+        self.tol = tol
         self.question_projection = nn.Linear(text_dim, d_model)
         self.grounding_projection = nn.Linear(d_model, d_model)
         self.global_projection = nn.Linear(2 * d_model, d_model)
@@ -82,6 +94,7 @@ class PartialTransportFusion(nn.Module):
         if image_tokens.ndim != 3 or question_tokens.ndim != 3:
             raise ValueError("Image and question tokens must be rank-three tensors")
         batch, patches, d_model = image_tokens.shape
+        num_q_tokens = question_tokens.size(1)
         if patches < 1 or question_tokens.shape[:2] != question_mask.shape or question_tokens.size(0) != batch:
             raise ValueError("Image or question token shapes are invalid")
         if question_tokens.device != image_tokens.device:
@@ -97,32 +110,57 @@ class PartialTransportFusion(nn.Module):
             question_global_value = self.question_projection(question_global)
         image_global_value = image_tokens.mean(1)
 
-        image_cost_values = F.normalize(image_tokens.float(), dim=-1)
-        question_cost_values = F.normalize(question_values.float(), dim=-1)
-        image_cost_global = F.normalize(image_global_value.float(), dim=-1)
-        question_cost_global = F.normalize(question_global_value.float(), dim=-1)
+        H = self.num_heads
+        dh = self.head_dim
+        if H > 1:
+            v = image_tokens.view(batch, patches, H, dh).transpose(1, 2).reshape(batch * H, patches, dh)
+            q = question_values.view(batch, num_q_tokens, H, dh).transpose(1, 2).reshape(batch * H, num_q_tokens, dh)
+            v_glob = image_global_value.view(batch, H, dh).reshape(batch * H, dh)
+            q_glob = question_global_value.view(batch, H, dh).reshape(batch * H, dh)
+            eff_batch = batch * H
+            mask_eff = question_mask.unsqueeze(1).expand(-1, H, -1).reshape(eff_batch, -1)
+            valid_counts_eff = valid_counts.unsqueeze(1).expand(-1, H).reshape(eff_batch)
+        else:
+            v = image_tokens
+            q = question_values
+            v_glob = image_global_value
+            q_glob = question_global_value
+            eff_batch = batch
+            mask_eff = question_mask
+            valid_counts_eff = valid_counts
+
+        image_cost_values = F.normalize(v.float(), dim=-1)
+        question_cost_values = F.normalize(q.float(), dim=-1)
+        image_cost_global = F.normalize(v_glob.float(), dim=-1)
+        question_cost_global = F.normalize(q_glob.float(), dim=-1)
         local_cost = 1 - torch.bmm(image_cost_values, question_cost_values.transpose(1, 2))
         image_to_dustbin = 1 - torch.bmm(image_cost_values, question_cost_global.unsqueeze(-1))
         dustbin_to_question = 1 - torch.bmm(image_cost_global.unsqueeze(1), question_cost_values.transpose(1, 2))
-        # This cost controls whether unused dustbin capacity pairs with the
-        # other dustbin. A fixed high cost would force the maximum discard rate.
-        dustbin_to_dustbin = local_cost.new_full((batch, 1, 1), self.dustbin_cost)
+        dustbin_to_dustbin = local_cost.new_full((eff_batch, 1, 1), self.dustbin_cost)
         cost = torch.cat((
             torch.cat((local_cost, image_to_dustbin), dim=-1),
             torch.cat((dustbin_to_question, dustbin_to_dustbin), dim=-1),
         ), dim=-2)
 
         local_mass = 1 - self.dustbin_mass
-        row_marginal = cost.new_full((batch, patches), local_mass / patches)
-        row_marginal = torch.cat((row_marginal, cost.new_full((batch, 1), self.dustbin_mass)), dim=-1)
-        column_marginal = question_mask.to(cost.dtype) * (local_mass / valid_counts.unsqueeze(-1))
-        column_marginal = torch.cat((column_marginal, cost.new_full((batch, 1), self.dustbin_mass)), dim=-1)
-        plan = log_sinkhorn(cost, row_marginal, column_marginal, self.epsilon, self.iterations)
-        local_plan = plan[:, :patches, :question_tokens.size(1)]
+        row_marginal = cost.new_full((eff_batch, patches), local_mass / patches)
+        row_marginal = torch.cat((row_marginal, cost.new_full((eff_batch, 1), self.dustbin_mass)), dim=-1)
+        column_marginal = mask_eff.to(cost.dtype) * (local_mass / valid_counts_eff.unsqueeze(-1))
+        column_marginal = torch.cat((column_marginal, cost.new_full((eff_batch, 1), self.dustbin_mass)), dim=-1)
+        plan = log_sinkhorn(cost, row_marginal, column_marginal, self.epsilon, self.iterations, tol=self.tol)
+        local_plan = plan[:, :patches, :num_q_tokens]
         matched_per_token = local_plan.sum(1)
-        aligned = torch.bmm(local_plan.transpose(1, 2).to(image_tokens.dtype), image_tokens)
-        aligned = aligned / matched_per_token.clamp_min(1e-8).unsqueeze(-1).to(aligned.dtype)
-        gate = (matched_per_token / column_marginal[:, :-1].clamp_min(1e-8)).clamp(0, 1)
+        aligned_h = torch.bmm(local_plan.transpose(1, 2).to(v.dtype), v)
+        aligned_h = aligned_h / matched_per_token.clamp_min(1e-8).unsqueeze(-1).to(aligned_h.dtype)
+        gate_h = (matched_per_token / column_marginal[:, :-1].clamp_min(1e-8)).clamp(0, 1)
+
+        if H > 1:
+            aligned = aligned_h.view(batch, H, num_q_tokens, dh).transpose(1, 2).reshape(batch, num_q_tokens, d_model)
+            gate = gate_h.view(batch, H, num_q_tokens).mean(dim=1)
+        else:
+            aligned = aligned_h
+            gate = gate_h
+
         grounded = self.token_norm(question_values + gate.unsqueeze(-1).to(question_values.dtype)
                                    * self.grounding_projection(aligned))
         grounded = grounded.masked_fill(~question_mask.unsqueeze(-1), 0)
@@ -133,12 +171,17 @@ class PartialTransportFusion(nn.Module):
         memory_blocked = torch.cat((torch.zeros((batch, 1), dtype=torch.bool, device=question_mask.device),
                                     ~question_mask), dim=1)
         if self.visual_memory:
-            # Reverse conditioning reuses the same partial OT plan. Preserve a
-            # residual path for visual details lost by question-side averaging.
             matched_per_patch = local_plan.sum(-1)
-            aligned_questions = torch.bmm(local_plan.to(question_values.dtype), question_values)
-            aligned_questions = aligned_questions / matched_per_patch.clamp_min(1e-8).unsqueeze(-1)
-            image_gate = (matched_per_patch / row_marginal[:, :-1].clamp_min(1e-8)).clamp(0, 1)
+            aligned_questions_h = torch.bmm(local_plan.to(q.dtype), q)
+            aligned_questions_h = aligned_questions_h / matched_per_patch.clamp_min(1e-8).unsqueeze(-1)
+            image_gate_h = (matched_per_patch / row_marginal[:, :-1].clamp_min(1e-8)).clamp(0, 1)
+            if H > 1:
+                aligned_questions = aligned_questions_h.view(batch, H, patches, dh).transpose(1, 2).reshape(batch, patches, d_model)
+                image_gate = image_gate_h.view(batch, H, patches).mean(dim=1)
+            else:
+                aligned_questions = aligned_questions_h
+                image_gate = image_gate_h
+
             side = math.isqrt(patches)
             if side * side != patches:
                 raise ValueError('Visual memory requires a square spatial token grid')
@@ -155,12 +198,14 @@ class PartialTransportFusion(nn.Module):
                 (batch, patches), dtype=torch.bool, device=image_tokens.device)), dim=1)
         if not return_transport:
             return memory, memory_blocked
+        ot_loss = (local_plan * local_cost).sum(dim=(1, 2)).mean()
         diagnostics = {
-            "plan": plan,
-            "matched_mass": local_plan.sum(dim=(1, 2)),
-            "image_to_dustbin_mass": plan[:, :patches, -1].sum(1),
-            "dustbin_to_question_mass": plan[:, -1, :-1].sum(1),
-            "dustbin_to_dustbin_mass": plan[:, -1, -1],
+            "plan": plan.view(batch, H, patches + 1, -1) if H > 1 else plan,
+            "matched_mass": local_plan.sum(dim=(1, 2)).view(batch, H).mean(-1) if H > 1 else local_plan.sum(dim=(1, 2)),
+            "ot_loss": ot_loss,
+            "image_to_dustbin_mass": plan[:, :patches, -1].sum(1).view(batch, H).mean(-1) if H > 1 else plan[:, :patches, -1].sum(1),
+            "dustbin_to_question_mass": plan[:, -1, :-1].sum(1).view(batch, H).mean(-1) if H > 1 else plan[:, -1, :-1].sum(1),
+            "dustbin_to_dustbin_mass": plan[:, -1, -1].view(batch, H).mean(-1) if H > 1 else plan[:, -1, -1],
             "row_residual": (plan.sum(-1) - row_marginal).abs().amax(-1),
             "column_residual": (plan.sum(-2) - column_marginal).abs().amax(-1),
         }

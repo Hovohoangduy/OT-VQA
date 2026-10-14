@@ -9,14 +9,33 @@ from configs.config import Config
 from model.decoder_model import Decoder
 from model.features_extraction import AnswerEmbedding, ImageEmbedding, QuestionEmbedding, validate_english_text_model
 from model.optimal_transport import PartialTransportFusion
-from utils.answer_text import restore_numeric_spacing
+from utils.answer_text import postprocess_answer, restore_numeric_spacing
 from utils.image_processing import build_image_transform
+
+
+class TiedOutputProjection(nn.Module):
+    """Output projection head tied to answer token embeddings to regularize vocabulary prediction."""
+
+    def __init__(self, d_model, word_embeddings, drop_prob=0.3):
+        super().__init__()
+        self.word_embeddings = word_embeddings
+        emb_dim = word_embeddings.embedding_dim
+        self.proj = nn.Sequential(
+            nn.Dropout(p=drop_prob),
+            nn.Linear(d_model, emb_dim),
+            nn.GELU(),
+        )
+        self.bias = nn.Parameter(torch.zeros(word_embeddings.num_embeddings))
+
+    def forward(self, x):
+        hidden = self.proj(x)
+        return torch.nn.functional.linear(hidden, self.word_embeddings.weight, self.bias)
 
 
 class VQAModel(nn.Module):
     """Generate answers from question-conditioned image features."""
 
-    def __init__(self, vocab_size=None, output_size=768, d_model=768, num_heads=4,
+    def __init__(self, vocab_size=None, output_size=None, d_model=768, num_heads=4,
                  ffn_hidden=2048, drop_prob=0.1, num_layers=4,
                  mode='train', text_model=Config.text_model, image_model=Config.image_model,
                  freeze_answer_embeddings=False, freeze_question_encoder=False, ot_epsilon=0.05,
@@ -24,8 +43,9 @@ class VQAModel(nn.Module):
                  max_answer_tokens=Config.MAX_LEN_ANS,
                  max_question_tokens=Config.MAX_LEN_QUES, fusion='ot',
                  image_size=256, image_preprocessing='crop', ot_visual_memory=False,
-                 figure_context=False):
+                 figure_context=False, tie_weights=False, ot_num_heads=1):
         super().__init__()
+        output_size = d_model if output_size is None else output_size
         if output_size != d_model:
             raise ValueError('output_size must equal d_model')
         if max_answer_tokens < 2:
@@ -46,6 +66,8 @@ class VQAModel(nn.Module):
         self.image_size = image_size
         self.image_preprocessing = image_preprocessing
         self.figure_context = figure_context
+        self.tie_weights = tie_weights
+        self.ot_num_heads = ot_num_heads
         self.image_transform = build_image_transform(image_size, image_preprocessing)
         self.model_config = dict(
             output_size=output_size, d_model=d_model, num_heads=num_heads,
@@ -60,6 +82,8 @@ class VQAModel(nn.Module):
             image_size=image_size, image_preprocessing=image_preprocessing,
             ot_visual_memory=ot_visual_memory,
             figure_context=figure_context,
+            tie_weights=tie_weights,
+            ot_num_heads=ot_num_heads,
         )
         self.image_model = ImageEmbedding(image_model, image_size=image_size)
         self.question_encoder = QuestionEmbedding(model_name=text_model,
@@ -88,15 +112,22 @@ class VQAModel(nn.Module):
             iterations=ot_iterations, dustbin_mass=ot_dustbin_mass,
             dustbin_cost=ot_dustbin_cost,
             visual_memory=ot_visual_memory,
+            num_heads=ot_num_heads,
         )
         self.decoder = Decoder(d_model, ffn_hidden, num_heads, drop_prob, num_layers)
         actual_vocab = self.answer_embedding.token_embeddings.word_embeddings.num_embeddings
         if vocab_size is not None and vocab_size != actual_vocab:
             raise ValueError('vocab_size must match the text model embedding vocabulary')
-        self.mlp = nn.Sequential(
-            nn.Dropout(p=0.3), nn.Linear(d_model, d_model), nn.GELU(),
-            nn.Linear(d_model, actual_vocab),
-        )
+        if tie_weights:
+            self.mlp = TiedOutputProjection(
+                d_model, self.answer_embedding.token_embeddings.word_embeddings,
+                drop_prob=max(drop_prob, 0.25),
+            )
+        else:
+            self.mlp = nn.Sequential(
+                nn.Dropout(p=max(drop_prob, 0.2)), nn.Linear(d_model, d_model), nn.GELU(),
+                nn.Linear(d_model, actual_vocab),
+            )
 
     def encode(self, images, questions, anno_ids=None, return_transport=False):
         image_embeddings, _ = self.image_model(images, image_ids=anno_ids)
@@ -127,16 +158,26 @@ class VQAModel(nn.Module):
         return self.mlp(hidden[:, -1:] if last_token_only else hidden)
 
     def forward(self, images, questions, answers=None, anno_ids=None, mask=True,
-                mode='train', max_len=None):
+                mode='train', max_len=None, return_ot_loss=False):
         if mode not in {'train', 'eval', 'test', 'infer', 'generate'}:
             raise ValueError(f'Unknown mode: {mode}')
         max_len = self.max_answer_tokens if max_len is None else max_len
         if mode in {'test', 'infer', 'generate'} or answers is None:
             return self.generate(images, questions, anno_ids, max_len)
-        memory, memory_blocked = self.encode(images, questions, anno_ids)
+        if return_ot_loss:
+            memory, memory_blocked, diagnostics = self.encode(
+                images, questions, anno_ids, return_transport=True
+            )
+            ot_loss = diagnostics.get("ot_loss")
+        else:
+            memory, memory_blocked = self.encode(images, questions, anno_ids)
+            ot_loss = None
         ids = self.answer_embedding.tokenize(answers, max_len)
-        return self.decode(ids[:, :-1], memory, causal=mask,
-                           memory_blocked=memory_blocked), ids[:, 1:]
+        logits = self.decode(ids[:, :-1], memory, causal=mask,
+                             memory_blocked=memory_blocked)
+        if return_ot_loss:
+            return logits, ids[:, 1:], ot_loss
+        return logits, ids[:, 1:]
 
     @torch.no_grad()
     def evaluate_batch(self, images, questions, answers, anno_ids=None,
@@ -184,4 +225,4 @@ class VQAModel(nn.Module):
                 row = row[:row.index(self.eos_token_id)]
             rows.append(row)
         decoded = self.tokenizer.batch_decode(rows, skip_special_tokens=True)
-        return [restore_numeric_spacing(answer) for answer in decoded]
+        return [postprocess_answer(answer) for answer in decoded]

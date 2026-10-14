@@ -15,17 +15,22 @@ class ImageEmbedding(nn.Module):
     def __init__(self, model_name=Config.image_model, image_size=256):
         super().__init__()
         self.process = AutoImageProcessor.from_pretrained(model_name)
-        self.model = AutoModel.from_pretrained(model_name)
+        if "siglip" in str(model_name).lower():
+            from transformers import SiglipVisionModel
+            self.model = SiglipVisionModel.from_pretrained(model_name)
+        else:
+            self.model = AutoModel.from_pretrained(model_name)
         self.image_size = image_size
-        configured_size = self.model.config.image_size
+        model_type = getattr(self.model.config, "model_type", "").lower()
+        configured_size = getattr(self.model.config, "image_size", image_size)
         configured_size = ((configured_size, configured_size) if isinstance(configured_size, int)
                            else tuple(configured_size))
-        if (self.model.config.model_type != 'mobilevitv2' and image_size != 256
-                and configured_size != (image_size, image_size)):
-            raise ValueError('Custom image_size is currently supported only for MobileViTV2; '
-                             'other encoders must use their configured image size')
-        self.has_cls_token = self.model.config.model_type == 'vit'
-        if self.model.config.model_type == 'mobilevitv2':
+        if (model_type not in ("mobilevitv2", "siglip", "siglip_vision_model")
+                and image_size != 256 and configured_size != (image_size, image_size)):
+            raise ValueError("Custom image_size is currently supported only for MobileViTV2 and SigLIP; "
+                             "other encoders must use their configured image size")
+        self.has_cls_token = model_type == "vit"
+        if model_type == "mobilevitv2":
             self.output_dim = self.model.encoder.layer[-1].conv_projection.convolution.out_channels
         else:
             self.output_dim = self.model.config.hidden_size
@@ -38,9 +43,15 @@ class ImageEmbedding(nn.Module):
         return self
 
     def forward(self, image, image_ids=None):
-        device = next(self.model.parameters()).device
-        mobilevit = self.model.config.model_type == 'mobilevitv2'
-        expected_size = (self.image_size, self.image_size) if mobilevit else self.model.config.image_size
+        try:
+            device = next(self.model.parameters()).device
+        except StopIteration:
+            device = image.device
+        model_type = getattr(self.model.config, "model_type", "").lower()
+        mobilevit = model_type == "mobilevitv2"
+        siglip = "siglip" in model_type
+        configured_size = getattr(self.model.config, "image_size", self.image_size)
+        expected_size = (self.image_size, self.image_size) if (mobilevit or siglip) else configured_size
         if isinstance(expected_size, int):
             expected_size = (expected_size, expected_size)
         # Dataset preprocessing is checkpoint-controlled. Never send a prepared
@@ -49,9 +60,9 @@ class ImageEmbedding(nn.Module):
         if (image.ndim == 4 and image.shape[1] == 3 and image.shape[-2:] == tuple(expected_size)
                 and image.is_floating_point()):
             image = image.to(device)
-            if getattr(self.process, 'do_flip_channel_order', False):
+            if getattr(self.process, "do_flip_channel_order", False):
                 image = image.flip(1)
-            if getattr(self.process, 'do_normalize', False):
+            if getattr(self.process, "do_normalize", False):
                 mean = image.new_tensor(self.process.image_mean).view(1, 3, 1, 1)
                 std = image.new_tensor(self.process.image_std).view(1, 3, 1, 1)
                 image = (image - mean) / std
@@ -59,10 +70,10 @@ class ImageEmbedding(nn.Module):
         else:
             # Preserve the processor path for unusual input sizes or formats.
             if image.ndim != 4 or image.shape[1] != 3:
-                raise ValueError('Expected a batched RGB image tensor [B,3,H,W]')
-            if mobilevit:
+                raise ValueError("Expected a batched RGB image tensor [B,3,H,W]")
+            if mobilevit or siglip:
                 image = torch.nn.functional.interpolate(image.float(), size=expected_size,
-                                                        mode='bilinear', align_corners=False)
+                                                        mode="bilinear", align_corners=False)
                 inputs = self.process(images=image.detach().cpu(), do_rescale=False,
                                       do_resize=False, do_center_crop=False,
                                       return_tensors="pt")

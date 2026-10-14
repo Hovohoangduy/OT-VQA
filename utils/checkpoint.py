@@ -20,6 +20,7 @@ MODEL_CONFIG_KEYS = {
     "ot_dustbin_mass", "ot_dustbin_cost", "max_answer_tokens", "max_question_tokens",
     "fusion",
     "image_size", "image_preprocessing", "ot_visual_memory", "figure_context",
+    "tie_weights", "ot_num_heads",
 }
 
 

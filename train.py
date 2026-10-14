@@ -37,8 +37,10 @@ from utils.image_processing import build_image_transform
 from utils.losses import AnswerCrossEntropyLoss
 
 
-def _forward_batch(model, batch, device):
+def _forward_batch(model, batch, device, return_ot_loss=False):
     anno_ids, images, questions, answers = batch
+    if return_ot_loss:
+        return model(images.to(device), questions, answers, anno_ids, return_ot_loss=True)
     return model(images.to(device), questions, answers, anno_ids)
 
 
@@ -49,11 +51,11 @@ def _format_epoch_metrics(epoch, total_epochs, split, loss, scores):
 
 def train(model, train_loader, num_epochs, optimizer, scheduler, criterion,
           vocab_swap=None, device=None, epoch_offset=0,
-          total_epochs=None, gradient_clip=None):
+          total_epochs=None, gradient_clip=None, ot_loss_weight=0.0):
     """Run teacher-forced optimization; score generated answers after this step."""
     device = device or next(model.parameters()).device
     base_model = model.module if isinstance(model, DistributedDataParallel) else model
-    losses, epoch_losses = [], []
+    losses, epoch_losses, epoch_ot_losses = [], [], []
     if len(train_loader) == 0:
         raise ValueError("Training dataset is empty")
     for epoch in range(num_epochs):
@@ -61,10 +63,17 @@ def train(model, train_loader, num_epochs, optimizer, scheduler, criterion,
         displayed_total = total_epochs if total_epochs is not None else epoch_offset + num_epochs
         model.train()
         total_loss = 0.0
+        total_ot_loss = 0.0
         total_weight = 0
+        use_ot_loss = ot_loss_weight > 0.0
         for batch_idx, batch in enumerate(train_loader):
-            logits, targets = _forward_batch(model, batch, device)
-            loss = criterion(logits.transpose(1, 2), targets)
+            if use_ot_loss:
+                logits, targets, ot_loss = _forward_batch(model, batch, device, return_ot_loss=True)
+            else:
+                logits, targets = _forward_batch(model, batch, device, return_ot_loss=False)
+                ot_loss = None
+            ce_loss = criterion(logits.transpose(1, 2), targets)
+            loss = ce_loss + (ot_loss_weight * ot_loss if ot_loss is not None else 0.0)
             if not torch.isfinite(loss):
                 raise FloatingPointError("Training loss is NaN or infinity")
             optimizer.zero_grad(set_to_none=True)
@@ -79,17 +88,24 @@ def train(model, train_loader, num_epochs, optimizer, scheduler, criterion,
             batch_weight = (targets.size(0) if getattr(criterion, "normalization", "token") == "example"
                             else targets.ne(base_model.pad_token_id).sum().item())
             total_loss += loss.item() * batch_weight
+            if ot_loss is not None:
+                total_ot_loss += ot_loss.item() * batch_weight
             total_weight += batch_weight
             losses.append(loss.item())
             if (batch_idx + 1) % 2000 == 0:
-                print(f"Epoch {displayed_epoch}/{displayed_total}, "
-                      f"batch {batch_idx + 1}: loss={loss.item():.4f}")
+                msg = (f"Epoch {displayed_epoch}/{displayed_total}, "
+                       f"batch {batch_idx + 1}: loss={loss.item():.4f}")
+                if ot_loss is not None:
+                    msg += f" (ce={ce_loss.item():.4f}, ot={ot_loss.item():.4f})"
+                print(msg)
         if dist.is_available() and dist.is_initialized():
-            totals = torch.tensor([total_loss, total_weight], dtype=torch.float64, device=device)
+            totals = torch.tensor([total_loss, total_ot_loss, total_weight], dtype=torch.float64, device=device)
             dist.all_reduce(totals, op=dist.ReduceOp.SUM)
-            total_loss, total_weight = totals.tolist()
+            total_loss, total_ot_loss, total_weight = totals.tolist()
         epoch_losses.append(total_loss / max(total_weight, 1))
-    return losses, epoch_losses
+        if use_ot_loss:
+            epoch_ot_losses.append(total_ot_loss / max(total_weight, 1))
+    return losses, epoch_losses, epoch_ot_losses
 
 
 def _make_loader(args, split, shuffle, text_model, image_model, rank=0, world_size=1,
@@ -252,7 +268,8 @@ def _run_training(args, device, rank, world_size):
         stored_config = dict(resume["model_config"])
         for name, default in (("image_size", 256), ("image_preprocessing", "crop"),
                               ("freeze_question_encoder", False),
-                              ("ot_visual_memory", False), ("figure_context", False)):
+                              ("ot_visual_memory", False), ("figure_context", False),
+                              ("tie_weights", False), ("ot_num_heads", 1)):
             value = getattr(args, name)
             if value is not None and value != stored_config.get(name, default):
                 raise ValueError(f"--{name} does not match the resume checkpoint; start a fresh run")
@@ -295,6 +312,7 @@ def _run_training(args, device, rank, world_size):
                                           else 0.2),
                          ot_dustbin_cost=(args.ot_dustbin_cost if args.ot_dustbin_cost is not None
                                           else 1.0),
+                         ot_num_heads=args.ot_num_heads if args.ot_num_heads is not None else 1,
                          max_answer_tokens=(args.max_answer_tokens if args.max_answer_tokens is not None
                                             else Config.MAX_LEN_ANS),
                          max_question_tokens=(args.max_question_tokens if args.max_question_tokens is not None
@@ -302,7 +320,8 @@ def _run_training(args, device, rank, world_size):
                          image_size=args.image_size if args.image_size is not None else 256,
                          image_preprocessing=args.image_preprocessing or "crop",
                          ot_visual_memory=bool(args.ot_visual_memory),
-                         figure_context=bool(args.figure_context)).to(device)
+                         figure_context=bool(args.figure_context),
+                         tie_weights=bool(args.tie_weights)).to(device)
 
     train_loader = _make_loader(args, "train", True, text_model, image_model,
                                 rank=rank, world_size=world_size,
@@ -410,12 +429,15 @@ def _run_training(args, device, rank, world_size):
     for epoch in range(start_epoch, args.epochs):
         if isinstance(train_loader.sampler, DistributedSampler):
             train_loader.sampler.set_epoch(epoch)
-        _, epoch_losses = train(
+        train_output = train(
             training_model, train_loader, 1, optimizer, scheduler, train_criterion,
             device=device,
             epoch_offset=epoch, total_epochs=args.epochs,
             gradient_clip=args.gradient_clip or None,
+            ot_loss_weight=getattr(args, "ot_loss_weight", 0.0) or 0.0,
         )
+        epoch_losses = train_output[1]
+        epoch_ot_losses = train_output[2] if len(train_output) > 2 else []
         train_loss = epoch_losses[-1]
         global_step += len(train_loader)
         stop = False
@@ -427,8 +449,11 @@ def _run_training(args, device, rank, world_size):
                     bert_scorer=bert_scorer, dataset=dataset_name,
                 )
                 train_scores = training["metrics"]
-            print(_format_epoch_metrics(epoch + 1, args.epochs, "Train", train_loss,
-                                        train_scores))
+            train_msg = _format_epoch_metrics(epoch + 1, args.epochs, "Train", train_loss,
+                                               train_scores)
+            if epoch_ot_losses and getattr(args, "ot_loss_weight", 0.0):
+                train_msg += f", ot_loss={epoch_ot_losses[-1]:.4f}"
+            print(train_msg)
             validation = evaluation(
                 model, dev_loader, validation_criterion, device=device,
                 bert_scorer=bert_scorer, dataset=dataset_name,
@@ -467,6 +492,8 @@ def _run_training(args, device, rank, world_size):
                    "train_eval_examples": len(train_eval_loader.dataset) if train_eval_loader else 0,
                    "improved": improved,
                    "epochs_without_improvement": epochs_without_improvement}
+            if epoch_ot_losses and getattr(args, "ot_loss_weight", 0.0):
+                row["train_ot_loss"] = epoch_ot_losses[-1]
             history.append(row)
             with metrics_path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(row) + "\n")

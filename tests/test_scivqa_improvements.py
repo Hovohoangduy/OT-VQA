@@ -11,10 +11,11 @@ from configs.arg_parser import get_args
 from diagnose_training import _different_image_sources
 from model.features_extraction import ImageEmbedding, QuestionEmbedding
 from model.optimal_transport import PartialTransportFusion
-from utils.answer_text import restore_numeric_spacing
+from model.vqa_model import TiedOutputProjection, VQAModel
+from utils.answer_text import postprocess_answer, restore_numeric_spacing
 from utils.image_processing import build_image_transform
 from utils.metrics import scivqa_score_pairs
-from utils.vqa_dataset import VQADataset, append_figure_context
+from utils.vqa_dataset import VQADataset, append_figure_context, format_qa_prompt
 
 
 @pytest.mark.parametrize("decoded,expected", [
@@ -102,14 +103,17 @@ def test_sci_defaults_and_explicit_baseline_overrides():
     assert args.lr == 1e-5 and args.encoder_lr == 2e-6 and args.warmup_ratio == 0.05
     assert args.freeze_question_encoder is True
     assert args.loss_normalization == "example"
-    assert args.image_size == 512 and args.image_preprocessing == "pad"
+    assert args.image_size == 384 and args.image_preprocessing == "pad"
+    assert args.image_model == "google/siglip-base-patch16-384"
+    assert args.figure_context is True
+    assert args.tie_weights is True
     assert args.ot_visual_memory is None
     args = get_args(["--dataset", "scivqa", "--lr", "1e-5", "--warmup_ratio", "0",
                      "--selection_metric", "loss", "--image_size", "512", "--image_preprocessing", "pad"])
     assert args.lr == 1e-5 and args.warmup_ratio == 0 and args.selection_metric == "loss"
     assert args.image_size == 512 and args.image_preprocessing == "pad"
     assert get_args(["--dataset", "scivqa", "--loss_normalization", "token"]).loss_normalization == "token"
-    assert get_args(["--dataset", "scivqa", "--figure_context"]).figure_context is True
+    assert get_args(["--dataset", "scivqa", "--no-figure_context"]).figure_context is False
     assert get_args(["--dataset", "scivqa", "--no-freeze_question_encoder"]).freeze_question_encoder is False
     assert get_args(["--dataset", "plantexpert"]).freeze_question_encoder is False
 
@@ -336,3 +340,116 @@ def test_resume_cannot_change_figure_context(monkeypatch):
     args = get_args(["--dataset", "scivqa", "--resume", "old.pt", "--figure_context"])
     with pytest.raises(ValueError, match="--figure_context does not match"):
         train._run_training(args, torch.device("cpu"), rank=0, world_size=1)
+
+
+def test_postprocess_answer_normalizes_scivqa():
+    assert postprocess_answer("it is not possible to answer this") == (
+        "It is not possible to answer this question based only on the provided data."
+    )
+    assert postprocess_answer("Option B") == "B"
+    assert postprocess_answer("choice (C)") == "C"
+    assert postprocess_answer("A, B, C") == "A,B,C"
+    assert postprocess_answer("0. 5") == "0.5"
+
+
+def test_format_qa_prompt_by_type():
+    q = "Is this higher?"
+    assert "Yes" in format_qa_prompt(q, "closed-ended finite answer set binary visual")
+    assert "letter" in format_qa_prompt("Which line?", "closed-ended finite answer set non-binary visual")
+    assert "numerical" in format_qa_prompt("What value?", "closed-ended infinite answer set visual")
+
+
+def test_tied_output_projection():
+    embeddings = nn.Embedding(50, 32)
+    tied = TiedOutputProjection(d_model=64, word_embeddings=embeddings)
+    x = torch.randn(2, 4, 64)
+    logits = tied(x)
+    assert logits.shape == (2, 4, 50)
+    assert tied.bias.shape == (50,)
+
+
+def test_siglip_image_embedding_patch_grid():
+    class SiglipBackbone(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = nn.Parameter(torch.zeros(1))
+            self.config = SimpleNamespace(model_type="siglip_vision_model", hidden_size=768, image_size=384)
+
+        def forward(self, pixel_values):
+            assert pixel_values.shape == (1, 3, 384, 384)
+            return SimpleNamespace(last_hidden_state=torch.zeros(1, 576, 768))
+
+    encoder = ImageEmbedding.__new__(ImageEmbedding)
+    nn.Module.__init__(encoder)
+    encoder.image_size = 384
+    encoder.model = SiglipBackbone()
+    encoder.process = SimpleNamespace(do_flip_channel_order=False, do_normalize=False)
+    pixels = torch.zeros(1, 3, 384, 384)
+    features, _ = encoder(pixels)
+    assert features.shape == (1, 576, 768)
+
+
+def test_multi_head_optimal_transport_forward_and_backward():
+    fusion = PartialTransportFusion(
+        text_dim=64, d_model=64, num_heads=4, visual_memory=True, tol=1e-4
+    )
+    assert fusion.num_heads == 4
+    assert fusion.head_dim == 16
+    image_tokens = torch.randn(2, 16, 64, requires_grad=True)
+    question_tokens = torch.randn(2, 8, 64, requires_grad=True)
+    question_mask = torch.ones(2, 8, dtype=torch.bool)
+    memory, memory_blocked, diagnostics = fusion(
+        image_tokens, question_tokens, question_mask, return_transport=True
+    )
+    # Memory: 1 global + 8 question + 16 visual = 25 tokens
+    assert memory.shape == (2, 25, 64)
+    assert memory_blocked.shape == (2, 25)
+    assert diagnostics["plan"].shape == (2, 4, 16 + 1, 8 + 1)
+    assert diagnostics["matched_mass"].shape == (2,)
+    assert diagnostics["image_to_dustbin_mass"].shape == (2,)
+    assert diagnostics["dustbin_to_question_mass"].shape == (2,)
+    assert diagnostics["dustbin_to_dustbin_mass"].shape == (2,)
+    assert diagnostics["ot_loss"].ndim == 0
+    assert diagnostics["ot_loss"].item() >= 0
+    loss = memory.sum() + 0.05 * diagnostics["ot_loss"]
+    loss.backward()
+    assert image_tokens.grad is not None and torch.isfinite(image_tokens.grad).all()
+    assert question_tokens.grad is not None and torch.isfinite(question_tokens.grad).all()
+
+
+def test_log_sinkhorn_adaptive_early_stopping():
+    from model.optimal_transport import log_sinkhorn
+    cost = torch.rand(2, 10, 10)
+    row_marginal = torch.full((2, 10), 0.1)
+    col_marginal = torch.full((2, 10), 0.1)
+    plan_adaptive = log_sinkhorn(cost, row_marginal, col_marginal, epsilon=0.05, iterations=40, tol=1e-4)
+    plan_full = log_sinkhorn(cost, row_marginal, col_marginal, epsilon=0.05, iterations=40, tol=None)
+    assert torch.allclose(plan_adaptive.sum(-1), row_marginal, atol=1e-3)
+    assert torch.allclose(plan_adaptive, plan_full, atol=1e-3)
+
+
+def test_vqa_model_return_ot_loss_and_config():
+    from utils.checkpoint import MODEL_CONFIG_KEYS
+    assert "ot_num_heads" in MODEL_CONFIG_KEYS
+
+    scivqa_args = get_args(["--dataset", "scivqa"])
+    assert scivqa_args.ot_num_heads == 4
+    assert scivqa_args.ot_loss_weight == 0.05
+
+    gqa_args = get_args(["--dataset", "gqa"])
+    assert gqa_args.ot_num_heads == 1
+    assert gqa_args.ot_loss_weight == 0.0
+
+
+def test_resume_cannot_change_ot_num_heads(monkeypatch):
+    import train
+    checkpoint = {
+        "format_version": 4, "training_config": {"loss_normalization": "token"},
+        "model_config": {"figure_context": True, "tie_weights": True, "ot_num_heads": 1}, "best_metric": {},
+        "text_model": "text", "image_model": "image",
+    }
+    monkeypatch.setattr(train, "read_checkpoint", lambda *args: checkpoint)
+    args = get_args(["--dataset", "scivqa", "--resume", "old.pt", "--ot_num_heads", "4"])
+    with pytest.raises(ValueError, match="--ot_num_heads does not match"):
+        train._run_training(args, torch.device("cpu"), rank=0, world_size=1)
+

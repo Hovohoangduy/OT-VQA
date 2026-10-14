@@ -140,28 +140,29 @@ Kaggle notebook. This is a candidate experiment, not a guaranteed improvement.
 ```bash
 !torchrun --standalone --nnodes=1 --nproc_per_node=2 train.py \
   --dataset scivqa --device cuda --fusion ot \
+  --image_model google/siglip-base-patch16-384 \
   --text_model sentence-transformers/all-MiniLM-L12-v2 \
-  --epochs 30 --batch_size 8 \
+  --epochs 25 --batch_size 8 \
   --d_model 384 --ffn_hidden 1024 --num_layers 2 --num_heads 4 \
   --lr 1e-5 --warmup_ratio 0.05 \
-  --weight_decay 0.05 --label_smoothing 0.1 --drop_prob 0.2 \
+  --weight_decay 0.05 --label_smoothing 0.1 --drop_prob 0.25 \
   --loss_normalization example \
   --freeze_answer_embeddings --freeze_question_encoder --gradient_clip 1.0 \
-  --early_stopping_patience 8 --selection_metric rouge_l_f1 \
-  --max_question_tokens 256 --max_answer_tokens 64 \
-  --train_eval_samples 512 --num_workers 2 \
-  --image_size 512 --image_preprocessing pad --no-ot_visual_memory \
+  --early_stopping_patience 6 --selection_metric rouge_l_f1 \
+  --figure_context --max_question_tokens 512 --max_answer_tokens 64 \
+  --image_size 384 --image_preprocessing pad --ot_visual_memory --tie_weights \
+  --ot_num_heads 4 --ot_loss_weight 0.05 \
   --train_csv_path /kaggle/input/datasets/duyho2907/sci-vqa-dataset-nganga01/scivqa_dataset/train.csv \
   --dev_csv_path /kaggle/input/datasets/duyho2907/sci-vqa-dataset-nganga01/scivqa_dataset/val.csv \
   --img_path /kaggle/input/datasets/duyho2907/sci-vqa-dataset-nganga01/scivqa_dataset/images \
-  --model_path /kaggle/working/scivqa_ot_pad512_frozen_question
+  --model_path /kaggle/working/scivqa_ot_siglip384_recipe
 ```
 
-Compare this run's best validation ROUGE-L F1 with **0.4626** from the supplied
-log. Use its `best.pt`, not `last.pt`. For a control that isolates question
-encoder freezing, repeat the command with `--no-freeze_question_encoder
---encoder_lr 2e-6` and a different `--model_path`. Do not resume the supplied
-checkpoint into either run.
+Compare this run's best validation ROUGE-L F1 with **0.4626** from the legacy MobileViT
+log. Use its `best.pt`, not `last.pt`. SigLIP Base 384 extracts 576 multimodal patches
+($24 \times 24$ spatial grid) with vision-language pretrained features, combined with
+`--ot_visual_memory` 2D position embeddings and `--tie_weights` decoder projection.
+Do not resume the old MobileViT checkpoint into a SigLIP run.
 
 ## Figure context run against the paper
 

@@ -44,6 +44,8 @@ def get_args(argv=None, *, evaluation=False):
                         help="Append spatial image tokens conditioned by the same OT plan; default off")
     parser.add_argument("--figure_context", action=argparse.BooleanOptionalAction, default=None,
                         help="Append the SciVQA figure type and caption to each question; default off")
+    parser.add_argument("--tie_weights", action=argparse.BooleanOptionalAction, default=None,
+                        help="Tie decoder output projection to answer token embeddings")
     parser.add_argument("--split", choices=["dev", "test"], default="dev")
     parser.add_argument("--resume", default=None, help="Version-3/4 training checkpoint to resume")
     parser.add_argument("--save_every_epoch", action="store_true",
@@ -99,6 +101,10 @@ def get_args(argv=None, *, evaluation=False):
                         help="Marginal mass assigned to each dustbin (new OT runs default to 0.2)")
     parser.add_argument("--ot_dustbin_cost", type=float, default=None,
                         help="Dustbin-to-dustbin transport cost (new OT runs default to 1.0)")
+    parser.add_argument("--ot_num_heads", type=int, default=1,
+                        help="Number of heads for Multi-Head Optimal Transport (MH-OT); default 1 (4 for SciVQA)")
+    parser.add_argument("--ot_loss_weight", type=float, default=0.0,
+                        help="Weight for auxiliary Kantorovich OT alignment loss; default 0.0 (0.05 for SciVQA)")
     parser.add_argument(
         "--freeze_answer_embeddings",
         action=argparse.BooleanOptionalAction,
@@ -134,7 +140,7 @@ def get_args(argv=None, *, evaluation=False):
     if evaluation or args.resume:
         supplied = {item.split("=", 1)[0] for item in (sys.argv[1:] if argv is None else argv)
                     if item.startswith("--")}
-        for name in ("image_size", "image_preprocessing", "freeze_question_encoder"):
+        for name in ("image_size", "image_preprocessing", "freeze_question_encoder", "tie_weights", "ot_num_heads"):
             if f"--{name}" not in supplied and f"--no-{name}" not in supplied:
                 setattr(args, name, None)
         if args.resume and "--loss_normalization" not in supplied:

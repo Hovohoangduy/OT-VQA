@@ -33,9 +33,27 @@ def append_figure_context(question, caption, figure_type):
     return text
 
 
+def format_qa_prompt(question, qa_pair_type=None):
+    """Add concise format guidance to question based on SciVQA question type."""
+    text = str(question)
+    if not isinstance(qa_pair_type, str) or not qa_pair_type.strip():
+        return text
+    kind = qa_pair_type.lower()
+    if "binary" in kind and "non-binary" not in kind:
+        if "answer with" not in text.lower() and "yes or no" not in text.lower():
+            text += "\nAnswer with 'Yes' or 'No'."
+    elif "non-binary" in kind:
+        if "return only" not in text.lower() and "letter" not in text.lower():
+            text += "\nReturn only the letter(s) of the correct answer."
+    elif "infinite" in kind and "visual" in kind:
+        if "numerical value" not in text.lower() and "number" not in text.lower():
+            text += "\nAnswer with only the raw numerical value."
+    return text
+
+
 class VQADataset(Dataset):
     def __init__(self, dataframe, transform=None, img_path="data/gqa_dataset/images",
-                 dataset_name="plantexpert", figure_context=False):
+                 dataset_name="plantexpert", figure_context=False, qa_prompt=True):
         if figure_context and not {"caption", "figure_type"}.issubset(dataframe.columns):
             raise ValueError("Figure context requires caption and figure_type CSV columns")
         self.data = dataframe
@@ -43,6 +61,7 @@ class VQADataset(Dataset):
         self.img_path = Path(img_path)
         self.dataset_name = dataset_name
         self.figure_context = figure_context
+        self.qa_prompt = qa_prompt
 
     def __len__(self):
         return len(self.data)
@@ -61,6 +80,8 @@ class VQADataset(Dataset):
         if self.transform:
             image = self.transform(image)
         question = str(row["question"])
+        if self.qa_prompt and "qa_pair_type" in row and isinstance(row["qa_pair_type"], str):
+            question = format_qa_prompt(question, row["qa_pair_type"])
         if self.figure_context:
             question = append_figure_context(question, row["caption"], row["figure_type"])
         return row.get("anno_id", idx), image, question, str(row.get("answer", ""))
