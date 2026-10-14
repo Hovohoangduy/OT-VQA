@@ -19,7 +19,7 @@ MODEL_CONFIG_KEYS = {
     "freeze_answer_embeddings", "ot_epsilon", "ot_iterations",
     "ot_dustbin_mass", "ot_dustbin_cost", "max_answer_tokens", "max_question_tokens",
     "fusion",
-    "image_size", "image_preprocessing", "ot_visual_memory",
+    "image_size", "image_preprocessing", "ot_visual_memory", "figure_context",
 }
 
 
@@ -76,6 +76,7 @@ def checkpoint_payload(
             "max_answer_length": getattr(model, "max_answer_tokens", Config.MAX_LEN_ANS),
             "image_size": model.image_size,
             "image_preprocessing": model.image_preprocessing,
+            "figure_context": model.figure_context,
         },
         "optimizer_state_dict": optimizer.state_dict() if optimizer is not None else None,
         "scheduler_state_dict": scheduler.state_dict() if scheduler is not None else None,

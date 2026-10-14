@@ -23,13 +23,26 @@ def resolve_image_root(dataframe, img_path, split, override=None):
     return root
 
 
+def append_figure_context(question, caption, figure_type):
+    """Keep the question first so long captions cannot truncate it away."""
+    text = str(question)
+    if isinstance(figure_type, str) and figure_type.strip() and "Figure type:" not in text:
+        text += f"\nFigure type: {figure_type.strip()}"
+    if isinstance(caption, str) and caption.strip() and "Figure caption:" not in text:
+        text += f"\nFigure caption: {caption.strip()}"
+    return text
+
+
 class VQADataset(Dataset):
     def __init__(self, dataframe, transform=None, img_path="data/gqa_dataset/images",
-                 dataset_name="plantexpert"):
+                 dataset_name="plantexpert", figure_context=False):
+        if figure_context and not {"caption", "figure_type"}.issubset(dataframe.columns):
+            raise ValueError("Figure context requires caption and figure_type CSV columns")
         self.data = dataframe
         self.transform = transform
         self.img_path = Path(img_path)
         self.dataset_name = dataset_name
+        self.figure_context = figure_context
 
     def __len__(self):
         return len(self.data)
@@ -47,4 +60,7 @@ class VQADataset(Dataset):
             ) from exc
         if self.transform:
             image = self.transform(image)
-        return row.get("anno_id", idx), image, str(row["question"]), str(row.get("answer", ""))
+        question = str(row["question"])
+        if self.figure_context:
+            question = append_figure_context(question, row["caption"], row["figure_type"])
+        return row.get("anno_id", idx), image, question, str(row.get("answer", ""))

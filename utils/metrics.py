@@ -1,8 +1,8 @@
 """Dataset-specific generated-answer metrics for GQA, PlantExpertVQA and SciVQA.
 
 Scores are fractions (0 to 1 for lexical metrics), not percentages. BERTScore
-can be negative when baseline rescaling is enabled. The paper gives formulas
-but not its tokenizer or BERTScore encoder; those choices are explicit here.
+can be negative when baseline rescaling is enabled. SciVQA ROUGE follows the
+official evaluator's stemming setting; the BERTScore encoder is explicit here.
 """
 
 from __future__ import annotations
@@ -194,7 +194,7 @@ def _add_bertscores(rows, references, hypotheses, bert_scorer, components):
 def scivqa_score_pairs(references, hypotheses, bert_scorer):
     """SciVQA Tables 1/2: ROUGE-1/L and BERTScore precision, recall and F1.
 
-    ROUGE uses rouge-score's lowercase alphanumeric tokenizer without stemming.
+    ROUGE uses the official SciVQA evaluator's rouge-score tokenizer and stemming.
     Scores are macro means of per-answer values when aggregated by mean_scores.
     Answers retain source choice labels and numerical formats; no gold-dependent
     abstention rewrite, synonym mapping, or choice reordering is applied.
@@ -205,7 +205,7 @@ def scivqa_score_pairs(references, hypotheses, bert_scorer):
         raise ValueError("A BERTScore scorer is required for the nine SciVQA metrics")
     from rouge_score.rouge_scorer import RougeScorer
 
-    rouge = RougeScorer(["rouge1", "rougeL"], use_stemmer=False)
+    rouge = RougeScorer(["rouge1", "rougeL"], use_stemmer=True)
     rows = []
     for reference, hypothesis in zip(references, hypotheses):
         scores = rouge.score(_as_text(reference), _as_text(hypothesis))

@@ -221,7 +221,8 @@ def main():
     metrics = Path(args.metrics) if args.metrics else checkpoint.parent / "metrics.jsonl"
     model = load_model(checkpoint, device)
     frame = load_dataframe(args.dev_csv_path)
-    dataset = VQADataset(frame, model.image_transform, args.dev_img_path)
+    dataset = VQADataset(frame, model.image_transform, args.dev_img_path,
+                         figure_context=model.figure_context)
     trainable = sum(parameter.numel() for parameter in model.parameters()
                     if parameter.requires_grad)
     report = {

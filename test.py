@@ -108,7 +108,7 @@ def main():
     default = Path(args.model_path) / "best.pt"
     checkpoint = Path(args.checkpoint) if args.checkpoint else default
     model = load_model(checkpoint, device)
-    for name in ("image_size", "image_preprocessing", "ot_visual_memory"):
+    for name in ("image_size", "image_preprocessing", "ot_visual_memory", "figure_context"):
         requested = getattr(args, name)
         stored = model.model_config[name]
         if requested is not None and requested != stored:
@@ -123,7 +123,7 @@ def main():
         override=(args.dev_img_path if args.split == "dev" else args.test_img_path),
     )
     dataset = VQADataset(frame, transform=model.image_transform, img_path=split_image_path,
-                         dataset_name=dataset_name)
+                         dataset_name=dataset_name, figure_context=model.figure_context)
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False)
     predictions = [] if args.predictions_csv else None
     scorer = build_bertscore_scorer(
@@ -176,7 +176,7 @@ def main():
                 "device": str(resolve_device(args.bertscore_device)),
             }
         if dataset_name == "scivqa":
-            report["rouge"] = {"implementation": "rouge-score", "use_stemmer": False,
+            report["rouge"] = {"implementation": "rouge-score", "use_stemmer": True,
                                "aggregation": "mean of per-answer scores"}
         output.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
         print(f"Wrote evaluation report to {output}")

@@ -23,7 +23,8 @@ class VQAModel(nn.Module):
                  ot_iterations=20, ot_dustbin_mass=0.2, ot_dustbin_cost=1.0,
                  max_answer_tokens=Config.MAX_LEN_ANS,
                  max_question_tokens=Config.MAX_LEN_QUES, fusion='ot',
-                 image_size=256, image_preprocessing='crop', ot_visual_memory=False):
+                 image_size=256, image_preprocessing='crop', ot_visual_memory=False,
+                 figure_context=False):
         super().__init__()
         if output_size != d_model:
             raise ValueError('output_size must equal d_model')
@@ -44,6 +45,7 @@ class VQAModel(nn.Module):
         self.image_model_name = str(image_model)
         self.image_size = image_size
         self.image_preprocessing = image_preprocessing
+        self.figure_context = figure_context
         self.image_transform = build_image_transform(image_size, image_preprocessing)
         self.model_config = dict(
             output_size=output_size, d_model=d_model, num_heads=num_heads,
@@ -56,6 +58,7 @@ class VQAModel(nn.Module):
             max_question_tokens=max_question_tokens,
             image_size=image_size, image_preprocessing=image_preprocessing,
             ot_visual_memory=ot_visual_memory,
+            figure_context=figure_context,
         )
         self.image_model = ImageEmbedding(image_model, image_size=image_size)
         self.question_encoder = QuestionEmbedding(model_name=text_model,

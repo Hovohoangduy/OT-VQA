@@ -6,6 +6,7 @@ import torch
 from utils.checkpoint import load_model
 from utils.data_processing import preprocess_text
 from utils.device import resolve_device
+from utils.vqa_dataset import append_figure_context
 
 
 def main():
@@ -23,6 +24,10 @@ def main():
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--image", required=True)
     parser.add_argument("--question", required=True)
+    parser.add_argument("--caption", default=None,
+                        help="Figure caption, required by checkpoints trained with --figure_context")
+    parser.add_argument("--figure_type", default=None,
+                        help="Figure type, required by checkpoints trained with --figure_context")
     parser.add_argument("--device", choices=["auto", "cpu", "cuda", "mps"],
                         default="auto")
     args = parser.parse_args()
@@ -32,6 +37,10 @@ def main():
         display_image = source.convert("RGB")
         image = model.image_transform(display_image).unsqueeze(0).to(device)
     question = preprocess_text(args.question)
+    if model.figure_context:
+        if not args.caption or not args.figure_type:
+            parser.error("This checkpoint requires --caption and --figure_type")
+        question = append_figure_context(question, args.caption, args.figure_type)
     result = model.generate(image, [question])
     print(model.answers_from_ids(result)[0])
 

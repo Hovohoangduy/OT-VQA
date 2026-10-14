@@ -42,6 +42,8 @@ def get_args(argv=None, *, evaluation=False):
                         help="crop: legacy center crop; pad: preserve the complete figure and aspect ratio")
     parser.add_argument("--ot_visual_memory", action=argparse.BooleanOptionalAction, default=None,
                         help="Append spatial image tokens conditioned by the same OT plan; default off")
+    parser.add_argument("--figure_context", action=argparse.BooleanOptionalAction, default=None,
+                        help="Append the SciVQA figure type and caption to each question; default off")
     parser.add_argument("--split", choices=["dev", "test"], default="dev")
     parser.add_argument("--resume", default=None, help="Version-3/4 training checkpoint to resume")
     parser.add_argument("--save_every_epoch", action="store_true",
@@ -121,14 +123,16 @@ def get_args(argv=None, *, evaluation=False):
     )
     apply_dataset_defaults(parser, argv)
     args = parser.parse_args(argv)
-    # Preset image choices apply only to fresh training. Evaluation and resume
-    # inherit the checkpoint unless the user explicitly supplies an override.
+    # Preset choices that affect model inputs or the training objective apply
+    # only to fresh runs. Resume inherits the checkpoint unless overridden.
     if evaluation or args.resume:
         supplied = {item.split("=", 1)[0] for item in (sys.argv[1:] if argv is None else argv)
                     if item.startswith("--")}
         for name in ("image_size", "image_preprocessing"):
             if f"--{name}" not in supplied:
                 setattr(args, name, None)
+        if args.resume and "--loss_normalization" not in supplied:
+            args.loss_normalization = None
     dataset_path = args.train_csv_path
     if evaluation:
         dataset_path = args.dev_csv_path if args.split == "dev" else args.test_csv_path

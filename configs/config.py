@@ -23,6 +23,7 @@ class Config:
             "warmup_ratio": 0.05,
             "weight_decay": 0.05,
             "label_smoothing": 0.1,
+            "loss_normalization": "example",
             "drop_prob": 0.2,
             "early_stopping_patience": 8,
             "train_eval_samples": 512,

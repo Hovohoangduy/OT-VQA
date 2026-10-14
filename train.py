@@ -93,7 +93,7 @@ def train(model, train_loader, num_epochs, optimizer, scheduler, criterion,
 
 
 def _make_loader(args, split, shuffle, text_model, image_model, rank=0, world_size=1,
-                 image_size=256, image_preprocessing="crop"):
+                 image_size=256, image_preprocessing="crop", figure_context=False):
     csv_path = getattr(args, f"{split}_csv_path")
     frame = load_dataframe(csv_path)
     image_path = resolve_image_root(
@@ -103,7 +103,8 @@ def _make_loader(args, split, shuffle, text_model, image_model, rank=0, world_si
         override=getattr(args, f"{split}_img_path"),
     )
     dataset = VQADataset(frame, transform=build_image_transform(image_size, image_preprocessing), img_path=image_path,
-                         dataset_name=resolve_dataset(args.dataset, args.train_csv_path))
+                         dataset_name=resolve_dataset(args.dataset, args.train_csv_path),
+                         figure_context=figure_context)
     sampler = (DistributedSampler(dataset, num_replicas=world_size, rank=rank,
                                   shuffle=shuffle, seed=args.seed)
                if world_size > 1 and split == "train" else None)
@@ -248,7 +249,7 @@ def _run_training(args, device, rank, world_size):
         text_model, image_model = resume["text_model"], resume["image_model"]
         stored_config = dict(resume["model_config"])
         for name, default in (("image_size", 256), ("image_preprocessing", "crop"),
-                              ("ot_visual_memory", False)):
+                              ("ot_visual_memory", False), ("figure_context", False)):
             value = getattr(args, name)
             if value is not None and value != stored_config.get(name, default):
                 raise ValueError(f"--{name} does not match the resume checkpoint; start a fresh run")
@@ -296,13 +297,16 @@ def _run_training(args, device, rank, world_size):
                                               else Config.MAX_LEN_QUES),
                          image_size=args.image_size if args.image_size is not None else 256,
                          image_preprocessing=args.image_preprocessing or "crop",
-                         ot_visual_memory=bool(args.ot_visual_memory)).to(device)
+                         ot_visual_memory=bool(args.ot_visual_memory),
+                         figure_context=bool(args.figure_context)).to(device)
 
     train_loader = _make_loader(args, "train", True, text_model, image_model,
                                 rank=rank, world_size=world_size,
-                                image_size=model.image_size, image_preprocessing=model.image_preprocessing)
+                                image_size=model.image_size, image_preprocessing=model.image_preprocessing,
+                                figure_context=model.figure_context)
     dev_loader = (_make_loader(args, "dev", False, text_model, image_model,
-                               image_size=model.image_size, image_preprocessing=model.image_preprocessing)
+                               image_size=model.image_size, image_preprocessing=model.image_preprocessing,
+                               figure_context=model.figure_context)
                   if rank == 0 else None)
     if not len(train_loader) or (rank == 0 and not len(dev_loader)):
         raise ValueError("Training and development datasets must be non-empty")
@@ -376,7 +380,7 @@ def _run_training(args, device, rank, world_size):
         if bert_scorer is not None:
             manifest["bertscore_hash"] = bert_scorer.hash
         if dataset_name == "scivqa":
-            manifest["rouge"] = {"implementation": "rouge-score", "use_stemmer": False,
+            manifest["rouge"] = {"implementation": "rouge-score", "use_stemmer": True,
                                  "aggregation": "mean of per-answer scores"}
         (destination / "run_config.json").write_text(
             json.dumps(manifest, indent=2, default=str) + "\n", encoding="utf-8"

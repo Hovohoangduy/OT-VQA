@@ -6,10 +6,12 @@ must be performed in Kaggle. Start fresh runs in separate output directories.
 
 ## Evidence and comparison
 
-The supplied training log peaks at validation ROUGE-L F1 **0.4598 at epoch 7**.
-Loss selection saves epoch 13 with ROUGE-L **0.4535**, while training ROUGE-L
-eventually reaches 0.6460. This indicates overfitting; increasing the epoch limit
-alone will not address it. Training loss uses label smoothing and dropout;
+The latest supplied training log peaks at validation ROUGE-L F1 **0.4633 at
+epoch 6**. Training ROUGE-L reaches **0.7477** by epoch 14, while validation
+ROUGE-L falls to **0.4473** and validation loss rises from its epoch-5 minimum
+of **1.1208** to **1.3182**. Early stopping selects epoch 6. This indicates
+overfitting; increasing the epoch limit alone will not address it. Training
+loss uses label smoothing and dropout;
 validation loss does not, so their absolute values are not directly comparable.
 
 The existing `results/scivqa/test_report.json` reports test ROUGE-L **0.4557** and
@@ -58,6 +60,11 @@ The local SciVQA export has `include_caption: false`. The 50.2M number in the
 log counts trainable parameters, not the entire model (the stored model totals
 about 79.5M). The paper does not identify all BERTScore settings, so numerical
 parity for BERTScore is unverified.
+The [official SciVQA evaluator](https://github.com/esborisova/SciVQA/blob/main/src/eval/scoring.py)
+uses ROUGE stemming. New runs now match that setting. Re-scoring the stored
+4,200 test predictions with stemming leaves their ROUGE-L F1 at **0.4557**, so
+this metric detail does not explain the gap to the paper. Existing JSON reports
+still record the earlier no-stemming setting; they were not overwritten.
 
 Across all 2,160 training figures, the old `Resize(288)` + `CenterCrop(256)`
 retains a median **50.1%** of image area; the widest figure retains **4.6%**.
@@ -78,15 +85,16 @@ Paper: https://arxiv.org/html/2507.06183v1
   by an LR comparison and have been withdrawn. The smaller encoder LR is a
   conservative experiment to reduce changes to the pretrained text model; it
   is not a measured optimum. Other dataset defaults are unchanged.
-- `--loss_normalization example` gives every answer equal weight after
-  averaging its valid target-token losses. The training split has 2,160
+- Fresh SciVQA runs now default to `--loss_normalization example`, giving
+  every answer equal weight after averaging its valid target-token losses.
+  The training split has 2,160
   unanswerable examples out of 15,120 (14.3%), but they contribute 34,560 of
   71,846 non-padding targets (48.1%, counting EOS and excluding BOS). Each
   unanswerable target has 16 tokens; binary targets have only 2. Legacy
   token-averaged loss consequently weights a long answer more heavily than a
   short one, whereas reported ROUGE is a macro mean over questions. This is a
-  loss/evaluation mismatch worth testing, not proof of causation. The default
-  remains `token` for the control run; compare `example` independently.
+  loss/evaluation mismatch worth testing, not proof of causation. Use
+  `--loss_normalization token` for a separate legacy control run.
   Validation CE remains token-averaged, and checkpoint resume preserves the
   saved training objective.
 - New SciVQA runs select `best.pt` and early stopping by validation
@@ -131,7 +139,7 @@ Kaggle notebook. This is a candidate experiment, not a guaranteed improvement.
   --d_model 384 --ffn_hidden 1024 --num_layers 2 --num_heads 4 \
   --lr 1e-5 --encoder_lr 2e-6 --warmup_ratio 0.05 \
   --weight_decay 0.05 --label_smoothing 0.1 --drop_prob 0.2 \
-  --loss_normalization token \
+  --loss_normalization example \
   --freeze_answer_embeddings --gradient_clip 1.0 \
   --early_stopping_patience 8 --selection_metric rouge_l_f1 \
   --max_question_tokens 256 --max_answer_tokens 64 \
@@ -143,6 +151,39 @@ Kaggle notebook. This is a candidate experiment, not a guaranteed improvement.
   --model_path /kaggle/working/scivqa_ot_pad512
 ```
 
+## Figure context run against the paper
+
+The cited paper supplies the figure caption and figure type to its VLM prompts.
+The local SciVQA CSVs already contain both fields, but the run above does not
+read them into the model input. To test their contribution while keeping OT as
+the fusion mechanism, repeat the command above with these replacements:
+
+```bash
+--figure_context --max_question_tokens 512 \
+--model_path /kaggle/working/scivqa_ot_figure_context
+```
+
+With the current MiniLM tokenizer, the longest question plus figure context
+in the local train/dev/test CSVs is 423 tokens including special tokens; 512
+preserves all of them. At 256 tokens, 74 train, 2 dev, and 18 test examples
+would be truncated.
+
+Keep the same train/dev CSVs, seed, model, and other settings. Start fresh: the
+input text has changed, so `--resume` rejects a conflicting context setting.
+If the longer text exhausts Kaggle GPU memory, reduce `--batch_size` to 4 on
+both comparison runs and record the resulting global batch size of 8.
+The dataset puts the question before the figure type and caption, and avoids
+appending a caption already present in an older export. `best.pt` records the
+context setting so `test.py` and diagnostics use the same input at validation
+and test time. For single-image inference, `predict.py` requires `--caption`
+and `--figure_type` with this checkpoint.
+
+The paper also provides QA pair type to its prompt. This run does not use that
+label because the `unanswerable` type directly reveals an answer category.
+Report that input difference when comparing scores. A higher score than the
+paper's InternVL3 test ROUGE-L F1 of 0.740 is a target, not an expected result
+of adding context; the paper uses a much larger, chart-capable VLM.
+
 ## Next runs: figure preservation and OT visual memory
 
 Reuse the command above, changing only the listed flags and output directory.
@@ -150,8 +191,8 @@ Choose runs by the full validation metrics, with particular attention to
 infinite-answer-set questions. Do not keep using the test split to pick settings.
 
 After run C, compare it with an identical run using
-`--loss_normalization example` and a separate output directory such as
-`/kaggle/working/scivqa_ot_equal_answers`. Keep whichever objective performs
+`--loss_normalization token` and a separate output directory such as
+`/kaggle/working/scivqa_ot_token_loss`. Keep whichever objective performs
 better on full-validation ROUGE-L and the numerical question groups, then keep
 that choice fixed when testing visual memory in D. A and B are optional controls
 to measure preprocessing and resolution changes, using the same learning rates
@@ -202,16 +243,30 @@ To evaluate D on validation:
 
 Image settings are loaded from the checkpoint; no image flags are needed for
 evaluation. Reevaluate the baseline with the same decoding and metric code.
+After saving validation predictions, compare them with the paper's 0.729
+InternVL3 validation ROUGE-L using the official ROUGE stemming setting:
+
+```bash
+python compare_scivqa.py --split dev \
+  --gold_csv /kaggle/input/datasets/duyho2907/sci-vqa-dataset-nganga01/scivqa_dataset/val.csv \
+  --predictions_csv /kaggle/working/scivqa_ot_figure_context/val_predictions.csv \
+  --output_json /kaggle/working/scivqa_ot_figure_context/paper_comparison.json
+```
+
+The script joins predictions to gold by `anno_id`, rejects missing or duplicate
+IDs, and prints the ROUGE-L gap. For the held-out test comparison, use `--split
+test` with the test CSV and predictions; the paper's InternVL3 CoT target is
+0.740. Do not select settings using test results.
 For final test evaluation, change `--split dev` to `--split test`, supply
 `--test_csv_path` ending in `test.csv`, and use distinct test report filenames.
 
 ## What a ROUGE-F1 target above 0.8 means
 
-The supplied log's gradual validation-loss decrease and increasing training
+The supplied log's rising validation loss after epoch 5 and increasing training
 ROUGE are consistent with overfitting, but do not identify an excessive LR as
-the cause. At epoch 7, linear decay has already reduced the original `1e-5` LR
-to approximately `7.7e-6`; generated-answer quality still peaks there. Lower
-rates can slow memorization or stabilize adaptation, but cannot provide missing
+the cause. That run's peak LRs were `1e-4` for the decoder/fusion and `1e-5`
+for the text encoder; current SciVQA defaults are lower at `1e-5` and `2e-6`.
+Lower rates can slow memorization or stabilize adaptation, but cannot provide missing
 chart labels or numerical-reading pretraining.
 
 A target above 0.8 is a research objective, not an expected outcome of this

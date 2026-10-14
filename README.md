@@ -88,6 +88,12 @@ Train the OT model with the SciVQA preset:
 python train.py --dataset scivqa
 ```
 
+For a fresh run with the figure caption and figure type supplied alongside the
+question, add `--figure_context --max_question_tokens 512` and use a new
+`--model_path`. The setting is stored in the checkpoint and reused for
+validation, test evaluation, and diagnostics. The [SciVQA experiment guide](SCIVQA_TUNING.md)
+has a two-GPU Kaggle command and a comparison against the cited paper.
+
 [`configs/config.py`](configs/config.py) supplies local dataset paths and
 training defaults. For Kaggle, override the CSV/image paths and `--model_path`
 with your input dataset and a directory under `/kaggle/working`.
@@ -192,14 +198,16 @@ content near figure edges; learning-rate tuning cannot restore missing pixels.
 The new image options address cropping and resolution; they do not add OCR or
 the pretrained numerical reasoning capabilities of a large VLM.
 
-`--loss_normalization example` is an independent training-loss experiment:
-average token CE within each answer, then average across answers. In the local
-SciVQA training data, unanswerable questions make up 14.3% of examples but 48.1%
+Fresh SciVQA runs default to `--loss_normalization example`: average token CE
+within each answer, then average across answers. In the local SciVQA training
+data, unanswerable questions make up 14.3% of examples but 48.1%
 of non-padding targets under legacy token averaging. Equal-answer averaging
 reduces this length imbalance without changing targets or evaluation metrics.
-The default is `token`; validation loss always uses token averaging. Logs and
-checkpoints record the training objective, and resume rejects a conflicting
-loss-normalization override. This experiment still needs measured validation.
+Use `--loss_normalization token` in a separate fresh run as the legacy control.
+Other datasets keep token averaging. Validation loss always uses token averaging.
+Logs and checkpoints record the training objective, and resume inherits it
+unless an explicit conflicting override is supplied. The effect on validation
+quality has not yet been measured.
 
 For resuming, keep the schedule settings and total epoch target from the
 original run; for older runs without warmup, pass `--warmup_ratio 0`. Optimizer
@@ -379,10 +387,11 @@ SciVQA uses the nine metrics in Tables 1 and 2 of the
 
 Scores are macro means of per-answer values; F1 is averaged directly rather
 than recomputed from average precision/recall. ROUGE uses `rouge-score` with
-its lowercase alphanumeric tokenizer and stemming disabled. SciVQA defaults
+stemming enabled, matching the [official SciVQA evaluator](https://github.com/esborisova/SciVQA/blob/main/src/eval/scoring.py).
+SciVQA defaults
 to `roberta-large` BERTScore without baseline rescaling; change these choices
 with `--bertscore_model` and `--bertscore_rescale`. The paper does not specify
-its encoder or tokenizer, so the implementation records these choices and the
+its BERTScore encoder, so the implementation records this choice and the
 BERTScore model hash rather than claiming identical published scores.
 ROUGE follows the library's zero score for empty token sequences. BERTScore
 assigns 1 when both answers are empty and 0 when only one is empty, as an

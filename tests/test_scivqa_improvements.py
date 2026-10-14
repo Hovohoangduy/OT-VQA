@@ -13,6 +13,8 @@ from model.features_extraction import ImageEmbedding
 from model.optimal_transport import PartialTransportFusion
 from utils.answer_text import restore_numeric_spacing
 from utils.image_processing import build_image_transform
+from utils.metrics import scivqa_score_pairs
+from utils.vqa_dataset import VQADataset, append_figure_context
 
 
 @pytest.mark.parametrize("decoded,expected", [
@@ -98,12 +100,60 @@ def test_legacy_fusion_state_dict_still_loads_strictly():
 def test_sci_defaults_and_explicit_baseline_overrides():
     args = get_args(["--dataset", "scivqa"])
     assert args.lr == 1e-5 and args.encoder_lr == 2e-6 and args.warmup_ratio == 0.05
+    assert args.loss_normalization == "example"
     assert args.image_size == 512 and args.image_preprocessing == "pad"
     assert args.ot_visual_memory is None
     args = get_args(["--dataset", "scivqa", "--lr", "1e-5", "--warmup_ratio", "0",
                      "--selection_metric", "loss", "--image_size", "512", "--image_preprocessing", "pad"])
     assert args.lr == 1e-5 and args.warmup_ratio == 0 and args.selection_metric == "loss"
     assert args.image_size == 512 and args.image_preprocessing == "pad"
+    assert get_args(["--dataset", "scivqa", "--loss_normalization", "token"]).loss_normalization == "token"
+    assert get_args(["--dataset", "scivqa", "--figure_context"]).figure_context is True
+
+
+def test_figure_context_uses_csv_metadata_once_and_keeps_question_first(tmp_path):
+    import pandas as pd
+
+    Image.new("RGB", (8, 8), "white").save(tmp_path / "figure.png")
+    row = {"image": "figure.png", "question": "What is the red value?",
+           "answer": "5", "caption": "Accuracy by epoch", "figure_type": "line chart"}
+    dataset = VQADataset(pd.DataFrame([row]), img_path=tmp_path, figure_context=True)
+    question = dataset[0][2]
+    assert question == "What is the red value?\nFigure type: line chart\nFigure caption: Accuracy by epoch"
+    assert append_figure_context(question, row["caption"], row["figure_type"]) == question
+    assert append_figure_context("What? Figure caption: Existing", row["caption"], "") == (
+        "What? Figure caption: Existing")
+    with pytest.raises(ValueError, match="caption and figure_type"):
+        VQADataset(pd.DataFrame([{"image": "figure.png", "question": "What?"}]),
+                   img_path=tmp_path, figure_context=True)
+
+
+def test_scivqa_rouge_uses_official_stemming():
+    class SemanticScorer:
+        def score(self, hypotheses, references):
+            return (torch.ones(len(hypotheses)),) * 3
+
+    row = scivqa_score_pairs(["dogs"], ["dog"], SemanticScorer())[0]
+    assert row["rouge_1_f1"] == 1.0
+    assert row["rouge_l_f1"] == 1.0
+
+
+def test_paper_comparison_aligns_annotation_ids(tmp_path):
+    import pandas as pd
+    from compare_scivqa import compare
+
+    gold = tmp_path / "gold.csv"
+    predictions = tmp_path / "predictions.csv"
+    pd.DataFrame({"anno_id": ["a", "b"], "answer": ["dogs", "cats"]}).to_csv(gold, index=False)
+    pd.DataFrame({"anno_id": ["b", "a"], "prediction": ["cat", "dog"]}).to_csv(
+        predictions, index=False)
+    result = compare(gold, predictions, "test")
+    assert result["rouge_l_f1"] == 1.0
+    assert result["rouge_l_gap_to_paper"] == pytest.approx(0.26)
+    pd.DataFrame({"anno_id": ["a", "c"], "prediction": ["dog", "cat"]}).to_csv(
+        predictions, index=False)
+    with pytest.raises(ValueError, match="Prediction IDs do not match"):
+        compare(gold, predictions, "test")
 
 
 def test_image_counterfactual_always_uses_another_figure():
@@ -191,6 +241,7 @@ def test_image_preset_does_not_override_resume_or_evaluation():
     for args in (get_args(["--dataset", "scivqa", "--resume", "old.pt"]),
                  get_args(["--dataset", "scivqa"], evaluation=True)):
         assert args.image_size is None and args.image_preprocessing is None
+    assert get_args(["--dataset", "scivqa", "--resume", "old.pt"]).loss_normalization is None
     args = get_args(["--dataset", "scivqa", "--image_size=256", "--image_preprocessing", "crop"],
                     evaluation=True)
     assert args.image_size == 256 and args.image_preprocessing == "crop"
@@ -232,4 +283,16 @@ def test_resume_cannot_silently_change_loss_objective(monkeypatch):
     monkeypatch.setattr(train, "read_checkpoint", lambda *args: {"format_version": 4})
     args = get_args(["--dataset", "scivqa", "--resume", "old.pt", "--loss_normalization", "example"])
     with pytest.raises(ValueError, match="loss_normalization does not match"):
+        train._run_training(args, torch.device("cpu"), rank=0, world_size=1)
+
+
+def test_resume_cannot_change_figure_context(monkeypatch):
+    import train
+
+    checkpoint = {"format_version": 4, "training_config": {"loss_normalization": "token"},
+                  "model_config": {"figure_context": False}, "best_metric": {},
+                  "text_model": "text", "image_model": "image"}
+    monkeypatch.setattr(train, "read_checkpoint", lambda *args: checkpoint)
+    args = get_args(["--dataset", "scivqa", "--resume", "old.pt", "--figure_context"])
+    with pytest.raises(ValueError, match="--figure_context does not match"):
         train._run_training(args, torch.device("cpu"), rank=0, world_size=1)
