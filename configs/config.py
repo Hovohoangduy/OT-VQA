@@ -25,6 +25,7 @@ class Config:
             "label_smoothing": 0.1,
             "loss_normalization": "example",
             "drop_prob": 0.2,
+            "freeze_question_encoder": True,
             "early_stopping_patience": 8,
             "train_eval_samples": 512,
             "num_workers": 2,

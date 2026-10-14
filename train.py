@@ -132,19 +132,21 @@ def _build_optimizer(model, args, resume=None):
     saved_groups = saved["param_groups"] if saved else []
     separate = args.encoder_lr is not None or any(
         group.get("group_name") == "encoder" for group in saved_groups)
-    if separate and saved_groups and len(saved_groups) != 2:
+    if separate and saved_groups and (len(saved_groups) not in {1, 2} or
+                                     (len(saved_groups) == 1 and
+                                      saved_groups[0].get("group_name") != "decoder")):
         raise ValueError("--encoder_lr requires a fresh run when resuming a single-LR checkpoint")
     if separate:
         encoder_ids = {id(parameter) for module in
                        (model.question_encoder, model.answer_embedding)
                        for parameter in module.parameters()}
-        groups = [
-            {"params": [p for p in trainable if id(p) not in encoder_ids],
-             "lr": lr, "group_name": "decoder"},
-            {"params": [p for p in trainable if id(p) in encoder_ids],
-             "lr": args.encoder_lr if args.encoder_lr is not None else lr,
-             "group_name": "encoder"},
-        ]
+        groups = [{"params": [p for p in trainable if id(p) not in encoder_ids],
+                   "lr": lr, "group_name": "decoder"}]
+        encoder_params = [p for p in trainable if id(p) in encoder_ids]
+        if encoder_params:
+            groups.append({"params": encoder_params,
+                           "lr": args.encoder_lr if args.encoder_lr is not None else lr,
+                           "group_name": "encoder"})
     else:
         groups = trainable
     return optim.AdamW(groups, lr=lr, weight_decay=args.weight_decay)
@@ -249,6 +251,7 @@ def _run_training(args, device, rank, world_size):
         text_model, image_model = resume["text_model"], resume["image_model"]
         stored_config = dict(resume["model_config"])
         for name, default in (("image_size", 256), ("image_preprocessing", "crop"),
+                              ("freeze_question_encoder", False),
                               ("ot_visual_memory", False), ("figure_context", False)):
             value = getattr(args, name)
             if value is not None and value != stored_config.get(name, default):
@@ -285,6 +288,7 @@ def _run_training(args, device, rank, world_size):
                          ffn_hidden=args.ffn_hidden, num_layers=args.num_layers,
                          num_heads=args.num_heads, drop_prob=args.drop_prob,
                          freeze_answer_embeddings=args.freeze_answer_embeddings,
+                         freeze_question_encoder=bool(args.freeze_question_encoder),
                          ot_epsilon=args.ot_epsilon if args.ot_epsilon is not None else 0.05,
                          ot_iterations=args.ot_iterations if args.ot_iterations is not None else 20,
                          ot_dustbin_mass=(args.ot_dustbin_mass if args.ot_dustbin_mass is not None

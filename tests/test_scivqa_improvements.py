@@ -9,7 +9,7 @@ from torch import nn
 
 from configs.arg_parser import get_args
 from diagnose_training import _different_image_sources
-from model.features_extraction import ImageEmbedding
+from model.features_extraction import ImageEmbedding, QuestionEmbedding
 from model.optimal_transport import PartialTransportFusion
 from utils.answer_text import restore_numeric_spacing
 from utils.image_processing import build_image_transform
@@ -100,6 +100,7 @@ def test_legacy_fusion_state_dict_still_loads_strictly():
 def test_sci_defaults_and_explicit_baseline_overrides():
     args = get_args(["--dataset", "scivqa"])
     assert args.lr == 1e-5 and args.encoder_lr == 2e-6 and args.warmup_ratio == 0.05
+    assert args.freeze_question_encoder is True
     assert args.loss_normalization == "example"
     assert args.image_size == 512 and args.image_preprocessing == "pad"
     assert args.ot_visual_memory is None
@@ -109,6 +110,42 @@ def test_sci_defaults_and_explicit_baseline_overrides():
     assert args.image_size == 512 and args.image_preprocessing == "pad"
     assert get_args(["--dataset", "scivqa", "--loss_normalization", "token"]).loss_normalization == "token"
     assert get_args(["--dataset", "scivqa", "--figure_context"]).figure_context is True
+    assert get_args(["--dataset", "scivqa", "--no-freeze_question_encoder"]).freeze_question_encoder is False
+    assert get_args(["--dataset", "plantexpert"]).freeze_question_encoder is False
+
+
+def test_frozen_question_encoder_stays_in_eval_mode_and_has_no_gradients():
+    encoder = QuestionEmbedding.__new__(QuestionEmbedding)
+    nn.Module.__init__(encoder)
+    encoder.text_encoder = nn.Sequential(nn.Linear(3, 3), nn.Dropout(0.5))
+    encoder.encoder_frozen = False
+    encoder.freeze()
+    encoder.train()
+    assert encoder.training
+    assert not encoder.text_encoder.training
+    assert not any(parameter.requires_grad for parameter in encoder.text_encoder.parameters())
+
+
+def test_frozen_question_encoder_has_no_optimizer_group():
+    from train import _build_optimizer
+
+    class Model(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.question_encoder = nn.Linear(2, 2)
+            self.answer_embedding = nn.Linear(2, 2)
+            self.decoder = nn.Linear(2, 2)
+            self.question_encoder.requires_grad_(False)
+            self.answer_embedding.requires_grad_(False)
+
+    model = Model()
+    args = SimpleNamespace(lr=1e-5, encoder_lr=2e-6, weight_decay=0.05)
+    optimizer = _build_optimizer(model, args)
+    assert len(optimizer.param_groups) == 1
+    assert optimizer.param_groups[0]["group_name"] == "decoder"
+    assert optimizer.param_groups[0]["params"] == list(model.decoder.parameters())
+    resumed = _build_optimizer(model, args, {"optimizer_state_dict": optimizer.state_dict()})
+    resumed.load_state_dict(optimizer.state_dict())
 
 
 def test_figure_context_uses_csv_metadata_once_and_keeps_question_first(tmp_path):
@@ -241,10 +278,13 @@ def test_image_preset_does_not_override_resume_or_evaluation():
     for args in (get_args(["--dataset", "scivqa", "--resume", "old.pt"]),
                  get_args(["--dataset", "scivqa"], evaluation=True)):
         assert args.image_size is None and args.image_preprocessing is None
+        assert args.freeze_question_encoder is None
     assert get_args(["--dataset", "scivqa", "--resume", "old.pt"]).loss_normalization is None
     args = get_args(["--dataset", "scivqa", "--image_size=256", "--image_preprocessing", "crop"],
                     evaluation=True)
     assert args.image_size == 256 and args.image_preprocessing == "crop"
+    assert get_args(["--dataset", "scivqa", "--resume", "old.pt",
+                     "--no-freeze_question_encoder"]).freeze_question_encoder is False
 
 
 def test_generation_projection_matches_full_decoder_logits():

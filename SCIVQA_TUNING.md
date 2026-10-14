@@ -6,10 +6,10 @@ must be performed in Kaggle. Start fresh runs in separate output directories.
 
 ## Evidence and comparison
 
-The latest supplied training log peaks at validation ROUGE-L F1 **0.4633 at
-epoch 6**. Training ROUGE-L reaches **0.7477** by epoch 14, while validation
-ROUGE-L falls to **0.4473** and validation loss rises from its epoch-5 minimum
-of **1.1208** to **1.3182**. Early stopping selects epoch 6. This indicates
+The latest supplied training log peaks at validation ROUGE-L F1 **0.4626 at
+epoch 5**. Training ROUGE-L reaches **0.7580** by epoch 13, while validation
+ROUGE-L falls to **0.4259** and validation loss rises from its epoch-6 minimum
+of **1.1333** to **1.2873**. Early stopping selects epoch 5. This indicates
 overfitting; increasing the epoch limit alone will not address it. Training
 loss uses label smoothing and dropout;
 validation loss does not, so their absolute values are not directly comparable.
@@ -78,13 +78,19 @@ Paper: https://arxiv.org/html/2507.06183v1
 
 ## Implemented changes
 
-- After the second review, SciVQA starts with decoder/fusion LR `1e-5`, encoder
-  LR `2e-6`, and 5% warmup. Dropout `0.2`, weight decay `0.05`, and label
-  smoothing `0.1` retain the supplied command's regularization. The earlier
-  `1e-4` default and simultaneous reduction in regularization were not supported
-  by an LR comparison and have been withdrawn. The smaller encoder LR is a
-  conservative experiment to reduce changes to the pretrained text model; it
-  is not a measured optimum. Other dataset defaults are unchanged.
+- After the second review, SciVQA starts with decoder/fusion LR `1e-5` and
+  5% warmup. Dropout `0.2`, weight decay `0.05`, and label smoothing `0.1`
+  retain the supplied command's regularization. The earlier `1e-4` default
+  and simultaneous reduction in regularization were not supported by an LR
+  comparison and have been withdrawn. The encoder LR `2e-6` applies only when
+  question encoder fine-tuning is enabled. Other dataset defaults are unchanged.
+- Fresh SciVQA runs now freeze the pretrained MiniLM question encoder as well
+  as the image encoder and answer embeddings. This removes the largest source
+  of trainable parameters from a 15,120-example training set and keeps its
+  dropout disabled during training. The OT projection, fusion, and decoder
+  remain trainable. `--no-freeze_question_encoder` restores fine-tuning for a
+  controlled comparison at encoder LR `2e-6`. This change is an overfitting
+  hypothesis; its validation effect has not been measured.
 - Fresh SciVQA runs now default to `--loss_normalization example`, giving
   every answer equal weight after averaging its valid target-token losses.
   The training split has 2,160
@@ -124,10 +130,10 @@ Paper: https://arxiv.org/html/2507.06183v1
   training, evaluation, prediction and diagnostics use them consistently.
   Older checkpoints retain the legacy 256-pixel crop and original architecture.
 
-## First run: full figure with conservative adaptation
+## First run: full figure with frozen question encoder
 
 Use the updated code. This is run C in the comparison table below: preserve the
-complete figure at 512 pixels, lower the pretrained encoder LR, and keep the
+complete figure at 512 pixels, freeze the pretrained question encoder, and keep the
 original regularization and OT memory architecture. The leading `!` is for a
 Kaggle notebook. This is a candidate experiment, not a guaranteed improvement.
 
@@ -137,10 +143,10 @@ Kaggle notebook. This is a candidate experiment, not a guaranteed improvement.
   --text_model sentence-transformers/all-MiniLM-L12-v2 \
   --epochs 30 --batch_size 8 \
   --d_model 384 --ffn_hidden 1024 --num_layers 2 --num_heads 4 \
-  --lr 1e-5 --encoder_lr 2e-6 --warmup_ratio 0.05 \
+  --lr 1e-5 --warmup_ratio 0.05 \
   --weight_decay 0.05 --label_smoothing 0.1 --drop_prob 0.2 \
   --loss_normalization example \
-  --freeze_answer_embeddings --gradient_clip 1.0 \
+  --freeze_answer_embeddings --freeze_question_encoder --gradient_clip 1.0 \
   --early_stopping_patience 8 --selection_metric rouge_l_f1 \
   --max_question_tokens 256 --max_answer_tokens 64 \
   --train_eval_samples 512 --num_workers 2 \
@@ -148,8 +154,14 @@ Kaggle notebook. This is a candidate experiment, not a guaranteed improvement.
   --train_csv_path /kaggle/input/datasets/duyho2907/sci-vqa-dataset-nganga01/scivqa_dataset/train.csv \
   --dev_csv_path /kaggle/input/datasets/duyho2907/sci-vqa-dataset-nganga01/scivqa_dataset/val.csv \
   --img_path /kaggle/input/datasets/duyho2907/sci-vqa-dataset-nganga01/scivqa_dataset/images \
-  --model_path /kaggle/working/scivqa_ot_pad512
+  --model_path /kaggle/working/scivqa_ot_pad512_frozen_question
 ```
+
+Compare this run's best validation ROUGE-L F1 with **0.4626** from the supplied
+log. Use its `best.pt`, not `last.pt`. For a control that isolates question
+encoder freezing, repeat the command with `--no-freeze_question_encoder
+--encoder_lr 2e-6` and a different `--model_path`. Do not resume the supplied
+checkpoint into either run.
 
 ## Figure context run against the paper
 
@@ -217,8 +229,9 @@ from 16 to 8 and should be recorded. Alternatively test `--image_size 384`.
 Do not resume the old checkpoint into a changed architecture.
 
 After finding a useful visual configuration, compare decoder LRs `5e-6`,
-`1e-5`, `3e-5`, with encoder LR `2e-6` fixed. Compare encoder LRs `1e-6`,
-`2e-6`, `5e-6` separately if needed. Do not infer an optimal LR from the epoch
+`1e-5`, `3e-5` while keeping the question encoder frozen. If the fine-tuning
+control performs better, compare encoder LRs `1e-6`, `2e-6`, `5e-6`
+separately. Do not infer an optimal LR from the epoch
 of the validation peak alone. Repeat the winner with seeds 1105, 42,
 and 2026. OT epsilon, dustbin mass and iteration count remain at the original
 0.05/0.2/20 for these experiments. Increase Sinkhorn iterations only if the
@@ -262,10 +275,11 @@ For final test evaluation, change `--split dev` to `--split test`, supply
 
 ## What a ROUGE-F1 target above 0.8 means
 
-The supplied log's rising validation loss after epoch 5 and increasing training
+The supplied log's rising validation loss after epoch 6 and increasing training
 ROUGE are consistent with overfitting, but do not identify an excessive LR as
 the cause. That run's peak LRs were `1e-4` for the decoder/fusion and `1e-5`
-for the text encoder; current SciVQA defaults are lower at `1e-5` and `2e-6`.
+for the text encoder; current SciVQA runs use `1e-5` for decoder/fusion and
+freeze the text encoder by default. Fine-tuning controls use `2e-6` for it.
 Lower rates can slow memorization or stabilize adaptation, but cannot provide missing
 chart labels or numerical-reading pretraining.
 

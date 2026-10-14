@@ -87,6 +87,18 @@ class QuestionEmbedding(nn.Module):
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.text_encoder = AutoModel.from_pretrained(model_name)
         self.use_mean_pooling = str(model_name).startswith('sentence-transformers/')
+        self.encoder_frozen = False
+
+    def freeze(self):
+        self.encoder_frozen = True
+        self.text_encoder.requires_grad_(False)
+        self.text_encoder.eval()
+
+    def train(self, mode=True):
+        super().train(mode)
+        if self.encoder_frozen:
+            self.text_encoder.eval()
+        return self
 
     def encode_tokens(self, questions):
         tokens = self.tokenizer(

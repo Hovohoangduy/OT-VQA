@@ -19,7 +19,7 @@ class VQAModel(nn.Module):
     def __init__(self, vocab_size=None, output_size=768, d_model=768, num_heads=4,
                  ffn_hidden=2048, drop_prob=0.1, num_layers=4,
                  mode='train', text_model=Config.text_model, image_model=Config.image_model,
-                 freeze_answer_embeddings=False, ot_epsilon=0.05,
+                 freeze_answer_embeddings=False, freeze_question_encoder=False, ot_epsilon=0.05,
                  ot_iterations=20, ot_dustbin_mass=0.2, ot_dustbin_cost=1.0,
                  max_answer_tokens=Config.MAX_LEN_ANS,
                  max_question_tokens=Config.MAX_LEN_QUES, fusion='ot',
@@ -51,6 +51,7 @@ class VQAModel(nn.Module):
             output_size=output_size, d_model=d_model, num_heads=num_heads,
             ffn_hidden=ffn_hidden, drop_prob=drop_prob, num_layers=num_layers,
             freeze_answer_embeddings=freeze_answer_embeddings,
+            freeze_question_encoder=freeze_question_encoder,
             fusion=fusion,
             ot_epsilon=ot_epsilon, ot_iterations=ot_iterations,
             ot_dustbin_mass=ot_dustbin_mass, ot_dustbin_cost=ot_dustbin_cost,
@@ -63,6 +64,8 @@ class VQAModel(nn.Module):
         self.image_model = ImageEmbedding(image_model, image_size=image_size)
         self.question_encoder = QuestionEmbedding(model_name=text_model,
                                                   max_length=max_question_tokens)
+        if freeze_question_encoder:
+            self.question_encoder.freeze()
         self.answer_embedding = AnswerEmbedding(model_name=text_model)
         if freeze_answer_embeddings:
             self.answer_embedding.freeze()

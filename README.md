@@ -99,11 +99,13 @@ training defaults. For Kaggle, override the CSV/image paths and `--model_path`
 with your input dataset and a directory under `/kaggle/working`.
 The preset uses
 OT fusion, MiniLM/MobileViTV2 backbones, batch size 8 per GPU, up to 30 epochs,
-AdamW learning rates `1e-5` for the new decoder/fusion layers and `2e-6` for
-the pretrained text encoder, 5% warmup, weight decay `0.05`, label smoothing
+and freezes both the image and question encoders. AdamW trains the new
+decoder/fusion layers at `1e-5`, with 5% warmup, weight decay `0.05`, label smoothing
 `0.1`, dropout `0.2`, gradient clipping at `1.0`, and patience 8. Training
 answer metrics use a fixed 512-example subset; image loading uses two workers
-per GPU. These are starting tuning choices, not a measured score improvement.
+per GPU. Use `--no-freeze_question_encoder` for a separate fine-tuning control;
+that run uses the preset encoder LR of `2e-6`. These are starting tuning choices,
+not a measured score improvement.
 The reference
 [SciVQA paper](https://arxiv.org/html/2507.06183v1) primarily evaluates prompting
 and ensembles; Appendix D mentions LoRA on 5,000 Bespoke MiniChart examples

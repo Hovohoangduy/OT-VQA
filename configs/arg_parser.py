@@ -105,6 +105,12 @@ def get_args(argv=None, *, evaluation=False):
         default=True,
         help="Freeze pretrained answer-token embeddings (default: enabled)",
     )
+    parser.add_argument(
+        "--freeze_question_encoder",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Freeze the pretrained question encoder; enabled by default for fresh SciVQA runs",
+    )
     parser.add_argument("--checkpoint", default=None, help="Explicit evaluation checkpoint")
     parser.add_argument("--predictions_csv", default=None,
                         help="Evaluation output with each generated answer")
@@ -128,8 +134,8 @@ def get_args(argv=None, *, evaluation=False):
     if evaluation or args.resume:
         supplied = {item.split("=", 1)[0] for item in (sys.argv[1:] if argv is None else argv)
                     if item.startswith("--")}
-        for name in ("image_size", "image_preprocessing"):
-            if f"--{name}" not in supplied:
+        for name in ("image_size", "image_preprocessing", "freeze_question_encoder"):
+            if f"--{name}" not in supplied and f"--no-{name}" not in supplied:
                 setattr(args, name, None)
         if args.resume and "--loss_normalization" not in supplied:
             args.loss_normalization = None

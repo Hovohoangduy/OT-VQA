@@ -16,7 +16,7 @@ LEGACY_MAX_ANSWER_TOKENS = 38
 MODEL_CONFIG_KEYS = {
     "vocab_size", "output_size", "d_model", "num_heads", "ffn_hidden",
     "drop_prob", "num_layers", "mode",
-    "freeze_answer_embeddings", "ot_epsilon", "ot_iterations",
+    "freeze_answer_embeddings", "freeze_question_encoder", "ot_epsilon", "ot_iterations",
     "ot_dustbin_mass", "ot_dustbin_cost", "max_answer_tokens", "max_question_tokens",
     "fusion",
     "image_size", "image_preprocessing", "ot_visual_memory", "figure_context",
