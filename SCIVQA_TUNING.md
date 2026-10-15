@@ -129,6 +129,10 @@ Paper: https://arxiv.org/html/2507.06183v1
 - Checkpoints store image size, preprocessing and visual-memory settings;
   training, evaluation, prediction and diagnostics use them consistently.
   Older checkpoints retain the legacy 256-pixel crop and original architecture.
+- Dual best checkpointing tracks and saves both `best_loss.pt` (lowest validation loss)
+  and `best_rouge.pt` (highest validation ROUGE-L F1) alongside `best.pt`.
+- `diagnose_scivqa_breakdown.py` isolates metrics across the 7 SciVQA question categories
+  and diagnoses the infinite-answer-set numerical reading bottleneck.
 
 ## First run: full figure with frozen question encoder
 

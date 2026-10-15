@@ -79,7 +79,7 @@ def get_args(argv=None, *, evaluation=False):
         help="Label smoothing used only by the training loss",
     )
     parser.add_argument(
-        "--early_stopping_patience", type=int, default=8,
+        "--early_stopping_patience", type=int, default=10,
         help="Stop after this many epochs without improving the selection metric; 0 disables",
     )
     parser.add_argument("--d_model", type=int, default=384)

@@ -358,12 +358,19 @@ def _run_training(args, device, rank, world_size):
     )
     start_epoch = global_step = 0
     best_metric = None
+    best_val_loss = float("inf")
+    best_val_rouge = float("-inf")
     epochs_without_improvement = 0
     if resume is not None:
         start_epoch, global_step, best_metric = restore_training_state(
             resume, model, optimizer, scheduler
         )
         epochs_without_improvement = int(resume.get("epochs_without_improvement", 0))
+        if best_metric:
+            if best_metric.get("selection_metric") == "loss":
+                best_val_loss = float(best_metric.get("value", best_metric.get("loss", float("inf"))))
+            elif best_metric.get("selection_metric") == "rouge_l_f1":
+                best_val_rouge = float(best_metric.get("value", float("-inf")))
     if start_epoch >= args.epochs:
         raise ValueError("Resume checkpoint has already reached the requested epoch count")
     if rank == 0:
@@ -478,6 +485,30 @@ def _run_training(args, device, rank, world_size):
                 save_checkpoint(destination / f"epoch_{epoch + 1:04d}.pt", **checkpoint_args)
             if improved:
                 save_checkpoint(destination / "best.pt", **checkpoint_args)
+
+            improved_loss = False
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                improved_loss = True
+                loss_checkpoint_args = dict(checkpoint_args)
+                loss_checkpoint_args["best_metric"] = {
+                    "loss": val_loss, "epoch": epoch + 1,
+                    "selection_metric": "loss", "value": val_loss,
+                }
+                save_checkpoint(destination / "best_loss.pt", **loss_checkpoint_args)
+
+            improved_rouge = False
+            current_rouge = val_scores.get("rouge_l_f1")
+            if current_rouge is not None and current_rouge > best_val_rouge:
+                best_val_rouge = current_rouge
+                improved_rouge = True
+                rouge_checkpoint_args = dict(checkpoint_args)
+                rouge_checkpoint_args["best_metric"] = {
+                    "loss": val_loss, "epoch": epoch + 1,
+                    "selection_metric": "rouge_l_f1", "value": current_rouge,
+                }
+                save_checkpoint(destination / "best_rouge.pt", **rouge_checkpoint_args)
+
             row = {"epoch": epoch + 1, "train_loss": train_loss,
                    "train_loss_normalization": loss_normalization,
                    **{f"train_{name}": score for name, score in train_scores.items()},
@@ -491,17 +522,26 @@ def _run_training(args, device, rank, world_size):
                    "selection_value": current["value"],
                    "train_eval_examples": len(train_eval_loader.dataset) if train_eval_loader else 0,
                    "improved": improved,
+                   "improved_loss": improved_loss,
+                   "improved_rouge": improved_rouge,
                    "epochs_without_improvement": epochs_without_improvement}
             if epoch_ot_losses and getattr(args, "ot_loss_weight", 0.0):
                 row["train_ot_loss"] = epoch_ot_losses[-1]
             history.append(row)
             with metrics_path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(row) + "\n")
+            extra_tags = []
+            if improved_loss and selection_metric != "loss":
+                extra_tags.append(f"best val_loss={val_loss:.4f} -> best_loss.pt")
+            if improved_rouge and selection_metric != "rouge_l_f1":
+                extra_tags.append(f"best rouge_l={current_rouge:.4f} -> best_rouge.pt")
+            tag_str = f" [{', '.join(extra_tags)}]" if extra_tags else ""
             print(_format_epoch_metrics(epoch + 1, args.epochs, "Validation", val_loss,
                                         val_scores) +
                   f", best epoch={best_metric['epoch']}, "
                   f"selection={selection_metric}, "
-                  f"patience={epochs_without_improvement}/{args.early_stopping_patience or 'off'}")
+                  f"patience={epochs_without_improvement}/{args.early_stopping_patience or 'off'}" +
+                  tag_str)
             if (args.early_stopping_patience and
                     epochs_without_improvement >= args.early_stopping_patience):
                 print(f"Early stopping at epoch {epoch + 1}; best checkpoint is epoch "
