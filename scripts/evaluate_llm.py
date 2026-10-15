@@ -22,6 +22,7 @@ from utils.metrics import (PAPER_METRICS, build_bertscore_scorer, lexical_scores
                            normalize_llm_answer, score_pairs)
 
 MODEL_PRESETS = {
+    "llava-onevision-1.5-8b": "lmms-lab/LLaVA-OneVision-1.5-8B-Instruct",
     "qwen3-vl-8b": "Qwen/Qwen3-VL-8B-Instruct",
     "internvl3.5-8b": "OpenGVLab/InternVL3_5-8B-HF",
     "ministral-3-8b": "mistralai/Ministral-3-8B-Instruct-2512",
@@ -29,12 +30,43 @@ MODEL_PRESETS = {
     "gemma-4-e4b": "google/gemma-4-E4B-it",
 }
 MODEL_CLASSES = {
+    "llavaonevision1_5": "AutoModelForCausalLM",
     "qwen3_vl": "Qwen3VLForConditionalGeneration",
     "internvl": "InternVLForConditionalGeneration",
     "mistral3": "Mistral3ForConditionalGeneration",
     "glm4v": "Glm4vForConditionalGeneration",
     "gemma4": "Gemma4ForConditionalGeneration",
 }
+ONEVISION_MODEL_TYPE = "llavaonevision1_5"
+ONEVISION_AUTO_MAP = {
+    "AutoConfig": "configuration_llavaonevision1_5.Llavaonevision1_5Config",
+    "AutoModelForCausalLM": "modeling_llavaonevision1_5.LLaVAOneVision1_5_ForConditionalGeneration",
+}
+
+
+def normalize_model_config(config: dict) -> dict:
+    """Identify OneVision 1.5 even when its published config omits model_type."""
+    if not isinstance(config, dict):
+        raise ValueError("Model config.json must contain a JSON object.")
+    config = config.copy()
+    auto_map = config.get("auto_map") or {}
+    onevision = all(auto_map.get(key) == value for key, value in ONEVISION_AUTO_MAP.items())
+    if onevision and not config.get("model_type"):
+        config["model_type"] = ONEVISION_MODEL_TYPE
+    if config.get("model_type") == ONEVISION_MODEL_TYPE and not onevision:
+        raise ValueError("OneVision 1.5 requires the checkpoint's original AutoConfig/AutoModelForCausalLM mappings.")
+    if config.get("model_type") not in MODEL_CLASSES:
+        raise ValueError(f"Unsupported vision architecture: {config.get('model_type')!r}; "
+                         f"architectures={config.get('architectures', [])}. Use --list-models. "
+                         "InternVL3.5 requires OpenGVLab/InternVL3_5-8B-HF.")
+    return config
+
+
+def runtime_requirements(config: dict) -> list[str]:
+    """OneVision's custom implementation needs the Transformers 4.x APIs."""
+    if config["model_type"] == ONEVISION_MODEL_TYPE:
+        return ["transformers==4.57.1", "huggingface-hub>=0.34,<1"]
+    return ["transformers>=5.5,<6", "huggingface-hub>=1,<2"]
 
 SYSTEM_PROMPT = (
     "Answer the question using the image. Return only the short answer, "
@@ -336,12 +368,7 @@ def inspect_model(model: str, revision: str = "main", cache_dir: Path | None = N
         config_path = Path(hf_hub_download(repo_id=model, filename="config.json", revision=commit,
                                           cache_dir=str(cache_dir) if cache_dir else None))
     validate_model_files(names)
-    config = json.loads(config_path.read_text(encoding="utf-8"))
-    if not isinstance(config, dict):
-        raise ValueError("Model config.json must contain a JSON object.")
-    if config.get("model_type") not in MODEL_CLASSES:
-        raise ValueError("Unsupported native vision architecture. Use one of --list-models; "
-                         "InternVL3.5 requires the OpenGVLab/InternVL3_5-8B-HF checkpoint.")
+    config = normalize_model_config(json.loads(config_path.read_text(encoding="utf-8")))
     return source, config
 
 
@@ -358,7 +385,7 @@ def resolve_model(source: dict, cache_dir: Path | None) -> tuple[Path, dict]:
     names = source["names"]
     safe = "model.safetensors" in names or "model.safetensors.index.json" in names
     weight_suffix = ".safetensors" if safe else ".bin"
-    assets = [name for name in names if name.endswith((".json", ".model", ".txt", ".jinja", ".tiktoken"))
+    assets = [name for name in names if name.endswith((".json", ".model", ".txt", ".jinja", ".tiktoken", ".py"))
               or name.startswith("model" if safe else "pytorch_model") and name.endswith(weight_suffix)]
     if "directory" in source:
         directory = Path(source["directory"])
@@ -385,7 +412,13 @@ def validate_runtime(config: dict, dtype: str):
         import accelerate
         import transformers
     except ImportError as error:
-        raise RuntimeError("Install evaluation dependencies from requirements.txt (Transformers >=5.5).") from error
+        raise RuntimeError("Install evaluation dependencies: " + " ".join(runtime_requirements(config))
+                           + " accelerate pillow safetensors") from error
+    from packaging.specifiers import SpecifierSet
+    requirement = runtime_requirements(config)[0]
+    if transformers.__version__ not in SpecifierSet(requirement.removeprefix("transformers")):
+        raise RuntimeError(f"{config['model_type']} needs {requirement}; installed {transformers.__version__}. "
+                           "Run: pip install -U " + " ".join(f"'{item}'" for item in runtime_requirements(config)))
     count = torch.cuda.device_count()
     if not count:
         raise RuntimeError("An NVIDIA CUDA GPU is required. On Kaggle select GPU T4 x2.")
@@ -419,13 +452,17 @@ class TransformersClient:
         self.torch = torch
         self.alias = alias
         self.context_size = context_size
+        self.onevision = config["model_type"] == ONEVISION_MODEL_TYPE
+        # Only this explicitly supported custom architecture executes checkpoint code.
+        # resolve_model downloads its Python files at the same pinned commit as the weights.
         self.processor = transformers.AutoProcessor.from_pretrained(
-            str(directory), trust_remote_code=False, local_files_only=True,
+            str(directory), trust_remote_code=self.onevision, local_files_only=True,
+            **({"use_fast": False} if self.onevision else {}),
         )
         self.model = loader.from_pretrained(
             str(directory), dtype=getattr(torch, dtype), device_map="balanced",
             max_memory={**{i: int(gpu_memory_gib * 2**30) for i in range(count)}, "cpu": 0},
-            attn_implementation=attention, trust_remote_code=False, local_files_only=True,
+            attn_implementation=attention, trust_remote_code=self.onevision, local_files_only=True,
             **loading,
         ).eval()
         placement = getattr(self.model, "hf_device_map", {})
@@ -440,6 +477,9 @@ class TransformersClient:
             "gpu_memory_gib": gpu_memory_gib, "context_size": context_size,
             "fp8_dequantized": bool(quantization), "enable_thinking": False,
         }
+        if self.onevision:
+            self.backend_config.update({"trust_remote_code": True,
+                                        "model_class": type(self.model).__name__})
 
     def answer(self, model, example, path, max_tokens, seed, system_prompt=SYSTEM_PROMPT) -> dict:
         if model != self.alias:
@@ -452,10 +492,19 @@ class TransformersClient:
                 {"type": "text", "text": example.question},
             ]},
         ]
-        inputs = self.processor.apply_chat_template(
-            messages, add_generation_prompt=True, tokenize=True,
-            return_dict=True, return_tensors="pt", enable_thinking=False,
-        )
+        if self.onevision:
+            # The official checkpoint uses Qwen2.5-VL's processor with temporal_patch_size=1.
+            # Feed the PIL image directly so its own resize/normalization settings are used.
+            from PIL import Image
+            text = self.processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+            with Image.open(path) as image:
+                inputs = self.processor(text=[text], images=[image.convert("RGB")],
+                                        padding=True, return_tensors="pt")
+        else:
+            inputs = self.processor.apply_chat_template(
+                messages, add_generation_prompt=True, tokenize=True,
+                return_dict=True, return_tensors="pt", enable_thinking=False,
+            )
         prompt_tokens = inputs["input_ids"].shape[-1]
         if prompt_tokens + max_tokens > self.context_size:
             raise ValueError(f"Image/question uses {prompt_tokens} tokens plus {max_tokens} output tokens, "

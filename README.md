@@ -306,7 +306,7 @@ validation on your dataset.
 
 ### Zero-shot native LLM/VLM evaluation
 
-Use `scripts/evaluate_llm.py` for all pretrained vision-language models. It loads
+Use `scripts/evaluate_llm.py` for the supported pretrained vision-language models. It loads
 native Hugging Face Transformers checkpoints directly with the model's own
 processor. One evaluator handles GQA and PlantExpertVQA, with no server or GGUF
 backend. The old GGUF/LM Studio runners, Keye adapter, notebook generator, and
@@ -323,6 +323,7 @@ Change only `--model` to select a preset alias or its native repository ID:
 
 | Alias | Native checkpoint |
 | --- | --- |
+| `llava-onevision-1.5-8b` | [lmms-lab/LLaVA-OneVision-1.5-8B-Instruct](https://huggingface.co/lmms-lab/LLaVA-OneVision-1.5-8B-Instruct) |
 | `qwen3-vl-8b` (default) | [Qwen/Qwen3-VL-8B-Instruct](https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct) |
 | `internvl3.5-8b` | [OpenGVLab/InternVL3_5-8B-HF](https://huggingface.co/OpenGVLab/InternVL3_5-8B-HF) |
 | `ministral-3-8b` | [mistralai/Ministral-3-8B-Instruct-2512](https://huggingface.co/mistralai/Ministral-3-8B-Instruct-2512) |
@@ -335,6 +336,27 @@ model license on Hugging Face and providing `HF_TOKEN` in your environment.
 Native checkpoint folders are also accepted through `--model` (or `--model-dir`).
 GGUF files, GGUF-only repositories, and `:Q4_K_M` suffixes are rejected. When a
 folder contains both formats, only native weights are loaded.
+
+**LLaVA-OneVision 1.5 uses a separate runtime.** Its checkpoint contains custom
+model code and omits the top-level `model_type`; the evaluator recognizes its
+`auto_map` and uses `AutoModelForCausalLM` with `trust_remote_code=True` for this
+architecture. It downloads the Python code, processor, tokenizer, and weights
+automatically into the HF cache, all from the same resolved commit. This model
+uses Transformers 4.57.1; the other presets use the Transformers 5.x dependencies
+above. For CLI evaluation, install its requirements in a separate environment
+instead of `requirements.txt`:
+
+```bash
+pip install -U -r requirements-llava-onevision.txt
+python -m scripts.evaluate_llm --model llava-onevision-1.5-8b \
+  --dataset plantexpert --limit 5 --output-dir results/onevision_smoke
+```
+
+The Kaggle notebook selects the runtime automatically, including for local
+checkpoint folders. An unauthenticated HF Hub warning does not prevent downloads
+of public models such as OneVision. Set `HF_TOKEN` to authenticate; gated models
+also require access to their repositories. The unsupported-architecture error
+is independent of this warning.
 
 Run a five-question GQA smoke evaluation, then evaluate the full split in a
 separate output folder:
@@ -356,7 +378,7 @@ python3 -m scripts.evaluate_llm --model internvl3.5-8b --dataset plantexpert
 For Kaggle, upload [evaluate_llm_kaggle.ipynb](notebooks/evaluate_llm_kaggle.ipynb),
 select **Settings → Accelerator → GPU T4 x2**, enable **Internet**, and attach your
 dataset. Edit `MODEL`, `DATASET`, `DATA_ROOT`, `QUESTIONS`, and `IMAGES` in the
-configuration cell, then **Run All**. Defaults use Qwen3-VL-8B-Instruct and the
+configuration cell, then **Run All**. Defaults use LLaVA-OneVision-1.5-8B-Instruct and the
 PlantExpert Kaggle path below. The notebook bundles the evaluator and metrics;
 no repository checkout is needed. It installs evaluation dependencies, checks
 exactly two visible GPUs, runs five smoke questions, then evaluates the full
@@ -365,8 +387,11 @@ subprocess that releases memory when it exits. Separate smoke/full output folder
 live under `/kaggle/working/results`, with automatic resume for matching settings
 and reuse of the saved model commit. Restore saved results to the same path after
 starting a new Kaggle session. Set `RUN_SMOKE=False` to resume only the full run.
-For Gemma, add an `HF_TOKEN` Kaggle secret and enable `USE_KAGGLE_HF_TOKEN` after
-accepting the model license. Download the three result files from Kaggle's Output
+To authenticate, add an `HF_TOKEN` Kaggle secret and enable `USE_KAGGLE_HF_TOKEN`.
+Gemma also requires accepting the model license. After updating the notebook or
+changing `MODEL`, rerun **all cells**, including the bundled-source and dependency
+cells; rerunning only preflight keeps the old evaluator/runtime.
+Download the three result files from Kaggle's Output
 tab after saving a version. This is the only evaluation notebook; no separate
 notebook generator is retained.
 

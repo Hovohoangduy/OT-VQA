@@ -1,0 +1,10 @@
+# Evaluation runtime for LLaVA-OneVision-1.5's custom Transformers 4.x code.
+# Install instead of requirements.txt in a separate environment for this model.
+transformers==4.57.1
+huggingface-hub>=0.34,<1
+accelerate>=1,<2
+safetensors>=0.4.5
+pillow>=10
+torch
+torchvision
+bert-score==0.3.13
