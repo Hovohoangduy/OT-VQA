@@ -8,8 +8,41 @@ from torch import nn
 from torch.nn import functional as F
 
 
-def log_sinkhorn(cost, row_marginal, column_marginal, epsilon=0.05, iterations=20, tol=1e-4):
-    """Solve batched entropic OT in FP32; zero marginals denote padded entries."""
+def compute_fgw_cost(local_cost, patches, num_q_tokens, plan, alpha=0.2, device=None, dtype=None):
+    """Compute Fused Gromov-Wasserstein cost combining feature cost and 2D spatial-structural distortion."""
+    if alpha <= 0 or plan is None:
+        return local_cost
+    side = math.isqrt(patches)
+    if side * side != patches:
+        return local_cost
+    device = device or local_cost.device
+    dtype = dtype or local_cost.dtype
+
+    # 2D visual distance matrix D_I [patches, patches]
+    axis = torch.linspace(0, 1, side, device=device, dtype=dtype)
+    grid_y, grid_x = torch.meshgrid(axis, axis, indexing="ij")
+    coords = torch.stack([grid_x.flatten(), grid_y.flatten()], dim=-1)
+    d_i = torch.cdist(coords, coords) / math.sqrt(2.0)
+
+    # Question sequence distance matrix D_Q [num_q_tokens, num_q_tokens]
+    q_pos = torch.linspace(0, 1, num_q_tokens, device=device, dtype=dtype).unsqueeze(1)
+    d_q = torch.cdist(q_pos, q_pos)
+
+    d_i_sq = d_i.pow(2)
+    d_q_sq = d_q.pow(2)
+
+    plan_det = plan.detach()
+    term1 = torch.bmm(d_i_sq.unsqueeze(0).expand(plan_det.size(0), -1, -1), plan_det).sum(-1, keepdim=True)
+    term2 = torch.bmm(plan_det, d_q_sq.unsqueeze(0).expand(plan_det.size(0), -1, -1)).sum(-2, keepdim=True)
+    term3 = torch.bmm(torch.bmm(d_i.unsqueeze(0).expand(plan_det.size(0), -1, -1), plan_det),
+                      d_q.unsqueeze(0).expand(plan_det.size(0), -1, -1))
+
+    c_gw = (term1 + term2 - 2 * term3).clamp_min(0.0)
+    return (1.0 - alpha) * local_cost + alpha * c_gw
+
+
+def log_sinkhorn(cost, row_marginal, column_marginal, epsilon=0.05, iterations=20, tol=1e-4, tau=None):
+    """Solve batched entropic OT in FP32; supports both balanced and unbalanced (tau < inf)."""
     if cost.ndim != 3 or row_marginal.shape != cost.shape[:2] or column_marginal.shape != (cost.size(0), cost.size(2)):
         raise ValueError("Cost and marginal shapes are incompatible")
     if epsilon <= 0 or iterations < 1:
@@ -19,12 +52,14 @@ def log_sinkhorn(cost, row_marginal, column_marginal, epsilon=0.05, iterations=2
     column_marginal = column_marginal.float()
     if (row_marginal < 0).any() or (column_marginal < 0).any():
         raise ValueError("Marginals must be nonnegative")
-    if not torch.allclose(row_marginal.sum(-1), column_marginal.sum(-1), atol=1e-5):
+    if tau is None and not torch.allclose(row_marginal.sum(-1), column_marginal.sum(-1), atol=1e-5):
         raise ValueError("Row and column marginals must have equal total mass")
     valid_rows = row_marginal > 0
     valid_columns = column_marginal > 0
     if not valid_rows.any(-1).all() or not valid_columns.any(-1).all():
         raise ValueError("Each sample needs a positive row and column marginal")
+
+    reg = (tau / (tau + epsilon)) if (tau is not None and tau > 0) else 1.0
 
     # A finite sentinel gives padded rows/columns finite logsumexp values before
     # torch.where removes them. Their dual variables are -inf thereafter.
@@ -35,13 +70,13 @@ def log_sinkhorn(cost, row_marginal, column_marginal, epsilon=0.05, iterations=2
     log_u = torch.zeros_like(row_marginal).masked_fill(~valid_rows, float("-inf"))
     log_v = torch.zeros_like(column_marginal).masked_fill(~valid_columns, float("-inf"))
     for step in range(iterations):
-        log_u = (log_rows - torch.logsumexp(log_kernel + log_v.unsqueeze(-2), dim=-1)).masked_fill(
+        log_u = reg * (log_rows - torch.logsumexp(log_kernel + log_v.unsqueeze(-2), dim=-1)).masked_fill(
             ~valid_rows, float("-inf")
         )
-        log_v = (log_columns - torch.logsumexp(log_kernel + log_u.unsqueeze(-1), dim=-2)).masked_fill(
+        log_v = reg * (log_columns - torch.logsumexp(log_kernel + log_u.unsqueeze(-1), dim=-2)).masked_fill(
             ~valid_columns, float("-inf")
         )
-        if tol is not None and step >= 4:
+        if tol is not None and step >= 4 and tau is None:
             log_plan_cur = log_kernel + log_u.unsqueeze(-1) + log_v.unsqueeze(-2)
             plan_cur = log_plan_cur.masked_fill(~valid_pairs, float("-inf")).exp()
             row_err = (plan_cur.sum(-1) - row_marginal).abs().amax()
@@ -56,7 +91,7 @@ class PartialTransportFusion(nn.Module):
 
     def __init__(self, text_dim, d_model, epsilon=0.05, iterations=20,
                  dustbin_mass=0.2, dustbin_cost=1.0, visual_memory=False,
-                 num_heads=1, tol=1e-4):
+                 num_heads=1, tol=1e-4, fgw_alpha=0.0, unbalanced_tau=None):
         super().__init__()
         if not 0 <= dustbin_mass < 1:
             raise ValueError("dustbin_mass must be in [0, 1)")
@@ -73,6 +108,8 @@ class PartialTransportFusion(nn.Module):
         self.num_heads = int(num_heads)
         self.head_dim = d_model // num_heads
         self.tol = tol
+        self.fgw_alpha = float(fgw_alpha)
+        self.unbalanced_tau = float(unbalanced_tau) if unbalanced_tau is not None else None
         self.question_projection = nn.Linear(text_dim, d_model)
         self.grounding_projection = nn.Linear(d_model, d_model)
         self.global_projection = nn.Linear(2 * d_model, d_model)
@@ -147,7 +184,19 @@ class PartialTransportFusion(nn.Module):
         row_marginal = torch.cat((row_marginal, cost.new_full((eff_batch, 1), self.dustbin_mass)), dim=-1)
         column_marginal = mask_eff.to(cost.dtype) * (local_mass / valid_counts_eff.unsqueeze(-1))
         column_marginal = torch.cat((column_marginal, cost.new_full((eff_batch, 1), self.dustbin_mass)), dim=-1)
-        plan = log_sinkhorn(cost, row_marginal, column_marginal, self.epsilon, self.iterations, tol=self.tol)
+        plan = log_sinkhorn(cost, row_marginal, column_marginal, self.epsilon, self.iterations,
+                            tol=self.tol, tau=self.unbalanced_tau)
+        if self.fgw_alpha > 0:
+            local_cost = compute_fgw_cost(
+                local_cost, patches, num_q_tokens, plan[:, :patches, :num_q_tokens],
+                alpha=self.fgw_alpha, device=cost.device, dtype=cost.dtype
+            )
+            cost = torch.cat((
+                torch.cat((local_cost, image_to_dustbin), dim=-1),
+                torch.cat((dustbin_to_question, dustbin_to_dustbin), dim=-1),
+            ), dim=-2)
+            plan = log_sinkhorn(cost, row_marginal, column_marginal, self.epsilon,
+                                max(self.iterations // 2, 5), tol=self.tol, tau=self.unbalanced_tau)
         local_plan = plan[:, :patches, :num_q_tokens]
         matched_per_token = local_plan.sum(1)
         aligned_h = torch.bmm(local_plan.transpose(1, 2).to(v.dtype), v)

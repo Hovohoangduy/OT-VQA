@@ -105,6 +105,10 @@ def get_args(argv=None, *, evaluation=False):
                         help="Number of heads for Multi-Head Optimal Transport (MH-OT); default 1 (4 for SciVQA)")
     parser.add_argument("--ot_loss_weight", type=float, default=0.0,
                         help="Weight for auxiliary Kantorovich OT alignment loss; default 0.0 (0.05 for SciVQA)")
+    parser.add_argument("--fgw_alpha", type=float, default=0.0,
+                        help="Fused Gromov-Wasserstein trade-off weight (0.0 = pure feature OT, >0 incorporates 2D spatial chart geometry)")
+    parser.add_argument("--unbalanced_tau", type=float, default=None,
+                        help="Unbalanced OT marginal relaxation temperature (None = standard balanced OT with dustbin, >0 = soft marginal KL relaxation)")
     parser.add_argument(
         "--freeze_answer_embeddings",
         action=argparse.BooleanOptionalAction,

@@ -36,9 +36,11 @@ def postprocess_answer(text):
     lower = text.lower()
     if any(p in lower for p in unanswerable_patterns):
         return "It is not possible to answer this question based only on the provided data."
-    if re.fullmatch(r"[A-D](?:\s*,\s*[A-D])+", text):
-        return re.sub(r"\s*,\s*", ",", text)
-    opt_match = re.fullmatch(r"(?:option|choice)?\s*\(?([A-D])\)?\.?", text, re.IGNORECASE)
+    if lower in ("yes", "no"):
+        return text.strip().capitalize()
+    if re.fullmatch(r"[A-Fa-f](?:\s*,\s*[A-Fa-f])+", text):
+        return re.sub(r"\s*,\s*", ",", text.upper())
+    opt_match = re.fullmatch(r"(?:option|choice)?\s*\(?([A-Fa-f])\)?\.?", text, re.IGNORECASE)
     if opt_match and len(text.strip()) <= 10:
         return opt_match.group(1).upper()
     return text

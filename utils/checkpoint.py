@@ -20,19 +20,25 @@ MODEL_CONFIG_KEYS = {
     "ot_dustbin_mass", "ot_dustbin_cost", "max_answer_tokens", "max_question_tokens",
     "fusion",
     "image_size", "image_preprocessing", "ot_visual_memory", "figure_context",
-    "tie_weights", "ot_num_heads",
+    "tie_weights", "ot_num_heads", "fgw_alpha", "unbalanced_tau",
 }
 
 
 def _adapt_vision_state_dict(state_dict, target_keys):
-    """Bridge the ViT module-path rename across Transformers releases."""
+    """Bridge ViT and SigLIP module-path renames across Transformers releases."""
     target_keys = set(target_keys)
+
+    # SigLIP vision_model prefix adaptation
+    target_has_siglip_sub = any(key.startswith("image_model.model.vision_model.") for key in target_keys)
+    source_has_siglip_sub = any(key.startswith("image_model.model.vision_model.") for key in state_dict)
+
+    # ViT layer marker adaptation
     old_marker = "image_model.model.encoder.layer."
     new_marker = "image_model.model.layers."
     source_uses_new = any(key.startswith(new_marker) for key in state_dict)
     target_uses_new = any(key.startswith(new_marker) for key in target_keys)
-    if source_uses_new == target_uses_new:
-        return state_dict
+    vit_convert = (source_uses_new != target_uses_new)
+
     old_to_new = {
         ".attention.attention.query.": ".attention.q_proj.",
         ".attention.attention.key.": ".attention.k_proj.",
@@ -41,17 +47,29 @@ def _adapt_vision_state_dict(state_dict, target_keys):
         ".intermediate.dense.": ".mlp.fc1.",
         ".output.dense.": ".mlp.fc2.",
     }
+
     converted = {}
     for key, value in state_dict.items():
         updated = key
-        if source_uses_new and key.startswith(new_marker):
-            updated = key.replace(new_marker, old_marker, 1)
-            for old, new in old_to_new.items():
-                updated = updated.replace(new, old)
-        elif not source_uses_new and key.startswith(old_marker):
-            updated = key.replace(old_marker, new_marker, 1)
-            for old, new in old_to_new.items():
-                updated = updated.replace(old, new)
+        # Handle SigLIP vision_model nesting
+        if target_has_siglip_sub and not source_has_siglip_sub:
+            if updated.startswith("image_model.model.") and not updated.startswith("image_model.model.vision_model."):
+                updated = updated.replace("image_model.model.", "image_model.model.vision_model.", 1)
+        elif source_has_siglip_sub and not target_has_siglip_sub:
+            if updated.startswith("image_model.model.vision_model."):
+                updated = updated.replace("image_model.model.vision_model.", "image_model.model.", 1)
+
+        # Handle ViT layer renaming
+        if vit_convert:
+            if source_uses_new and updated.startswith(new_marker):
+                updated = updated.replace(new_marker, old_marker, 1)
+                for old, new in old_to_new.items():
+                    updated = updated.replace(new, old)
+            elif not source_uses_new and updated.startswith(old_marker):
+                updated = updated.replace(old_marker, new_marker, 1)
+                for old, new in old_to_new.items():
+                    updated = updated.replace(old, new)
+
         converted[updated] = value
     return converted
 

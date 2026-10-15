@@ -269,7 +269,8 @@ def _run_training(args, device, rank, world_size):
         for name, default in (("image_size", 256), ("image_preprocessing", "crop"),
                               ("freeze_question_encoder", False),
                               ("ot_visual_memory", False), ("figure_context", False),
-                              ("tie_weights", False), ("ot_num_heads", 1)):
+                              ("tie_weights", False), ("ot_num_heads", 1),
+                              ("fgw_alpha", 0.0), ("unbalanced_tau", None)):
             value = getattr(args, name)
             if value is not None and value != stored_config.get(name, default):
                 raise ValueError(f"--{name} does not match the resume checkpoint; start a fresh run")
@@ -321,7 +322,9 @@ def _run_training(args, device, rank, world_size):
                          image_preprocessing=args.image_preprocessing or "crop",
                          ot_visual_memory=bool(args.ot_visual_memory),
                          figure_context=bool(args.figure_context),
-                         tie_weights=bool(args.tie_weights)).to(device)
+                         tie_weights=bool(args.tie_weights),
+                         fgw_alpha=getattr(args, "fgw_alpha", 0.0),
+                         unbalanced_tau=getattr(args, "unbalanced_tau", None)).to(device)
 
     train_loader = _make_loader(args, "train", True, text_model, image_model,
                                 rank=rank, world_size=world_size,

@@ -106,8 +106,24 @@ def run_breakdown_diagnosis(args) -> dict[str, Any]:
                 annotations.extend(batch_anno_ids)
 
     print("Scoring predictions against references...")
-    rows = scivqa_score_pairs(references, generated, bert_scorer=bert_scorer)
-    metric_keys = metrics_for_dataset("scivqa")
+    if bert_scorer is not None:
+        rows = scivqa_score_pairs(references, generated, bert_scorer=bert_scorer)
+        metric_keys = metrics_for_dataset("scivqa")
+    else:
+        from rouge_score.rouge_scorer import RougeScorer
+        rouge = RougeScorer(["rouge1", "rougeL"], use_stemmer=True)
+        rows = []
+        for ref, hyp in zip(references, generated):
+            scores = rouge.score(str(ref), str(hyp))
+            rows.append({
+                "rouge_1_f1": scores["rouge1"].fmeasure,
+                "rouge_1_precision": scores["rouge1"].precision,
+                "rouge_1_recall": scores["rouge1"].recall,
+                "rouge_l_f1": scores["rougeL"].fmeasure,
+                "rouge_l_precision": scores["rougeL"].precision,
+                "rouge_l_recall": scores["rougeL"].recall,
+            })
+        metric_keys = ["rouge_1_f1", "rouge_l_f1"]
     overall_scores = mean_scores(rows, metric_keys)
 
     # Group by qa_pair_type

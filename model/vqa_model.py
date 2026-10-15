@@ -41,9 +41,10 @@ class VQAModel(nn.Module):
                  freeze_answer_embeddings=False, freeze_question_encoder=False, ot_epsilon=0.05,
                  ot_iterations=20, ot_dustbin_mass=0.2, ot_dustbin_cost=1.0,
                  max_answer_tokens=Config.MAX_LEN_ANS,
-                 max_question_tokens=Config.MAX_LEN_QUES, fusion='ot',
-                 image_size=256, image_preprocessing='crop', ot_visual_memory=False,
-                 figure_context=False, tie_weights=False, ot_num_heads=1):
+                  max_question_tokens=Config.MAX_LEN_QUES, fusion='ot',
+                  image_size=256, image_preprocessing='crop', ot_visual_memory=False,
+                  figure_context=False, tie_weights=False, ot_num_heads=1,
+                  fgw_alpha=0.0, unbalanced_tau=None):
         super().__init__()
         output_size = d_model if output_size is None else output_size
         if output_size != d_model:
@@ -68,6 +69,8 @@ class VQAModel(nn.Module):
         self.figure_context = figure_context
         self.tie_weights = tie_weights
         self.ot_num_heads = ot_num_heads
+        self.fgw_alpha = float(fgw_alpha)
+        self.unbalanced_tau = float(unbalanced_tau) if unbalanced_tau is not None else None
         self.image_transform = build_image_transform(image_size, image_preprocessing)
         self.model_config = dict(
             output_size=output_size, d_model=d_model, num_heads=num_heads,
@@ -84,6 +87,8 @@ class VQAModel(nn.Module):
             figure_context=figure_context,
             tie_weights=tie_weights,
             ot_num_heads=ot_num_heads,
+            fgw_alpha=fgw_alpha,
+            unbalanced_tau=unbalanced_tau,
         )
         self.image_model = ImageEmbedding(image_model, image_size=image_size)
         self.question_encoder = QuestionEmbedding(model_name=text_model,
@@ -101,6 +106,7 @@ class VQAModel(nn.Module):
                              else self.tokenizer.sep_token_id)
         if any(value is None for value in (self.pad_token_id, self.bos_token_id, self.eos_token_id)):
             raise ValueError('Tokenizer needs PAD, BOS/CLS and EOS/SEP tokens')
+        self._setup_constrained_tokens()
 
         image_dim = self.image_model.output_dim
         answer_dim = self.answer_embedding.token_embeddings.word_embeddings.embedding_dim
@@ -113,6 +119,8 @@ class VQAModel(nn.Module):
             dustbin_cost=ot_dustbin_cost,
             visual_memory=ot_visual_memory,
             num_heads=ot_num_heads,
+            fgw_alpha=fgw_alpha,
+            unbalanced_tau=unbalanced_tau,
         )
         self.decoder = Decoder(d_model, ffn_hidden, num_heads, drop_prob, num_layers)
         actual_vocab = self.answer_embedding.token_embeddings.word_embeddings.num_embeddings
@@ -179,25 +187,121 @@ class VQAModel(nn.Module):
             return logits, ids[:, 1:], ot_loss
         return logits, ids[:, 1:]
 
+    def _setup_constrained_tokens(self):
+        """Pre-cache token IDs for task-adaptive constrained decoding."""
+        tok = self.tokenizer
+        yes_ids = tok.encode("yes", add_special_tokens=False)
+        no_ids = tok.encode("no", add_special_tokens=False)
+        self.yes_token_id = yes_ids[0] if yes_ids else 2748
+        self.no_token_id = no_ids[0] if no_ids else 2053
+
+        self.option_token_ids = {}
+        for letter in ["A", "B", "C", "D", "E", "F"]:
+            enc = tok.encode(letter, add_special_tokens=False)
+            if enc:
+                self.option_token_ids[letter] = enc[0]
+
+        comma_ids = tok.encode(",", add_special_tokens=False)
+        self.comma_token_id = comma_ids[0] if comma_ids else 1010
+
+        self.numeric_token_ids = set()
+        for ch in "0123456789.-+":
+            enc = tok.encode(ch, add_special_tokens=False)
+            for tid in enc:
+                self.numeric_token_ids.add(tid)
+
+    def _apply_step_constraints(self, logits, ids, step, questions):
+        """Apply task-adaptive token masking based on question structure."""
+        if questions is None or len(questions) != logits.size(0):
+            return logits
+
+        for b, q in enumerate(questions):
+            q_str = str(q).lower()
+
+            # 1. Binary question: "Yes" or "No"
+            is_binary = "answer with 'yes' or 'no'" in q_str or "yes or no" in q_str
+            if is_binary:
+                if step == 0:
+                    allowed = [self.yes_token_id, self.no_token_id]
+                    mask = torch.ones(logits.size(1), dtype=torch.bool, device=logits.device)
+                    mask[allowed] = False
+                    logits[b, mask] = float("-inf")
+                else:
+                    mask = torch.ones(logits.size(1), dtype=torch.bool, device=logits.device)
+                    mask[self.eos_token_id] = False
+                    logits[b, mask] = float("-inf")
+                continue
+
+            # 2. Multiple choice question: options present or explicitly instructed
+            is_mc = "return only the letter(s)" in q_str or "answer options:" in q_str
+            if is_mc:
+                candidate_ids = []
+                for letter, tid in self.option_token_ids.items():
+                    if f"{letter.lower()}:" in q_str or f"({letter.lower()})" in q_str or f"option {letter.lower()}" in q_str:
+                        candidate_ids.append(tid)
+                if not candidate_ids:
+                    candidate_ids = [self.option_token_ids[l] for l in ["A", "B", "C", "D"] if l in self.option_token_ids]
+
+                if step == 0:
+                    mask = torch.ones(logits.size(1), dtype=torch.bool, device=logits.device)
+                    mask[candidate_ids] = False
+                    logits[b, mask] = float("-inf")
+                else:
+                    last_token = ids[b, -1].item()
+                    mask = torch.ones(logits.size(1), dtype=torch.bool, device=logits.device)
+                    already_selected = set(ids[b, 1:].tolist())
+                    remaining_candidates = [tid for tid in candidate_ids if tid not in already_selected]
+                    multi_choice_cue = "all that apply" in q_str or "letter(s)" in q_str or "options" in q_str
+                    if last_token == self.comma_token_id:
+                        if remaining_candidates:
+                            mask[remaining_candidates] = False
+                        else:
+                            mask[self.eos_token_id] = False
+                    elif last_token in candidate_ids:
+                        allowed = [self.eos_token_id]
+                        if multi_choice_cue and remaining_candidates and step < 6:
+                            allowed.append(self.comma_token_id)
+                        mask[allowed] = False
+                    else:
+                        mask[self.eos_token_id] = False
+                    logits[b, mask] = float("-inf")
+                continue
+
+            # 3. Numeric question: raw numerical value instructed
+            is_numeric = "answer with only the raw numerical value" in q_str or "raw numerical value" in q_str
+            if is_numeric and self.numeric_token_ids:
+                allowed = list(self.numeric_token_ids)
+                if step > 0:
+                    allowed.append(self.eos_token_id)
+                mask = torch.ones(logits.size(1), dtype=torch.bool, device=logits.device)
+                mask[allowed] = False
+                logits[b, mask] = float("-inf")
+                continue
+
+        return logits
+
     @torch.no_grad()
     def evaluate_batch(self, images, questions, answers, anno_ids=None,
-                       max_len=None):
+                       max_len=None, constrained=True):
         """Compute teacher-forced logits and generated answers from one encoding."""
         max_len = self.max_answer_tokens if max_len is None else max_len
         memory, memory_blocked = self.encode(images, questions, anno_ids)
         ids = self.answer_embedding.tokenize(answers, max_len)
         logits = self.decode(ids[:, :-1], memory, memory_blocked=memory_blocked)
-        generated = self._generate_from_memory(memory, memory_blocked, max_len)
+        generated = self._generate_from_memory(memory, memory_blocked, max_len,
+                                               questions=questions, constrained=constrained)
         return logits, ids[:, 1:], generated
 
-    def _generate_from_memory(self, memory, memory_blocked, max_len):
+    def _generate_from_memory(self, memory, memory_blocked, max_len, questions=None, constrained=True):
         ids = torch.full((memory.size(0), 1), self.bos_token_id, dtype=torch.long,
                          device=memory.device)
         finished = torch.zeros(memory.size(0), dtype=torch.bool, device=memory.device)
-        for _ in range(max_len - 1):
+        for step in range(max_len - 1):
             logits = self.decode(ids, memory, memory_blocked=memory_blocked,
                                  last_token_only=True)[:, -1, :]
             logits[:, [self.pad_token_id, self.bos_token_id]] = float('-inf')
+            if constrained and questions is not None:
+                logits = self._apply_step_constraints(logits, ids, step, questions)
             next_ids = logits.argmax(-1).masked_fill(finished, self.pad_token_id)
             ids = torch.cat([ids, next_ids.unsqueeze(1)], dim=1)
             finished |= next_ids.eq(self.eos_token_id)
@@ -206,7 +310,7 @@ class VQAModel(nn.Module):
         return ids[:, 1:]
 
     @torch.no_grad()
-    def generate(self, images, questions, anno_ids=None, max_len=None):
+    def generate(self, images, questions, anno_ids=None, max_len=None, constrained=True):
         max_len = self.max_answer_tokens if max_len is None else max_len
         if not 2 <= max_len <= self.max_answer_tokens:
             raise ValueError(f'max_len must be between 2 and {self.max_answer_tokens}')
@@ -214,7 +318,8 @@ class VQAModel(nn.Module):
         self.eval()
         try:
             memory, memory_blocked = self.encode(images, questions, anno_ids)
-            return self._generate_from_memory(memory, memory_blocked, max_len)
+            return self._generate_from_memory(memory, memory_blocked, max_len,
+                                               questions=questions, constrained=constrained)
         finally:
             self.train(was_training)
 

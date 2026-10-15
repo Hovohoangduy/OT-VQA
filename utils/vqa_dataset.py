@@ -23,11 +23,35 @@ def resolve_image_root(dataframe, img_path, split, override=None):
     return root
 
 
-def append_figure_context(question, caption, figure_type):
-    """Keep the question first so long captions cannot truncate it away."""
+FIGURE_TYPE_FOCUS = {
+    "line chart": "Focus on colors of different lines and meanings, X and Y axis labels and units, scale and range of values, trends.",
+    "bar chart": "Focus on colors of different bars, heights and positions, X and Y axis labels and units.",
+    "scatter plot": "Focus on distribution of points, clusters, outliers, X and Y axis coordinates.",
+    "confusion matrix": "Focus on row and column labels, numerical values in each cell, color intensity.",
+    "pie chart": "Focus on segments and their labels, percentage or proportion values, segment colors.",
+    "box plot": "Focus on median line position, box boundaries Q1 and Q3, whisker extent, outliers.",
+    "histogram": "Focus on bin ranges, frequency heights, X and Y axis labels.",
+    "tree": "Focus on hierarchical levels, root and leaf nodes, connecting edges, labels.",
+    "graph": "Focus on nodes, vertices, edges, connectivity, labels.",
+    "architecture diagram": "Focus on component blocks, flow directions, connections, layer names.",
+    "neural networks": "Focus on layers, connections, input/output dimensions, module names.",
+}
+
+
+def append_figure_context(question, caption, figure_type, compound=None, figs_numb=None):
+    """Keep the question first, enrich with compound subfigure guidance, figure focus, and caption."""
     text = str(question)
+    # 1. Compound figure subfigure navigation
+    if compound and figs_numb is not None:
+        nav = f"This is a compound figure containing multiple subfigures. Navigate to subfigure {figs_numb} in the compound figure to answer the question."
+        if nav not in text:
+            text += f"\nSubfigure navigation: {nav}"
+    # 2. Figure type & reasoning focus
     if isinstance(figure_type, str) and figure_type.strip() and "Figure type:" not in text:
-        text += f"\nFigure type: {figure_type.strip()}"
+        ft = figure_type.strip().lower()
+        focus = FIGURE_TYPE_FOCUS.get(ft, "Focus on colors, labels, axes, and visual elements.")
+        text += f"\nFigure type: {figure_type.strip()} ({focus})"
+    # 3. Figure caption
     if isinstance(caption, str) and caption.strip() and "Figure caption:" not in text:
         text += f"\nFigure caption: {caption.strip()}"
     return text
@@ -46,7 +70,15 @@ def format_qa_prompt(question, qa_pair_type=None):
         if "return only" not in text.lower() and "letter" not in text.lower():
             text += "\nReturn only the letter(s) of the correct answer."
     elif "infinite" in kind and "visual" in kind:
-        if "numerical value" not in text.lower() and "number" not in text.lower():
+        lower_q = text.lower()
+        numeric_cues = (
+            "how many", "what is the value", "what is the number", "percentage",
+            "rate", "coordinate", "maximum", "minimum", "average", "total",
+            "ratio", "score", "amount", "quantity", "what was the value",
+            "what is the percentage", "level", "threshold", "what number",
+            "what is the highest", "what is the lowest", "approximate",
+        )
+        if any(cue in lower_q for cue in numeric_cues) and "numerical value" not in lower_q and "number" not in lower_q:
             text += "\nAnswer with only the raw numerical value."
     return text
 
@@ -83,5 +115,10 @@ class VQADataset(Dataset):
         if self.qa_prompt and "qa_pair_type" in row and isinstance(row["qa_pair_type"], str):
             question = format_qa_prompt(question, row["qa_pair_type"])
         if self.figure_context:
-            question = append_figure_context(question, row["caption"], row["figure_type"])
+            compound = bool(row.get("compound", False))
+            figs_numb = row.get("figs_numb", None)
+            question = append_figure_context(
+                question, row.get("caption"), row.get("figure_type"),
+                compound=compound, figs_numb=figs_numb,
+            )
         return row.get("anno_id", idx), image, question, str(row.get("answer", ""))
