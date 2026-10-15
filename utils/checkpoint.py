@@ -14,6 +14,7 @@ LEGACY_MAX_ANSWER_TOKENS = 38
 
 
 MODEL_CONFIG_KEYS = {
+    "prompt_version", "decode_version", "output_drop_prob",
     "vocab_size", "output_size", "d_model", "num_heads", "ffn_hidden",
     "drop_prob", "num_layers", "mode",
     "freeze_answer_embeddings", "freeze_question_encoder", "ot_epsilon", "ot_iterations",
@@ -77,19 +78,31 @@ def _adapt_vision_state_dict(state_dict, target_keys):
 def checkpoint_payload(
     model, text_model, image_model, optimizer=None, scheduler=None,
     epoch=0, global_step=0, best_metric=None, epochs_without_improvement=0,
-    training_config=None,
+    training_config=None, scaler=None, rng_by_rank=None, bookkeeping=None,
 ):
+    native = getattr(model, "model_family", "legacy") == "qwen3_vl"
+    trainable_names = {name for name, p in model.named_parameters() if p.requires_grad}
+    state = model.state_dict()
+    if native:
+        state = {k: v for k, v in state.items() if k in trainable_names}
     return {
-        "format_version": 4,
-        "model_state_dict": model.state_dict(),
+        "format_version": 5,
+        "model_family": "qwen3_vl" if native else "legacy",
+        "state_kind": "trainable_only" if native else "full",
+        "trainable_names": sorted(trainable_names),
+        "scaler_state_dict": scaler.state_dict() if scaler is not None else None,
+        "rng_by_rank": rng_by_rank,
+        "bookkeeping": bookkeeping or {},
+        "model_state_dict": state,
         "model_config": model.model_config,
         "training_config": training_config or {},
         "text_model": text_model,
         "image_model": image_model,
-        "encoder_revisions": {
+        "encoder_revisions": ({"vlm": model.model_config["vlm_revision"],
+                               "text": model.model_config["query_revision"]} if native else {
             "text": getattr(model.question_encoder.text_encoder.config, "_commit_hash", None),
             "image": getattr(model.image_model.model.config, "_commit_hash", None),
-        },
+        }),
         "preprocessing": {
             "max_question_length": model.max_question_tokens,
             "max_answer_length": getattr(model, "max_answer_tokens", Config.MAX_LEN_ANS),
@@ -104,7 +117,7 @@ def checkpoint_payload(
         "best_metric": best_metric,
         "epochs_without_improvement": int(epochs_without_improvement),
         "torch_rng_state": torch.get_rng_state(),
-        "cuda_rng_state": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+        "cuda_rng_state": torch.cuda.get_rng_state() if torch.cuda.is_available() else None,
         "mps_rng_state": (torch.mps.get_rng_state()
                           if torch.backends.mps.is_available() else None),
         "python_rng_state": random.getstate(),
@@ -126,7 +139,7 @@ def read_checkpoint(checkpoint_path, device):
     if not isinstance(checkpoint, dict):
         raise ValueError("Checkpoint must be a dictionary")
     version = checkpoint.get("format_version")
-    if version not in {2, 3, 4}:
+    if version not in {2, 3, 4, 5}:
         raise ValueError(
             "Legacy checkpoint was trained with the incorrect decoder/objective. "
             "Retrain with the corrected train.py before generating answers."
@@ -138,10 +151,18 @@ def read_checkpoint(checkpoint_path, device):
 
 def load_model(checkpoint_path, device):
     checkpoint = read_checkpoint(checkpoint_path, device)
+    if checkpoint.get("model_family") == "qwen3_vl":
+        from model.pretrained_vlm import build_pretrained_vlm
+        model = build_pretrained_vlm(checkpoint["model_config"], device)
+        load_model_state(checkpoint, model)
+        model.eval()
+        return model
     stored_config = dict(checkpoint.get("model_config", {}))
     model_config = {
         key: value for key, value in stored_config.items() if key in MODEL_CONFIG_KEYS
     }
+    model_config.setdefault("prompt_version", "scivqa-v1")
+    model_config.setdefault("decode_version", "task-v1")
     model_config.setdefault(
         "max_answer_tokens",
         checkpoint.get("preprocessing", {}).get("max_answer_length", LEGACY_MAX_ANSWER_TOKENS),
@@ -178,12 +199,24 @@ def _adapt_legacy_text_keys(state_dict):
     return converted
 
 
-def restore_training_state(checkpoint, model, optimizer, scheduler):
-    if checkpoint.get("format_version") not in {3, 4}:
+def load_model_state(checkpoint, model):
+    if checkpoint.get("state_kind") == "trainable_only":
+        expected = {n for n, p in model.named_parameters() if p.requires_grad}
+        stored = set(checkpoint["model_state_dict"])
+        if expected != stored or stored != set(checkpoint["trainable_names"]):
+            raise ValueError("Adapter/LoRA trainable state is incomplete or config differs")
+        result = model.load_state_dict(checkpoint["model_state_dict"], strict=False)
+        if result.unexpected_keys:
+            raise ValueError(f"Unexpected adapter keys: {result.unexpected_keys}")
+    else:
+        state = _adapt_vision_state_dict(checkpoint["model_state_dict"], model.state_dict())
+        model.load_state_dict(_adapt_legacy_text_keys(state), strict=True)
+
+
+def restore_training_state(checkpoint, model, optimizer, scheduler, scaler=None, rank=0):
+    if checkpoint.get("format_version") not in {3, 4, 5}:
         raise ValueError("Only version-3/4 checkpoints contain resumable training state")
-    state = _adapt_vision_state_dict(checkpoint["model_state_dict"], model.state_dict())
-    state = _adapt_legacy_text_keys(state)
-    model.load_state_dict(state, strict=True)
+    load_model_state(checkpoint, model)
     if checkpoint.get("optimizer_state_dict") is not None:
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
     if checkpoint.get("scheduler_state_dict") is not None:
@@ -191,12 +224,20 @@ def restore_training_state(checkpoint, model, optimizer, scheduler):
     if checkpoint.get("torch_rng_state") is not None:
         torch.set_rng_state(checkpoint["torch_rng_state"].cpu())
     if torch.cuda.is_available() and checkpoint.get("cuda_rng_state") is not None:
-        torch.cuda.set_rng_state_all(
-            [state.cpu() for state in checkpoint["cuda_rng_state"]]
-        )
+        if torch.is_tensor(checkpoint["cuda_rng_state"]):
+            torch.cuda.set_rng_state(checkpoint["cuda_rng_state"].cpu())
+        else:
+            torch.cuda.set_rng_state_all([state.cpu() for state in checkpoint["cuda_rng_state"]])
     if torch.backends.mps.is_available() and checkpoint.get("mps_rng_state") is not None:
         torch.mps.set_rng_state(checkpoint["mps_rng_state"].cpu())
     if checkpoint.get("python_rng_state") is not None:
         random.setstate(checkpoint["python_rng_state"])
+    if scaler is not None and checkpoint.get("scaler_state_dict"):
+        scaler.load_state_dict(checkpoint["scaler_state_dict"])
+    if checkpoint.get("rng_by_rank"):
+        from utils.training_runtime import restore_rng
+        if rank >= len(checkpoint["rng_by_rank"]):
+            raise ValueError("Checkpoint has no RNG for this rank")
+        restore_rng(checkpoint["rng_by_rank"][rank])
     return (int(checkpoint.get("epoch", 0)), int(checkpoint.get("global_step", 0)),
             checkpoint.get("best_metric"))

@@ -76,13 +76,13 @@ def run_breakdown_diagnosis(args) -> dict[str, Any]:
         transform=model.image_transform,
         img_path=resolved_img_root,
         dataset_name="scivqa",
-        figure_context=model.figure_context,
+        figure_context=model.figure_context, prompt_version=model.prompt_version,
     )
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False)
 
     bert_scorer = None
     if args.compute_bertscore:
-        bert_scorer = build_bertscore_scorer(device=str(device))
+        bert_scorer = build_bertscore_scorer(model_type="roberta-large", rescale_with_baseline=False, device="cpu")
 
     references: list[str] = []
     generated: list[str] = []
@@ -155,6 +155,8 @@ def run_breakdown_diagnosis(args) -> dict[str, Any]:
             for item in items:
                 pred = item["prediction"].strip()
                 ref = item["reference"].strip()
+                if pred.strip().casefold() == ref.strip().casefold():
+                    continue
                 # classify error type
                 if unanswerable_phrase in pred.lower():
                     error_type = "false_unanswerable_rejection"

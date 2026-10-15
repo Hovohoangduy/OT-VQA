@@ -1,3 +1,4 @@
+# Shared runtime, native OT/LoRA training, evaluation, and regression checks.
 numpy
 pandas
 matplotlib
@@ -5,6 +6,11 @@ rouge-score
 bert-score==0.3.13
 pycocoevalcap
 pillow
-torch
-transformers>=5.5,<6
-torchvision
+torch==2.10.0
+torchvision==0.25.0
+transformers==5.5.0
+peft==0.18.1
+accelerate==1.13.0
+# NF4 is CUDA-only in this project; CPU/MPS on macOS do not need this package.
+bitsandbytes==0.49.2; platform_system == "Linux" or platform_system == "Windows"
+pytest==9.1.1

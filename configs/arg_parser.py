@@ -9,8 +9,14 @@ def apply_dataset_defaults(parser, argv):
     """Select built-in Python defaults before parsing explicit CLI overrides."""
     bootstrap = argparse.ArgumentParser(add_help=False)
     bootstrap.add_argument("--dataset", type=str.lower)
+    bootstrap.add_argument("--model_family")
     selected = bootstrap.parse_known_args(argv)[0]
     parser.set_defaults(**Config.DATASET_DEFAULTS.get(selected.dataset, {}))
+    if selected.model_family == "qwen3_vl":
+        parser.set_defaults(batch_size=1, gradient_accumulation_steps=8, lr=1e-4,
+                            encoder_lr=None, label_smoothing=0., ot_loss_weight=0.,
+                            ot_num_heads=1, max_question_tokens=256, max_answer_tokens=64,
+                            loss_normalization="example", train_eval_samples=0, amp="fp16")
 
 
 def get_args(argv=None, *, evaluation=False):
@@ -20,6 +26,29 @@ def get_args(argv=None, *, evaluation=False):
                         help="scivqa/plantexpert load their dataset presets; "
                              "auto detects answer metrics from CSV paths")
 
+    parser.add_argument("--model_family", choices=("legacy", "qwen3_vl"), default="legacy")
+    parser.add_argument("--prompt_version", choices=("scivqa-v1", "scivqa-v2"), default=None)
+    parser.add_argument("--decode_version", choices=("task-v1", "task-v2"), default=None)
+    parser.add_argument("--output_drop_prob", type=float, default=None)
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
+    parser.add_argument("--amp", choices=("off", "fp16", "bf16"), default="off")
+    parser.add_argument("--amp_init_scale", type=float, default=65536.0)
+    parser.add_argument("--compute_bertscore", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--log_every_updates", type=int, default=25)
+    parser.add_argument("--max_updates", type=int, default=None, help="Pilot optimizer-update cap; saves at epoch boundary")
+    parser.add_argument("--vlm_model", default="Qwen/Qwen3-VL-2B-Instruct")
+    parser.add_argument("--vlm_revision", default=None, help="Required immutable HF commit SHA")
+    parser.add_argument("--query_revision", default=None, help="Required immutable MiniLM commit SHA")
+    parser.add_argument("--visual_tokens", type=int, default=256)
+    parser.add_argument("--total_sequence_tokens", type=int, default=2048)
+    parser.add_argument("--query_tokens", type=int, default=256)
+    parser.add_argument("--cost_dim", type=int, default=128)
+    parser.add_argument("--quantize_4bit", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--lora_rank", type=int, default=0, help="0: adapter-only; 16: OT+LoRA")
+    parser.add_argument("--lora_lr", type=float, default=2e-5)
+    parser.add_argument("--gradient_checkpointing", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--adapter_control", choices=("ot", "native", "pooled"), default="ot")
+    parser.add_argument("--plan_control", choices=("learned", "independent"), default="learned")
     parser.add_argument("--batch_size", type=int, default=4, help="Batch size for training the model")
     parser.add_argument("--epochs", type=int, default=10, help="Number of epochs for training")
     parser.add_argument("--img_path", type=str, default="data/gqa_dataset/images", help="Path to image folder")
@@ -47,7 +76,7 @@ def get_args(argv=None, *, evaluation=False):
     parser.add_argument("--tie_weights", action=argparse.BooleanOptionalAction, default=None,
                         help="Tie decoder output projection to answer token embeddings")
     parser.add_argument("--split", choices=["dev", "test"], default="dev")
-    parser.add_argument("--resume", default=None, help="Version-3/4 training checkpoint to resume")
+    parser.add_argument("--resume", default=None, help="Version-3/4/5 training checkpoint to resume")
     parser.add_argument("--save_every_epoch", action="store_true",
                         help="Keep epoch_0001.pt, epoch_0002.pt, ... in addition to last.pt and best.pt")
     parser.add_argument("--seed", type=int, default=1105)
@@ -121,6 +150,9 @@ def get_args(argv=None, *, evaluation=False):
         default=False,
         help="Freeze the pretrained question encoder; enabled by default for fresh SciVQA runs",
     )
+    parser.add_argument("--pretrained_eval", action="store_true", help="Evaluate pinned native base without an adapter checkpoint")
+    parser.add_argument("--screen_manifest", default=None, help="Fixed dev-only figure screening manifest")
+    parser.add_argument("--profile_stages", action="store_true", help="Synchronize CUDA for pilot stage timings")
     parser.add_argument("--checkpoint", default=None, help="Explicit evaluation checkpoint")
     parser.add_argument("--predictions_csv", default=None,
                         help="Evaluation output with each generated answer")
@@ -144,11 +176,15 @@ def get_args(argv=None, *, evaluation=False):
     if evaluation or args.resume:
         supplied = {item.split("=", 1)[0] for item in (sys.argv[1:] if argv is None else argv)
                     if item.startswith("--")}
-        for name in ("image_size", "image_preprocessing", "freeze_question_encoder", "tie_weights", "ot_num_heads"):
+        for name in ("image_size", "image_preprocessing", "freeze_question_encoder", "tie_weights", "ot_num_heads",
+                     "ot_visual_memory", "figure_context", "fgw_alpha", "unbalanced_tau",
+                     "ot_loss_weight", "max_question_tokens", "max_answer_tokens"):
             if f"--{name}" not in supplied and f"--no-{name}" not in supplied:
                 setattr(args, name, None)
         if args.resume and "--loss_normalization" not in supplied:
             args.loss_normalization = None
+    args.explicit_args = sorted({item.split("=", 1)[0] for item in (sys.argv[1:] if argv is None else argv)
+                                 if item.startswith("--")})
     dataset_path = args.train_csv_path
     if evaluation:
         dataset_path = args.dev_csv_path if args.split == "dev" else args.test_csv_path

@@ -9,3 +9,5 @@ docs/*
 !docs/optimal_transport_architecture.html
 .agent
 .pytest_cache
+.agents
+AGENTS.md

@@ -44,7 +44,8 @@ class VQAModel(nn.Module):
                   max_question_tokens=Config.MAX_LEN_QUES, fusion='ot',
                   image_size=256, image_preprocessing='crop', ot_visual_memory=False,
                   figure_context=False, tie_weights=False, ot_num_heads=1,
-                  fgw_alpha=0.0, unbalanced_tau=None):
+                  fgw_alpha=0.0, unbalanced_tau=None, prompt_version="scivqa-v2",
+                  decode_version="task-v2", output_drop_prob=None):
         super().__init__()
         output_size = d_model if output_size is None else output_size
         if output_size != d_model:
@@ -58,6 +59,11 @@ class VQAModel(nn.Module):
         if d_model % num_heads:
             raise ValueError('d_model must be divisible by num_heads')
         validate_english_text_model(text_model)
+        if decode_version not in {"task-v1", "task-v2"}:
+            raise ValueError("Unknown decode version")
+        self.prompt_version = prompt_version
+        self.decode_version = decode_version
+        self.target_ignore_index = None
         self.mode = mode
         self.fusion = fusion
         self.max_answer_tokens = max_answer_tokens
@@ -73,6 +79,8 @@ class VQAModel(nn.Module):
         self.unbalanced_tau = float(unbalanced_tau) if unbalanced_tau is not None else None
         self.image_transform = build_image_transform(image_size, image_preprocessing)
         self.model_config = dict(
+            prompt_version=prompt_version, decode_version=decode_version,
+            output_drop_prob=output_drop_prob,
             output_size=output_size, d_model=d_model, num_heads=num_heads,
             ffn_hidden=ffn_hidden, drop_prob=drop_prob, num_layers=num_layers,
             freeze_answer_embeddings=freeze_answer_embeddings,
@@ -100,6 +108,7 @@ class VQAModel(nn.Module):
             self.answer_embedding.freeze()
         self.tokenizer = self.answer_embedding.tokenizer
         self.pad_token_id = self.tokenizer.pad_token_id
+        self.target_ignore_index = self.pad_token_id
         self.bos_token_id = (self.tokenizer.bos_token_id if self.tokenizer.bos_token_id is not None
                              else self.tokenizer.cls_token_id)
         self.eos_token_id = (self.tokenizer.eos_token_id if self.tokenizer.eos_token_id is not None
@@ -129,11 +138,11 @@ class VQAModel(nn.Module):
         if tie_weights:
             self.mlp = TiedOutputProjection(
                 d_model, self.answer_embedding.token_embeddings.word_embeddings,
-                drop_prob=max(drop_prob, 0.25),
+                drop_prob=max(drop_prob, 0.25) if output_drop_prob is None else output_drop_prob,
             )
         else:
             self.mlp = nn.Sequential(
-                nn.Dropout(p=max(drop_prob, 0.2)), nn.Linear(d_model, d_model), nn.GELU(),
+                nn.Dropout(p=max(drop_prob, 0.2) if output_drop_prob is None else output_drop_prob), nn.Linear(d_model, d_model), nn.GELU(),
                 nn.Linear(d_model, actual_vocab),
             )
 
@@ -269,7 +278,7 @@ class VQAModel(nn.Module):
 
             # 3. Numeric question: raw numerical value instructed
             is_numeric = "answer with only the raw numerical value" in q_str or "raw numerical value" in q_str
-            if is_numeric and self.numeric_token_ids:
+            if self.decode_version == "task-v1" and is_numeric and self.numeric_token_ids:
                 allowed = list(self.numeric_token_ids)
                 if step > 0:
                     allowed.append(self.eos_token_id)

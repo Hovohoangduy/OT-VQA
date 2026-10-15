@@ -1,5 +1,9 @@
 # Improving OT on SciVQA
 
+> **Current Kaggle commands:** use [the direct two-T4 training command in README](README.md) and [final training review](.agents/plans/scivqa-kaggle-final-review.md). The commands below are historical legacy-model experiments.
+
+> **Configuration note (2026-10):** This document contains historical experiments and may describe older MobileViTV2/512-pixel recipes. The current SciVQA preset is defined in `configs/config.py` (SigLIP Base 384, full-figure padding). Before running a command below, verify options with `python train.py --help` and use fresh `--model_path` values. Current code and checkpoint settings take precedence.
+
 These are implemented experiments, not measured improvements from retraining.
 The local environment has CPU PyTorch and no CUDA, so the two-GPU training runs
 must be performed in Kaggle. Start fresh runs in separate output directories.

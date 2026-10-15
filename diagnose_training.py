@@ -73,8 +73,12 @@ def _lexical_summary(answers: list[str], predictions: list[str]) -> dict:
             for answer, prediction in zip(answers, predictions)]
     if not rows:
         raise ValueError("Cannot score an empty prediction set")
-    return {name: fmean(row[name] for row in rows)
-            for name in PAPER_METRICS if name != "bertscore_f1"}
+    from utils.metrics import scivqa_score_pairs
+    official = scivqa_score_pairs(answers, predictions, compute_bertscore=False)
+    return {**{name: fmean(row[name] for row in rows)
+               for name in PAPER_METRICS if name not in {"bertscore_f1", "rouge_l"}},
+            "legacy_rouge_l": fmean(row["rouge_l"] for row in rows),
+            "rouge_l_f1": fmean(row["rouge_l_f1"] for row in official)}
 
 
 def _prediction_summary(answers: list[str], predictions: list[str]) -> dict:
@@ -222,7 +226,7 @@ def main():
     model = load_model(checkpoint, device)
     frame = load_dataframe(args.dev_csv_path)
     dataset = VQADataset(frame, model.image_transform, args.dev_img_path,
-                         figure_context=model.figure_context)
+                         figure_context=model.figure_context, prompt_version=model.prompt_version)
     trainable = sum(parameter.numel() for parameter in model.parameters()
                     if parameter.requires_grad)
     report = {

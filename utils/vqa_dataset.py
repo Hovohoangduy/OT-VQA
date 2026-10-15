@@ -1,6 +1,8 @@
 """Dataset that pairs English questions and answers with image files."""
 
 from pathlib import Path
+import math
+import json
 
 from PIL import Image
 from torch.utils.data import Dataset
@@ -38,12 +40,28 @@ FIGURE_TYPE_FOCUS = {
 }
 
 
-def append_figure_context(question, caption, figure_type, compound=None, figs_numb=None):
+PROMPT_VERSION = "scivqa-v2"
+DECODE_VERSION = "task-v2"
+
+
+def parse_bool(value):
+    """Parse CSV booleans without treating the string False as true."""
+    if isinstance(value, str):
+        return value.strip().lower() in {"true", "1", "yes"}
+    if value is None or (isinstance(value, float) and math.isnan(value)):
+        return False
+    return bool(value)
+
+
+def append_figure_context(question, caption, figure_type, compound=None, figs_numb=None,
+                          prompt_version=PROMPT_VERSION, answer_options=None):
     """Keep the question first, enrich with compound subfigure guidance, figure focus, and caption."""
     text = str(question)
     # 1. Compound figure subfigure navigation
-    if compound and figs_numb is not None:
+    if parse_bool(compound) and figs_numb is not None:
         nav = f"This is a compound figure containing multiple subfigures. Navigate to subfigure {figs_numb} in the compound figure to answer the question."
+        if prompt_version != "scivqa-v1":
+            nav = f"This compound figure contains {figs_numb} subfigures. Use the panel referenced in the question."
         if nav not in text:
             text += f"\nSubfigure navigation: {nav}"
     # 2. Figure type & reasoning focus
@@ -57,7 +75,7 @@ def append_figure_context(question, caption, figure_type, compound=None, figs_nu
     return text
 
 
-def format_qa_prompt(question, qa_pair_type=None):
+def format_qa_prompt(question, qa_pair_type=None, prompt_version=PROMPT_VERSION):
     """Add concise format guidance to question based on SciVQA question type."""
     text = str(question)
     if not isinstance(qa_pair_type, str) or not qa_pair_type.strip():
@@ -69,7 +87,7 @@ def format_qa_prompt(question, qa_pair_type=None):
     elif "non-binary" in kind:
         if "return only" not in text.lower() and "letter" not in text.lower():
             text += "\nReturn only the letter(s) of the correct answer."
-    elif "infinite" in kind and "visual" in kind:
+    elif prompt_version == "scivqa-v1" and "infinite" in kind and "visual" in kind:
         lower_q = text.lower()
         numeric_cues = (
             "how many", "what is the value", "what is the number", "percentage",
@@ -83,9 +101,36 @@ def format_qa_prompt(question, qa_pair_type=None):
     return text
 
 
+def build_question(question, *, qa_pair_type=None, caption=None, figure_type=None,
+                   compound=None, figs_numb=None, figure_context=False, qa_prompt=True,
+                   prompt_version=PROMPT_VERSION, answer_options=None):
+    if prompt_version not in {"scivqa-v1", PROMPT_VERSION}:
+        raise ValueError(f"Unknown prompt version: {prompt_version}")
+    question = str(question)
+    if answer_options and "answer options:" not in question.lower():
+        options = json.loads(answer_options) if isinstance(answer_options, str) else answer_options
+        if not isinstance(options, list):
+            raise ValueError("answer_options must be a list of label/text objects")
+        choices = {}
+        for option in options:
+            if not isinstance(option, dict) or len(option) != 1:
+                raise ValueError("Each choice must have exactly one label")
+            key, value = next(iter(option.items()))
+            if key in choices or key not in "ABCDEF":
+                raise ValueError("Duplicate or unsupported choice label")
+            choices[key] = str(value)
+        if choices:
+            question += "\nAnswer options: " + "; ".join(f"{key}: {value}" for key, value in choices.items())
+    text = format_qa_prompt(question, qa_pair_type, prompt_version) if qa_prompt else question
+    if figure_context:
+        text = append_figure_context(text, caption, figure_type, compound, figs_numb, prompt_version)
+    return text
+
+
 class VQADataset(Dataset):
     def __init__(self, dataframe, transform=None, img_path="data/gqa_dataset/images",
-                 dataset_name="plantexpert", figure_context=False, qa_prompt=True):
+                 dataset_name="plantexpert", figure_context=False, qa_prompt=True,
+                 prompt_version=PROMPT_VERSION, native=False):
         if figure_context and not {"caption", "figure_type"}.issubset(dataframe.columns):
             raise ValueError("Figure context requires caption and figure_type CSV columns")
         self.data = dataframe
@@ -94,6 +139,8 @@ class VQADataset(Dataset):
         self.dataset_name = dataset_name
         self.figure_context = figure_context
         self.qa_prompt = qa_prompt
+        self.prompt_version = prompt_version
+        self.native = native
 
     def __len__(self):
         return len(self.data)
@@ -111,14 +158,21 @@ class VQADataset(Dataset):
             ) from exc
         if self.transform:
             image = self.transform(image)
-        question = str(row["question"])
-        if self.qa_prompt and "qa_pair_type" in row and isinstance(row["qa_pair_type"], str):
-            question = format_qa_prompt(question, row["qa_pair_type"])
-        if self.figure_context:
-            compound = bool(row.get("compound", False))
-            figs_numb = row.get("figs_numb", None)
-            question = append_figure_context(
-                question, row.get("caption"), row.get("figure_type"),
-                compound=compound, figs_numb=figs_numb,
-            )
+        raw_question = str(row["question"])
+        question = build_question(
+            raw_question, qa_pair_type=row.get("qa_pair_type"),
+            caption=row.get("caption"), figure_type=row.get("figure_type"),
+            compound=row.get("compound"), figs_numb=row.get("figs_numb"),
+            figure_context=self.figure_context, qa_prompt=self.qa_prompt,
+            prompt_version=self.prompt_version, answer_options=row.get("answer_options"),
+        )
+        if self.native:
+            # Query excludes captions, format metadata, IDs and gold answers.
+            query = build_question(raw_question, qa_prompt=False, answer_options=row.get("answer_options"))
+            question = {"prompt": question, "query": query}
         return row.get("anno_id", idx), image, question, str(row.get("answer", ""))
+
+
+def native_collate(rows):
+    """Preserve raw PIL images with different aspect ratios until the processor."""
+    return tuple(list(values) for values in zip(*rows))

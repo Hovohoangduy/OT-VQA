@@ -8,7 +8,7 @@ from torch import nn
 from torch.nn import functional as F
 
 
-def compute_fgw_cost(local_cost, patches, num_q_tokens, plan, alpha=0.2, device=None, dtype=None):
+def compute_fgw_cost(local_cost, patches, num_q_tokens, plan, alpha=0.2, device=None, dtype=None, question_mask=None):
     """Compute Fused Gromov-Wasserstein cost combining feature cost and 2D spatial-structural distortion."""
     if alpha <= 0 or plan is None:
         return local_cost
@@ -25,27 +25,38 @@ def compute_fgw_cost(local_cost, patches, num_q_tokens, plan, alpha=0.2, device=
     d_i = torch.cdist(coords, coords) / math.sqrt(2.0)
 
     # Question sequence distance matrix D_Q [num_q_tokens, num_q_tokens]
-    q_pos = torch.linspace(0, 1, num_q_tokens, device=device, dtype=dtype).unsqueeze(1)
-    d_q = torch.cdist(q_pos, q_pos)
+    if question_mask is None:
+        question_mask = torch.ones(plan.size(0), num_q_tokens, device=device, dtype=torch.bool)
+    # Normalize valid-token ranks per sample, independent of batch padding.
+    positions = (question_mask.long().cumsum(-1) - 1).clamp_min(0).to(dtype)
+    positions = positions / (question_mask.sum(-1, keepdim=True) - 1).clamp_min(1)
+    d_q = (positions.unsqueeze(-1) - positions.unsqueeze(-2)).abs()
 
     d_i_sq = d_i.pow(2)
     d_q_sq = d_q.pow(2)
 
     plan_det = plan.detach()
     term1 = torch.bmm(d_i_sq.unsqueeze(0).expand(plan_det.size(0), -1, -1), plan_det).sum(-1, keepdim=True)
-    term2 = torch.bmm(plan_det, d_q_sq.unsqueeze(0).expand(plan_det.size(0), -1, -1)).sum(-2, keepdim=True)
+    term2 = torch.bmm(plan_det, d_q_sq).sum(-2, keepdim=True)
     term3 = torch.bmm(torch.bmm(d_i.unsqueeze(0).expand(plan_det.size(0), -1, -1), plan_det),
-                      d_q.unsqueeze(0).expand(plan_det.size(0), -1, -1))
+                      d_q)
 
     c_gw = (term1 + term2 - 2 * term3).clamp_min(0.0)
     return (1.0 - alpha) * local_cost + alpha * c_gw
 
 
 def log_sinkhorn(cost, row_marginal, column_marginal, epsilon=0.05, iterations=20, tol=1e-4, tau=None):
+    with torch.autocast(device_type=cost.device.type, enabled=False):
+        return _log_sinkhorn_fp32(cost, row_marginal, column_marginal, epsilon, iterations, tol, tau)
+
+
+def _log_sinkhorn_fp32(cost, row_marginal, column_marginal, epsilon, iterations, tol, tau):
     """Solve batched entropic OT in FP32; supports both balanced and unbalanced (tau < inf)."""
     if cost.ndim != 3 or row_marginal.shape != cost.shape[:2] or column_marginal.shape != (cost.size(0), cost.size(2)):
         raise ValueError("Cost and marginal shapes are incompatible")
-    if epsilon <= 0 or iterations < 1:
+    if tau is not None and (not math.isfinite(tau) or tau <= 0):
+        raise ValueError("unbalanced tau must be finite and positive")
+    if not math.isfinite(epsilon) or epsilon <= 0 or iterations < 1:
         raise ValueError("epsilon and iterations must be positive")
     cost = cost.float()
     row_marginal = row_marginal.float()
@@ -123,6 +134,12 @@ class PartialTransportFusion(nn.Module):
 
     def forward(self, image_tokens, question_tokens, question_mask, question_global=None,
                 return_transport=False):
+        with torch.autocast(device_type=image_tokens.device.type, enabled=False):
+            return self._forward_fp32(image_tokens.float(), question_tokens.float(), question_mask,
+                                     None if question_global is None else question_global.float(), return_transport)
+
+    def _forward_fp32(self, image_tokens, question_tokens, question_mask, question_global,
+                      return_transport):
         """Return memory, blocked-memory mask, and optionally OT diagnostics.
 
         image_tokens: projected spatial values [B,K,D], excluding a CLS token when present.
@@ -189,7 +206,7 @@ class PartialTransportFusion(nn.Module):
         if self.fgw_alpha > 0:
             local_cost = compute_fgw_cost(
                 local_cost, patches, num_q_tokens, plan[:, :patches, :num_q_tokens],
-                alpha=self.fgw_alpha, device=cost.device, dtype=cost.dtype
+                alpha=self.fgw_alpha, device=cost.device, dtype=cost.dtype, question_mask=mask_eff
             )
             cost = torch.cat((
                 torch.cat((local_cost, image_to_dustbin), dim=-1),
@@ -259,3 +276,13 @@ class PartialTransportFusion(nn.Module):
             "column_residual": (plan.sum(-2) - column_marginal).abs().amax(-1),
         }
         return memory, memory_blocked, diagnostics
+
+
+def independent_coupling(plan):
+    """Remove pairwise alignment, preserving local marginals and all dustbins."""
+    local = plan[..., :-1, :-1]
+    mass = local.sum((-1, -2), keepdim=True)
+    replacement = local.sum(-1, keepdim=True) * local.sum(-2, keepdim=True) / mass.clamp_min(1e-30)
+    result = plan.clone()
+    result[..., :-1, :-1] = torch.where(mass > 0, replacement, torch.zeros_like(replacement))
+    return result
