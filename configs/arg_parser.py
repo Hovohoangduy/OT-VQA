@@ -50,7 +50,8 @@ def get_args(argv=None, *, evaluation=False):
     parser.add_argument("--adapter_control", choices=("ot", "native", "pooled"), default="ot")
     parser.add_argument("--plan_control", choices=("learned", "independent"), default="learned")
     parser.add_argument("--batch_size", type=int, default=4, help="Batch size for training the model")
-    parser.add_argument("--epochs", type=int, default=10, help="Number of epochs for training")
+    parser.add_argument("--epochs", type=int, default=10,
+                        help="Total epoch target; resume inherits the saved target unless explicitly increased")
     parser.add_argument("--img_path", type=str, default="data/gqa_dataset/images", help="Path to image folder")
     parser.add_argument("--train_img_path", default=None, help="Optional training image folder override")
     parser.add_argument("--dev_img_path", default=None, help="Optional validation image folder override")

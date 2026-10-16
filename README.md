@@ -260,9 +260,24 @@ Logs and checkpoints record the training objective, and resume inherits it
 unless an explicit conflicting override is supplied. The effect on validation
 quality has not yet been measured.
 
-For resuming, keep the schedule settings and total epoch target from the
-original run; for older runs without warmup, pass `--warmup_ratio 0`. Optimizer
-state restores its saved learning rates. A checkpoint
+For resuming, omit `--epochs` to inherit the saved total epoch target and schedule.
+To continue a run originally targeting 3 epochs up to a total of 20, pass
+`--resume path/to/last.pt --epochs 20`. If the checkpoint completed epoch 3,
+training starts at epoch 4 and can run 17 more epochs. Decreasing the saved
+target is rejected; all other recipe checks still apply. Extending the target
+retains model weights, optimizer moments, AMP scaler, RNG, best metrics and
+early-stopping history. Early stopping can therefore end training before epoch 20.
+The linear learning-rate schedule is recalculated for the new total steps,
+including warmup at the saved ratio, and applied at the saved optimizer-update
+index before the first resumed update. Learning rates can increase, including
+from zero after the old schedule ended. This continuation changes the schedule
+used by future updates; it is not equivalent to training 20 epochs from scratch.
+New checkpoints save the extended target and resume it normally. `best.pt`
+continues from its selected epoch; use `last.pt` for the latest saved epoch.
+The Kaggle launcher also accepts `--stage resume --resume path/to/last.pt --epochs 20`.
+
+For older runs without warmup, pass `--warmup_ratio 0`. Without an epoch extension,
+optimizer state restores its saved learning rates. A checkpoint
 with separate encoder/decoder groups recreates those groups automatically; an
 older single-LR checkpoint needs a fresh run to use `--encoder_lr`. The stored
 selection metric is inherited on resume, and switching it is rejected.

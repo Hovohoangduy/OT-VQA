@@ -49,6 +49,17 @@ def test_pilot_matches_full_recipe():
     assert full.batch_size * full.gradient_accumulation_steps * 2 == 16
 
 
+@pytest.mark.parametrize('epochs',[None,20])
+def test_launcher_resume_forwards_only_explicit_epoch_target(tmp_path,epochs):
+    argv=training_arguments(launcher_args(stage='resume',resume=str(tmp_path/'last.pt'),epochs=epochs))
+    if epochs is None:
+        assert '--epochs' not in argv
+    else:
+        assert argv[argv.index('--epochs')+1]=='20'
+    fresh=get_args(training_arguments(launcher_args(epochs=None)))
+    assert fresh.epochs==3
+
+
 def test_pilot_rejects_unmeasured_lora_gradients_and_external_memory():
     manifest,rows = valid_pilot()
     assert check_pilot(manifest,rows)['measured_resource_checks_passed']

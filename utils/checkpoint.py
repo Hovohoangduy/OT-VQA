@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import random
+from enum import Enum
 from pathlib import Path
 
 import torch
@@ -75,6 +76,19 @@ def _adapt_vision_state_dict(state_dict, target_keys):
     return converted
 
 
+def _plain_config(value):
+    """Store library enums as values that weights-only loading accepts."""
+    if isinstance(value, Enum):
+        return _plain_config(value.value)
+    if isinstance(value, dict):
+        return {key: _plain_config(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_plain_config(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_plain_config(item) for item in value)
+    return value
+
+
 def checkpoint_payload(
     model, text_model, image_model, optimizer=None, scheduler=None,
     epoch=0, global_step=0, best_metric=None, epochs_without_improvement=0,
@@ -94,7 +108,7 @@ def checkpoint_payload(
         "rng_by_rank": rng_by_rank,
         "bookkeeping": bookkeeping or {},
         "model_state_dict": state,
-        "model_config": model.model_config,
+        "model_config": _plain_config(model.model_config),
         "training_config": training_config or {},
         "text_model": text_model,
         "image_model": image_model,
@@ -133,9 +147,15 @@ def save_checkpoint(path, **kwargs):
 
 
 def read_checkpoint(checkpoint_path, device):
+    from PIL.Image import Resampling
+    from transformers.utils.quantization_config import QuantizationMethod
+
     # Stage on CPU so loading a large checkpoint does not temporarily duplicate
     # the complete state dictionary in limited CUDA/MPS device memory.
-    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+    # Older native checkpoints stored quantization and processor enums verbatim.
+    # Allow only these known types for this load, without enabling arbitrary pickle.
+    with torch.serialization.safe_globals([QuantizationMethod, Resampling]):
+        checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
     if not isinstance(checkpoint, dict):
         raise ValueError("Checkpoint must be a dictionary")
     version = checkpoint.get("format_version")

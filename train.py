@@ -300,6 +300,9 @@ def _csv_digest(path):
 def _run_training(args, device, rank, world_size):
     resume = read_checkpoint(args.resume, device) if args.resume else None
     saved_training = (resume or {}).get("training_config", {})
+    saved_epochs = saved_training.get("arguments", {}).get("epochs")
+    extend_schedule = (resume is not None and saved_epochs is not None
+                       and "--epochs" in args.explicit_args and args.epochs > saved_epochs)
     if resume is not None:
         stored_destination = saved_training.get("arguments", {}).get("model_path", str(Path(args.resume).parent))
         if "--model_path" in args.explicit_args and Path(args.model_path).resolve() != Path(stored_destination).resolve():
@@ -309,9 +312,14 @@ def _run_training(args, device, rank, world_size):
         if not saved_training.get("complete_epoch", True):
             raise ValueError("Pilot checkpoint is mid-epoch; start a fresh full run")
         saved_args = saved_training.get("arguments", {})
+        if saved_epochs is not None:
+            if "--epochs" not in args.explicit_args:
+                args.epochs = saved_epochs
+            elif args.epochs < saved_epochs:
+                raise ValueError("--epochs cannot decrease the saved total epoch target")
         contract = ("dataset", "compute_bertscore", "bertscore_model", "bertscore_rescale",
                     "bertscore_device", "bertscore_batch_size", "train_eval_samples",
-                    "selection_metric", "early_stopping_patience", "epochs", "batch_size", "gradient_accumulation_steps", "amp", "amp_init_scale", "warmup_ratio",
+                    "selection_metric", "early_stopping_patience", "batch_size", "gradient_accumulation_steps", "amp", "amp_init_scale", "warmup_ratio",
                     "seed", "weight_decay", "label_smoothing", "gradient_clip", "lr", "encoder_lr",
                     "lora_lr", "ot_loss_weight", "loss_normalization", "model_family",
                     "prompt_version", "decode_version", "output_drop_prob", "train_csv_path", "dev_csv_path",
@@ -544,6 +552,19 @@ def _run_training(args, device, rank, world_size):
             print("Historical resume lacks per-rank RNG/scaler/full schedule: continuation is not exact.")
     if start_epoch >= args.epochs:
         raise ValueError("Resume checkpoint has already reached the requested epoch count")
+    if extend_schedule:
+        # The restored optimizer may have LR=0 at the old schedule's end.
+        # Recreate the linear schedule at its saved update index so the very
+        # first resumed update uses the enlarged horizon, without resetting Adam.
+        scheduler = get_linear_schedule_with_warmup(
+            optimizer, num_warmup_steps=warmup_steps, num_training_steps=total_steps,
+            last_epoch=scheduler.last_epoch - 1,
+        )
+        if rank == 0:
+            print(f"Extending total epochs: {saved_epochs} -> {args.epochs}; "
+                  f"recomputed LR schedule at optimizer update {scheduler.last_epoch} "
+                  f"with {warmup_steps} warmup / {total_steps} total steps. "
+                  "Optimizer moments and early-stopping state retained.", flush=True)
     if rank == 0:
         print(f"Global batch size: {args.batch_size * world_size * args.gradient_accumulation_steps}; "
               f"warmup steps: {warmup_steps}; checkpoint selection: {selection_metric}")

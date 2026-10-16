@@ -21,8 +21,11 @@ QUERY_REVISION = 'a50ef00143b4d5391434df20ae11632588ac25be'
 
 def training_arguments(args):
     if args.stage == 'resume':
-        return ['--resume', str(Path(args.resume).resolve()), '--device', 'cuda',
+        argv = ['--resume', str(Path(args.resume).resolve()), '--device', 'cuda',
                 '--log_every_updates', str(args.log_every_updates)]
+        if args.epochs is not None:
+            argv += ['--epochs', str(args.epochs)]
+        return argv
     data = Path(args.data_root).resolve()
     run_name = f'scivqa_qwen2b_ot_lora16_v{args.visual_tokens}_s{args.seed}'
     if args.stage == 'pilot':
@@ -40,7 +43,8 @@ def training_arguments(args):
             '--loss_normalization', 'example', '--ot_loss_weight', '0', '--label_smoothing', '0',
             '--lora_rank', '16', '--lora_lr', '2e-5', '--lr', '1e-4', '--weight_decay', '0.05',
             '--warmup_ratio', '0.05', '--gradient_clip', '1', '--gradient_checkpointing',
-            '--epochs', str(args.epochs), '--early_stopping_patience', '2', '--seed', str(args.seed),
+            '--epochs', str(args.epochs if args.epochs is not None else 3),
+            '--early_stopping_patience', '2', '--seed', str(args.seed),
             '--no-compute_bertscore', '--selection_metric', 'rouge_l_f1', '--train_eval_samples', '0',
             '--num_workers', str(args.num_workers), '--log_every_updates', str(args.log_every_updates),
             '--train_csv_path', str(data / 'train.csv'), '--dev_csv_path', str(data / 'val.csv'),
@@ -98,7 +102,8 @@ def main():
     parser.add_argument('--pilot_run')
     parser.add_argument('--resume')
     parser.add_argument('--visual_tokens', type=int, choices=(256, 512), default=256)
-    parser.add_argument('--epochs', type=int, default=3)
+    parser.add_argument('--epochs', type=int, default=None,
+                        help='Total epochs: fresh runs default to 3; resume inherits unless explicitly increased')
     parser.add_argument('--updates', type=int, default=100)
     parser.add_argument('--seed', type=int, default=1105)
     parser.add_argument('--num_workers', type=int, default=2)
@@ -111,7 +116,7 @@ def main():
         parser.error('--data_root is required for a fresh run')
     if args.stage == 'train' and not args.pilot_run:
         parser.error('--stage train requires --pilot_run from the same configuration')
-    if args.epochs < 1 or args.num_workers < 0 or args.log_every_updates < 1:
+    if (args.epochs is not None and args.epochs < 1) or args.num_workers < 0 or args.log_every_updates < 1:
         parser.error('epochs/log_every_updates must be positive; num_workers must be nonnegative')
     if args.stage == 'pilot' and not 100 <= args.updates <= 200:
         parser.error('Resource pilot requires 100–200 updates')
