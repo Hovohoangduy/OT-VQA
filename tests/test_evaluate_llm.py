@@ -150,6 +150,38 @@ class RuntimeTests(unittest.TestCase):
                     self.assertEqual(call.kwargs["trust_remote_code"], model_type == evaluator.ONEVISION_MODEL_TYPE)
                     self.assertTrue(call.kwargs["local_files_only"])
 
+    def test_gemma_audio_attention_reaches_loader_and_run_metadata(self):
+        for attention in ("sdpa", "eager"):
+            with self.subTest(attention=attention):
+                modules = self.modules(version="5.7.0")
+                transformers = modules["transformers"]
+                transformers.AutoProcessor = MagicMock()
+                loader = MagicMock()
+                loader.from_pretrained.return_value.eval.return_value.hf_device_map = {"model": 0}
+                plan = (modules["torch"], MagicMock(__version__="1.0"), transformers,
+                        2, "float16", loader, {})
+                config = {"model_type": "gemma4", "audio_config": {}}
+                with patch.object(evaluator, "validate_runtime", return_value=plan):
+                    client = evaluator.TransformersClient(Path("/tmp/checkpoint"), "gemma", config,
+                                                          attention=attention)
+                resolved = loader.from_pretrained.call_args.kwargs["attn_implementation"]
+                if attention == "sdpa":
+                    self.assertEqual(resolved["audio_config"], "eager")
+                    self.assertEqual(resolved["text_config"], "sdpa")
+                    self.assertEqual(resolved["vision_config"], "sdpa")
+                else:
+                    self.assertEqual(resolved, "eager")
+                self.assertEqual(client.backend_config["attention_implementation"], resolved)
+
+    def test_other_architectures_and_gemma_without_audio_keep_requested_attention(self):
+        configs = [{"model_type": model_type} for model_type in evaluator.MODEL_CLASSES]
+        configs += [{"model_type": "gemma4", "audio_config": None},
+                    {"model_type": "qwen3_vl", "audio_config": {}}]
+        for config in configs:
+            for attention in ("sdpa", "eager"):
+                with self.subTest(config=config, attention=attention):
+                    self.assertEqual(evaluator.resolve_attention_implementation(config, attention), attention)
+
 
 class NotebookTests(unittest.TestCase):
     def test_notebook_bundles_current_sources_and_valid_python(self):

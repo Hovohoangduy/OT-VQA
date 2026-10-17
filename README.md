@@ -410,8 +410,12 @@ The evaluator uses every visible CUDA GPU, with Accelerate balancing weights
 and a default 12 GiB weight budget per GPU. To select two GPUs on a larger
 machine, set `CUDA_VISIBLE_DEVICES=0,1`. One sufficiently large CUDA GPU also
 works. Auto dtype selects FP16 on T4 and BF16 on Ampere or newer; override with
-`--dtype`. Attention defaults to PyTorch SDPA; `--attention-implementation eager`
-is available. The official Ministral checkpoint stores FP8 weights; the runner
+`--dtype`. Attention defaults to PyTorch SDPA. For Gemma 4 with an audio encoder,
+the runner uses SDPA for text/vision and eager for audio, which only implements
+eager chunked local attention and is initialized even for image-only VQA.
+`--attention-implementation eager` selects eager for the entire model. The resolved
+attention setting is printed during loading and saved in the run configuration.
+The official Ministral checkpoint stores FP8 weights; the runner
 uses Transformers' `FineGrainedFP8Config(dequantize=True)` to load them in the
 selected floating-point dtype, including on T4. This increases weight memory.
 Weights must fit the selected GPUs without CPU/disk offload. Adjust

@@ -496,12 +496,25 @@ def validate_runtime(config: dict, dtype: str):
     return torch, accelerate, transformers, count, dtype, loader, loading
 
 
+def resolve_attention_implementation(config: dict, attention: str) -> str | dict[str, str]:
+    """Gemma 4's audio encoder only implements eager chunked local attention."""
+    if (config["model_type"] == "gemma4" and config.get("audio_config") is not None
+            and attention == "sdpa"):
+        # A string applies to every backbone, including audio during image-only VQA.
+        # Explicit sub-config keys keep text/vision on SDPA without overriding audio.
+        return {"": "sdpa", "text_config": "sdpa", "vision_config": "sdpa",
+                "audio_config": "eager"}
+    return attention
+
+
 class TransformersClient:
     base_url = "transformers://local"
 
     def __init__(self, directory: Path, alias: str, config: dict, dtype: str = "auto",
                  gpu_memory_gib: float = 12, context_size: int = 8192, attention: str = "sdpa"):
         torch, accelerate, transformers, count, dtype, loader, loading = validate_runtime(config, dtype)
+        attention = resolve_attention_implementation(config, attention)
+        print("Attention implementation: " + json.dumps(attention, sort_keys=True), flush=True)
         model_class = MODEL_CLASSES[config["model_type"]]
         quantization = config.get("quantization_config") or {}
         self.torch = torch
@@ -597,7 +610,8 @@ def parse_args(argv=None):
     parser.add_argument("--cache-dir", type=Path, help="HF cache directory (default: standard HF cache)")
     parser.add_argument("--dtype", choices=("auto", "float16", "bfloat16", "float32"), default="auto")
     parser.add_argument("--gpu-memory-gib", type=float, default=12, help="Weight budget per visible GPU; reserve room for generation")
-    parser.add_argument("--attention-implementation", choices=("sdpa", "eager"), default="sdpa")
+    parser.add_argument("--attention-implementation", choices=("sdpa", "eager"), default="sdpa",
+                        help="Text/vision attention backend; Gemma 4 audio always uses eager")
     parser.add_argument("--context-size", type=int, default=8192, help="Maximum prompt plus output tokens")
     parser.add_argument("--dataset", choices=("gqa", "plantexpert"), default="gqa")
     parser.add_argument("--questions", type=Path, help="Default: data/<dataset>_dataset/test.csv")
