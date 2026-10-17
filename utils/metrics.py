@@ -209,17 +209,19 @@ def _add_bertscores(rows, references, hypotheses, bert_scorer, components):
                 rows[i][f"bertscore_{component}"] = float(value)
 
 
-def scivqa_score_pairs(references, hypotheses, bert_scorer):
+def scivqa_score_pairs(references, hypotheses, bert_scorer, *, compute_bertscore=True):
     """SciVQA Tables 1/2: ROUGE-1/L and BERTScore precision, recall and F1.
 
     ROUGE uses rouge-score's lowercase alphanumeric tokenizer without stemming.
     Scores are macro means of per-answer values when aggregated by mean_scores.
     Answers retain source choice labels and numerical formats; no gold-dependent
     abstention rewrite, synonym mapping, or choice reordering is applied.
+    compute_bertscore=False returns only the six ROUGE components without loading
+    a semantic model, for incremental inference journals and lexical-only runs.
     """
     if len(references) != len(hypotheses):
         raise ValueError("References and hypotheses must have equal lengths")
-    if bert_scorer is None:
+    if compute_bertscore and bert_scorer is None:
         raise ValueError("A BERTScore scorer is required for the nine SciVQA metrics")
     from rouge_score.rouge_scorer import RougeScorer
 
@@ -234,8 +236,9 @@ def scivqa_score_pairs(references, hypotheses, bert_scorer):
                         f"{target}_precision": score.precision,
                         f"{target}_recall": score.recall})
         rows.append(row)
-    _add_bertscores(rows, references, hypotheses, bert_scorer,
-                   ("precision", "recall", "f1"))
+    if compute_bertscore:
+        _add_bertscores(rows, references, hypotheses, bert_scorer,
+                       ("precision", "recall", "f1"))
     return rows
 
 

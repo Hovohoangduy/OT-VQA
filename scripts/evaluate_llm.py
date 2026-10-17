@@ -18,8 +18,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
 
-from utils.metrics import (PAPER_METRICS, build_bertscore_scorer, lexical_scores,
-                           normalize_llm_answer, score_pairs)
+from utils.metrics import (PAPER_METRICS, SCIVQA_METRICS, bertscore_defaults,
+                           build_bertscore_scorer, lexical_scores,
+                           normalize_llm_answer, scivqa_score_pairs, score_pairs)
+from utils import scivqa_prompt
 
 MODEL_PRESETS = {
     "llava-onevision-1.5-8b": "lmms-lab/LLaVA-OneVision-1.5-8B-Instruct",
@@ -97,7 +99,7 @@ class Example:
     metadata: dict[str, str] = field(default_factory=dict)
 
 
-def load_examples(path: Path) -> list[Example]:
+def load_examples(path: Path, dataset: str = "gqa", context_mode: str = "full") -> list[Example]:
     """Accept repository CSVs or official GQA questionId -> question JSON."""
     examples = []
     if path.suffix.lower() == ".csv":
@@ -105,13 +107,28 @@ def load_examples(path: Path) -> list[Example]:
             reader = csv.DictReader(handle)
             if not {"image", "question"}.issubset(reader.fieldnames or []):
                 raise ValueError("CSV must contain image and question columns; answer is optional.")
+            if dataset == "scivqa":
+                required = {"original_question", "answer_options", "qa_pair_type"}
+                if context_mode == "full":
+                    required.update({"caption", "figure_type", "compound", "figs_numb"})
+                missing = required - set(reader.fieldnames)
+                if missing:
+                    raise ValueError(f"SciVQA context columns missing: {sorted(missing)}. "
+                                     "Use the CSVs exported by utils.download_scivqa.")
             for index, row in enumerate(reader):
+                question = row["question"]
+                fields = METADATA_FIELDS
+                if dataset == "scivqa":
+                    question = scivqa_prompt.build_prompt(question, row, context_mode)
+                    fields = (*scivqa_prompt.CONTEXT_FIELDS, *scivqa_prompt.PROVENANCE_FIELDS)
                 examples.append(Example(
                     row.get("question_id") or row.get("anno_id") or str(index),
-                    row["image"], row["question"], row.get("answer"),
-                    {key: row[key] for key in METADATA_FIELDS if key in row},
+                    row["image"], question, row.get("answer") or None,
+                    {key: row[key] for key in fields if key in row},
                 ))
     elif path.suffix.lower() == ".json":
+        if dataset == "scivqa":
+            raise ValueError("SciVQA requires an exported context-preserving CSV, not GQA JSON.")
         data = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(data, dict):
             raise ValueError("GQA JSON must map question IDs to question objects.")
@@ -161,6 +178,15 @@ def make_record(example: Example, result: dict | None = None, error: str = "",
     record["prediction"] = normalize_llm_answer(record["prediction"])
     labeled = example.answer is not None
     reference = normalize_llm_answer(example.answer) if labeled else None
+    if dataset == "scivqa":
+        metrics = SCIVQA_METRICS[:6]
+        scores = {metric: None for metric in metrics}
+        if labeled:
+            scores = ({metric: 0.0 for metric in metrics} if error else
+                      scivqa_score_pairs([reference], [record["prediction"]], None,
+                                        compute_bertscore=False)[0])
+        record.update(scores)
+        return record
     if dataset == "plantexpert":
         if not labeled:
             scores = {metric: None for metric in PAPER_METRICS[:-1]}
@@ -200,15 +226,19 @@ def save_outputs(output: Path, records: dict[str, dict], config: dict,
         ),
     }
     plantexpert = config.get("dataset") == "plantexpert"
-    if plantexpert:
+    scivqa = config.get("dataset") == "scivqa"
+    if plantexpert or scivqa:
+        lexical_metrics = SCIVQA_METRICS[:6] if scivqa else PAPER_METRICS[:-1]
+        semantic_metrics = SCIVQA_METRICS[6:] if scivqa else ("bertscore_f1",)
         report["generated_metrics"] = {
             metric: sum(row[metric] for row in labeled) / len(labeled) if labeled else None
-            for metric in PAPER_METRICS[:-1]
+            for metric in lexical_metrics
         }
-        report["generated_metrics"]["bertscore_f1"] = None
+        report["generated_metrics"].update({metric: None for metric in semantic_metrics})
         report["bertscore"] = config["bertscore"].copy()
         report["scoring"] = {
-            "metrics": "Repository PlantExpert metrics; scores are fractions, rescaled BERTScore can be negative.",
+            "metrics": ("Repository SciVQA ROUGE-1/L and BERTScore precision, recall and F1; macro means."
+                        if scivqa else "Repository PlantExpert metrics; scores are fractions, rescaled BERTScore can be negative."),
             "errors": "Failed labeled requests receive zero for every metric; unattempted questions are excluded.",
         }
     else:
@@ -226,35 +256,52 @@ def save_outputs(output: Path, records: dict[str, dict], config: dict,
     report["scoring"]["answer_normalization"] = NORMALIZATION_DESCRIPTION
     # Save a report before semantic scoring, so scoring failures preserve inference results.
     (output / "report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-    if plantexpert:
+    if plantexpert or scivqa:
         for row in rows:
             failed_label = row["error"] and row["reference"] is not None
-            row["bertscore_f1"] = 0.0 if bert_scorer is not None and failed_label else None
+            for metric in semantic_metrics:
+                row[metric] = 0.0 if bert_scorer is not None and failed_label else None
         if bert_scorer is not None:
             scored = [row for row in labeled if not row["error"]]
             if scored:
-                scores = score_pairs([normalize_llm_answer(row["reference"]) for row in scored],
-                                     [row["prediction"] for row in scored], bert_scorer)
+                scorer = scivqa_score_pairs if scivqa else score_pairs
+                scores = scorer([normalize_llm_answer(row["reference"]) for row in scored],
+                                [row["prediction"] for row in scored], bert_scorer)
                 for row, metrics in zip(scored, scores):
-                    row["bertscore_f1"] = metrics["bertscore_f1"]
-            report["generated_metrics"]["bertscore_f1"] = (
-                sum(row["bertscore_f1"] for row in labeled) / len(labeled) if labeled else None
-            )
+                    row.update(metrics)
+            for metric in semantic_metrics:
+                report["generated_metrics"][metric] = (
+                    sum(row[metric] for row in labeled) / len(labeled) if labeled else None
+                )
             report["bertscore"]["model_hash"] = bert_scorer.hash
+        if scivqa:
+            report["by_qa_pair_type"] = {}
+            for kind in sorted({row.get("qa_pair_type", "unknown") for row in labeled}):
+                group = [row for row in labeled if row.get("qa_pair_type", "unknown") == kind]
+                report["by_qa_pair_type"][kind] = {
+                    "count": len(group),
+                    "generated_metrics": {
+                        metric: (sum(row[metric] for row in group) / len(group)
+                                 if all(row.get(metric) is not None for row in group) else None)
+                        for metric in SCIVQA_METRICS
+                    },
+                }
         (output / "report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
         return report
     return report
 
 
 def evaluate(args: argparse.Namespace, client: TransformersClient) -> dict:
-    examples = load_examples(args.questions)
+    examples = load_examples(args.questions, args.dataset, args.scivqa_context)
     if args.limit is not None:
         examples = examples[:args.limit]
     # Validate the selected files before starting a potentially long inference run.
     paths = {example.question_id: image_path(args.images, example, args.image_split or args.questions.stem)
              for example in examples}
     plantexpert = args.dataset == "plantexpert"
-    system_prompt = PLANTEXPERT_SYSTEM_PROMPT if plantexpert else SYSTEM_PROMPT
+    scivqa = args.dataset == "scivqa"
+    system_prompt = (scivqa_prompt.SYSTEM_PROMPT if scivqa else
+                     PLANTEXPERT_SYSTEM_PROMPT if plantexpert else SYSTEM_PROMPT)
     config = {
         "questions": str(args.questions.resolve()),
         "questions_sha256": hashlib.sha256(args.questions.read_bytes()).hexdigest(),
@@ -268,8 +315,19 @@ def evaluate(args: argparse.Namespace, client: TransformersClient) -> dict:
     }
     if getattr(args, "backend_config", None) is not None:
         config["backend"] = args.backend_config
-    if plantexpert:
-        config.update({"dataset": "plantexpert", "bertscore": {
+    if scivqa:
+        config["context"] = {
+            "mode": args.scivqa_context, "prompt_version": scivqa_prompt.PROMPT_VERSION,
+            "fields": (list(scivqa_prompt.CONTEXT_FIELDS) if args.scivqa_context == "full"
+                       else ["original_question", "answer_options", "qa_pair_type"]),
+            "prompts_sha256": hashlib.sha256(json.dumps(
+                [(example.question_id, example.question) for example in examples],
+                ensure_ascii=False).encode("utf-8")).hexdigest(),
+            "qa_pair_type_usage": "binary/non-binary answer format only; never answerability",
+            "provenance_fields_excluded_from_prompt": list(scivqa_prompt.PROVENANCE_FIELDS),
+        }
+    if plantexpert or scivqa:
+        config.update({"dataset": args.dataset, "bertscore": {
             "enabled": not args.no_bertscore, "model": args.bertscore_model,
             "device": args.bertscore_device, "batch_size": args.bertscore_batch_size,
             "rescale_with_baseline": args.bertscore_rescale,
@@ -298,7 +356,7 @@ def evaluate(args: argparse.Namespace, client: TransformersClient) -> dict:
         if any(output.iterdir()):
             raise ValueError(f"Output directory is not empty: {output}. Use --resume or a new output-dir.")
     bert_scorer = None
-    if plantexpert and not args.no_bertscore and any(example.answer is not None for example in examples):
+    if (plantexpert or scivqa) and not args.no_bertscore and any(example.answer is not None for example in examples):
         print("Loading BERTScore before inference...", flush=True)
         bert_scorer = build_bertscore_scorer(
             model_type=args.bertscore_model, device=args.bertscore_device,
@@ -318,7 +376,7 @@ def evaluate(args: argparse.Namespace, client: TransformersClient) -> dict:
                     continue
                 failure = None
                 try:
-                    prompt_args = {"system_prompt": system_prompt} if plantexpert else {}
+                    prompt_args = {"system_prompt": system_prompt} if plantexpert or scivqa else {}
                     result = client.answer(args.model, example, paths[example.question_id],
                                            args.max_tokens, args.seed, **prompt_args)
                     record = make_record(example, result, dataset=args.dataset)
@@ -544,32 +602,49 @@ def parse_args(argv=None):
     parser.add_argument("--gpu-memory-gib", type=float, default=12, help="Weight budget per visible GPU; reserve room for generation")
     parser.add_argument("--attention-implementation", choices=("sdpa", "eager"), default="sdpa")
     parser.add_argument("--context-size", type=int, default=8192, help="Maximum prompt plus output tokens")
-    parser.add_argument("--dataset", choices=("gqa", "plantexpert"), default="gqa")
-    parser.add_argument("--questions", type=Path, help="Default: data/<dataset>_dataset/test.csv")
+    parser.add_argument("--dataset", choices=("gqa", "plantexpert", "scivqa"), default="gqa")
+    parser.add_argument("--split", choices=("dev", "test"), default="test",
+                        help="Default: test; dev reads val.csv")
+    parser.add_argument("--scivqa-context", choices=("full", "question-only"), default="full",
+                        help="SciVQA: include figure context by default; question-only retains options")
+    parser.add_argument("--preview-prompts", type=int, metavar="N",
+                        help="Print N model prompts and exit without loading models or scorers")
+    parser.add_argument("--questions", type=Path, help="Default: data/<dataset>_dataset/<split>.csv")
     parser.add_argument("--images", type=Path, help="Default: data/<dataset>_dataset/images")
     parser.add_argument("--image-split", help="Optional split subfolder for flat image names")
     parser.add_argument("--output-dir", type=Path, help="Default: results/<model>_<dataset>_zero_shot")
     parser.add_argument("--limit", type=int, help="First N questions (default: all)")
-    parser.add_argument("--max-tokens", type=int, help="Default: 64 for GQA, 256 for PlantExpert")
-    parser.add_argument("--no-bertscore", action="store_true", help="PlantExpert: skip the semantic metric")
-    parser.add_argument("--bertscore-model", default="bert-base-uncased")
+    parser.add_argument("--max-tokens", type=int, help="Default: 64 for GQA, 256 for PlantExpert/SciVQA")
+    parser.add_argument("--no-bertscore", action="store_true", help="PlantExpert/SciVQA: skip semantic metrics")
+    parser.add_argument("--bertscore-model", help="Default: roberta-large for SciVQA, bert-base-uncased otherwise")
     parser.add_argument("--bertscore-device", default="cpu")
     parser.add_argument("--bertscore-batch-size", type=int, default=16)
-    parser.add_argument("--no-bertscore-rescale", dest="bertscore_rescale", action="store_false")
+    rescale = parser.add_mutually_exclusive_group()
+    rescale.add_argument("--bertscore-rescale", dest="bertscore_rescale", action="store_true")
+    rescale.add_argument("--no-bertscore-rescale", dest="bertscore_rescale", action="store_false")
+    parser.set_defaults(bertscore_rescale=None)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--resume", action="store_true", help="Reuse saved successes and retry failed questions")
     parser.add_argument("--continue-on-error", action="store_true", help="Record failures as incorrect and continue")
     args = parser.parse_args(argv)
     args.model = MODEL_PRESETS.get(args.model.lower(), args.model)
-    args.questions = args.questions or Path(f"data/{args.dataset}_dataset/test.csv")
+    split_file = "val" if args.split == "dev" else "test"
+    args.questions = args.questions or Path(f"data/{args.dataset}_dataset/{split_file}.csv")
     args.images = args.images or Path(f"data/{args.dataset}_dataset/images")
     model_name = Path(args.model.rstrip("/")).name
     slug = re.sub(r"[^a-z0-9]+", "_", model_name.lower()).strip("_") or "model"
-    args.output_dir = args.output_dir or Path(f"results/{slug}_{args.dataset}_zero_shot")
+    suffix = f"_{args.split}_{args.scivqa_context}" if args.dataset == "scivqa" else ""
+    args.output_dir = args.output_dir or Path(f"results/{slug}_{args.dataset}{suffix}_zero_shot")
+    bert_model, bert_rescale = bertscore_defaults(args.dataset)
+    args.bertscore_model = args.bertscore_model or bert_model
+    if args.bertscore_rescale is None:
+        args.bertscore_rescale = bert_rescale
     if args.max_tokens is None:
-        args.max_tokens = 256 if args.dataset == "plantexpert" else 64
+        args.max_tokens = 64 if args.dataset == "gqa" else 256
     if args.limit is not None and args.limit <= 0:
         parser.error("--limit must be positive")
+    if args.preview_prompts is not None and args.preview_prompts <= 0:
+        parser.error("--preview-prompts must be positive")
     if min(args.max_tokens, args.context_size, args.bertscore_batch_size) <= 0:
         parser.error("max-tokens, context-size, and bertscore-batch-size must be positive")
     if not math.isfinite(args.gpu_memory_gib) or args.gpu_memory_gib <= 0:
@@ -587,9 +662,19 @@ def main(argv=None) -> int:
         return 0
     try:
         # Stop on bad data or an occupied output directory before model downloads.
-        examples = load_examples(args.questions)[:args.limit]
+        examples = load_examples(args.questions, args.dataset, args.scivqa_context)[:args.limit]
         for example in examples:
             image_path(args.images, example, args.image_split or args.questions.stem)
+        if args.preview_prompts:
+            system_prompt = (scivqa_prompt.SYSTEM_PROMPT if args.dataset == "scivqa" else
+                             PLANTEXPERT_SYSTEM_PROMPT if args.dataset == "plantexpert" else SYSTEM_PROMPT)
+            print(json.dumps([{"question_id": example.question_id, "image": example.image,
+                               "system_prompt": system_prompt, "user_prompt": example.question}
+                              for example in examples[:args.preview_prompts]], ensure_ascii=False, indent=2))
+            return 0
+        if args.dataset == "scivqa":
+            # Check the lightweight lexical dependency before downloading weights.
+            scivqa_score_pairs([], [], None, compute_bertscore=False)
         if not args.resume and args.output_dir.exists() and any(args.output_dir.iterdir()):
             raise ValueError(f"Output directory is not empty: {args.output_dir}. Use --resume or a new output-dir.")
         source, config = inspect_model(args.model, args.hf_revision, args.cache_dir)
@@ -599,8 +684,8 @@ def main(argv=None) -> int:
                                     args.context_size, args.attention_implementation)
         args.backend_config = {**client.backend_config, "model_source": identity}
         report = evaluate(args, client)
-        if args.dataset == "plantexpert":
-            print("PlantExpert metrics: " + ", ".join(
+        if args.dataset in {"plantexpert", "scivqa"}:
+            print(f"{args.dataset} metrics: " + ", ".join(
                 f"{key}={value:.4f}" if value is not None else f"{key}=not computed"
                 for key, value in report["generated_metrics"].items()))
         elif report["accuracy"] is not None:

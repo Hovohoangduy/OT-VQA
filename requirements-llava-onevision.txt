@@ -8,3 +8,4 @@ pillow>=10
 torch
 torchvision
 bert-score==0.3.13
+rouge-score

@@ -308,7 +308,7 @@ validation on your dataset.
 
 Use `scripts/evaluate_llm.py` for the supported pretrained vision-language models. It loads
 native Hugging Face Transformers checkpoints directly with the model's own
-processor. One evaluator handles GQA and PlantExpertVQA, with no server or GGUF
+processor. One evaluator handles GQA, PlantExpertVQA, and SciVQA, with no server or GGUF
 backend. The old GGUF/LM Studio runners, Keye adapter, notebook generator, and
 bundled GGUF notebook have been removed.
 
@@ -375,11 +375,44 @@ For PlantExpertVQA:
 python3 -m scripts.evaluate_llm --model internvl3.5-8b --dataset plantexpert
 ```
 
+For SciVQA, full figure context is enabled by default, following the
+`sci-vqa` branch's question construction: original question, answer options,
+binary/multiple-choice answer format, figure type and reading focus, compound
+figure navigation, and caption. `figs_numb` means the number of subfigures;
+the question identifies the relevant panel. References and the `unanswerable`
+annotation never select the answer or enter the prompt. Publication identifiers
+and URLs are retained for traceability; the evaluator does not retrieve papers.
+See [the SciVQA context audit and protocol](docs/scivqa_llm_evaluation.md).
+
+```bash
+# Inspect all seven question types without loading a model or scorer.
+python3 -m scripts.evaluate_llm --dataset scivqa --preview-prompts 7
+
+# GPU smoke run, then the full test split in a separate result folder.
+python3 -m scripts.evaluate_llm --dataset scivqa --model qwen3-vl-8b \
+  --limit 7 --output-dir results/qwen3_scivqa_test_smoke
+python3 -m scripts.evaluate_llm --dataset scivqa --model qwen3-vl-8b
+
+# Use validation explicitly when developing model/prompt settings.
+python3 -m scripts.evaluate_llm --dataset scivqa --model qwen3-vl-8b --split dev
+```
+
+Change only `--model` to use any preset above with the same context protocol.
+SciVQA defaults to `--split test` (`test.csv`, all 4,200 questions), 256 output tokens and
+`--scivqa-context full`. An optional `--scivqa-context question-only` ablation
+keeps answer options and task formatting while excluding figure context.
+Result folder names include the SciVQA split and context mode. Reports contain
+ROUGE-1/L and BERTScore precision, recall, and F1, overall and by QA type.
+BERTScore uses `roberta-large` without baseline rescaling, matching the project's
+SciVQA defaults; `--no-bertscore` leaves its three values null and still computes
+all six ROUGE values. This setting does not represent the full nine-metric run.
+
 For Kaggle, upload [evaluate_llm_kaggle.ipynb](notebooks/evaluate_llm_kaggle.ipynb),
 select **Settings → Accelerator → GPU T4 x2**, enable **Internet**, and attach your
 dataset. Edit `MODEL`, `DATASET`, `DATA_ROOT`, `QUESTIONS`, and `IMAGES` in the
-configuration cell, then **Run All**. Defaults use LLaVA-OneVision-1.5-8B-Instruct and the
-PlantExpert Kaggle path below. The notebook bundles the evaluator and metrics;
+configuration cell, then **Run All**. Defaults use LLaVA-OneVision-1.5-8B-Instruct on
+SciVQA test with full context (`SPLIT="test"`, `FULL_LIMIT=None`). Set `DATA_ROOT`
+to the actual attached dataset folder. The notebook bundles the evaluator, context builder, and metrics;
 no repository checkout is needed. It installs evaluation dependencies, checks
 exactly two visible GPUs, runs five smoke questions, then evaluates the full
 split. Model weights are balanced across both GPUs, and each run executes in a
@@ -419,14 +452,18 @@ Weights must fit the selected GPUs without CPU/disk offload. Adjust
 memory. The default prompt-plus-output limit is 8192 tokens (`--context-size`).
 Run a smoke evaluation on your GPUs before a full evaluation.
 
-Each example uses only the image, question, and fixed dataset instruction.
-Reference answers, dataset annotations, demonstrations, and chat history never
-enter the model prompt. Generation is greedy and requests thinking disabled
+GQA and PlantExpert use the image, question, and fixed dataset instruction.
+SciVQA additionally uses the figure context described above. Reference answers,
+answerability labels, demonstrations, and chat history never enter the model
+prompt. Generation is greedy and requests thinking disabled
 through the model's chat template. Images use native processor preprocessing.
-GQA defaults to 64 output tokens; PlantExpert defaults to 256 (`--max-tokens`).
+GQA defaults to 64 output tokens; PlantExpert and SciVQA default to 256 (`--max-tokens`).
 Questions accept CSV (`image,question,answer`, with optional `question_id` or
 `anno_id`) or official GQA question JSON. Unlabeled examples produce predictions
 without scores. Use `--image-split` for images in a split subfolder.
+SciVQA requires the context-preserving CSV schema from `utils.download_scivqa`;
+captions need not already be appended to its `question` column. Prompts are
+never silently truncated: requests that exceed `--context-size` fail explicitly.
 
 Only three result files are written per run:
 

@@ -7,4 +7,5 @@ docs/*.pdf
 results
 docs/*
 !docs/optimal_transport_architecture.html
+!docs/scivqa_llm_evaluation.md
 .agent
