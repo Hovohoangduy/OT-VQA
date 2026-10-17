@@ -57,11 +57,16 @@ def normalize_text(text):
 
 
 def normalize_llm_answer(text: str) -> str:
-    """Remove LLM whitespace/Markdown formatting while retaining answer content.
+    """Remove LLM answer wrappers/Markdown while retaining answer content.
 
     Handle actual and literal escaped newlines/tabs without decoding arbitrary
     escapes or removing meaningful punctuation, numbers, Unicode, or case.
     """
+    # GLM marks these added tokens as special=False, so decode(...,
+    # skip_special_tokens=True) retains them. Strip only the known delimiters;
+    # keep all enclosed content and any surrounding prose for exact matching.
+    for marker in ("<|begin_of_box|>", "<|end_of_box|>"):
+        text = text.replace(marker, "")
     text = re.sub(r"\\(?:r\\n|[nrt])", "\n", text)
     text = re.sub(r"(?m)^[ \t]*(?:`{3,}|~{3,})[ \t]*(?:[\w+-]+)?[ \t]*$", "", text)
     text = re.sub(r"(?m)^[ \t]{0,3}(?:#{1,6}[ \t]+|>[ \t]?|[-+*][ \t]+)", "", text)

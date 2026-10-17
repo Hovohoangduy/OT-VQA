@@ -171,5 +171,116 @@ class NotebookTests(unittest.TestCase):
             self.assertEqual(bundled, (root / name).read_text(), name)
 
 
+class AnswerScoringTests(unittest.TestCase):
+    def test_glm_log_examples_keep_content_and_score_six_of_seven(self):
+        predictions = ["yes", "STOP WORRYING", "steps", "metal", "no", "no", "left"]
+        references = ["yes", "sticker", "steps", "metal", "no", "no", "left"]
+        rows = []
+        for index, (prediction, reference) in enumerate(zip(predictions, references)):
+            raw = f"<|begin_of_box|>{prediction}<|end_of_box|>"
+            row = evaluator.make_record(evaluator.Example(str(index), "image.jpg", "?", reference),
+                                        {"prediction": raw, "raw_response": raw, "latency_seconds": 0.1})
+            self.assertEqual(row["prediction"], prediction)
+            self.assertEqual(row["raw_response"], raw)
+            rows.append(row)
+        with tempfile.TemporaryDirectory() as temporary:
+            report = evaluator.save_outputs(Path(temporary), {r["question_id"]: r for r in rows}, {}, 7)
+        self.assertAlmostEqual(report["accuracy"], 6 / 7)
+        self.assertFalse(rows[1]["correct"])
+
+    def test_cleanup_preserves_prose_case_punctuation_and_unknown_tokens(self):
+        cases = {
+            "<|begin_of_box|>**Yes!**<|end_of_box|>": "Yes!",
+            "<|begin_of_box|>yes": "yes",  # Truncated closing marker.
+            "Answer: <|begin_of_box|>yes<|end_of_box|> because it is visible.":
+                "Answer: yes because it is visible.",
+            "<|unknown|>yes": "<|unknown|>yes",
+            "<|begin_of_box|>2<|end_of_box|>, <|begin_of_box|>3<|end_of_box|>": "2, 3",
+        }
+        for raw, expected in cases.items():
+            with self.subTest(raw=raw):
+                self.assertEqual(evaluator.normalize_llm_answer(raw), expected)
+                self.assertEqual(evaluator.normalize_llm_answer(expected), expected)
+        row = evaluator.make_record(evaluator.Example("id", "image.jpg", "?", "yes!"),
+                                    {"prediction": "<|begin_of_box|>Yes!<|end_of_box|>"})
+        self.assertFalse(row["correct"])
+        self.assertTrue(row["normalized_correct"])
+
+    def test_plantexpert_and_errors_use_the_same_cleanup_without_forgiving_errors(self):
+        example = evaluator.Example("id", "image.jpg", "?", "yes")
+        result = {"prediction": "<|begin_of_box|>yes<|end_of_box|>"}
+        self.assertEqual(evaluator.make_record(example, result, dataset="plantexpert")["em"], 1)
+        self.assertFalse(evaluator.make_record(example, result, error="failed")["correct"])
+        self.assertIsNone(evaluator.make_record(
+            evaluator.Example("id", "image.jpg", "?", None), result)["correct"])
+
+
+class SavedScoringTests(unittest.TestCase):
+    def create_old_run(self, root):
+        questions = root / "questions.csv"
+        questions.write_text("question_id,image,question,answer\n1,image.jpg,Is it visible?,yes\n")
+        (root / "image.jpg").touch()
+        args = evaluator.parse_args(["--model", "glm-4.6v-flash", "--questions", str(questions),
+                                     "--images", str(root), "--output-dir", str(root / "output")])
+        client = MagicMock(base_url="transformers://local")
+        raw = "<|begin_of_box|>yes<|end_of_box|>"
+        client.answer.return_value = {"prediction": raw, "raw_response": raw, "latency_seconds": 0.1}
+        evaluator.evaluate(args, client)
+        journal = args.output_dir / "predictions.jsonl"
+        row = json.loads(journal.read_text())
+        row.update(prediction=raw, correct=False, normalized_correct=False)
+        journal.write_text(json.dumps(row) + "\n")
+        manifest = args.output_dir / "run_config.json"
+        config = json.loads(manifest.read_text())
+        config["answer_normalization"] = "whitespace_markdown_v1"
+        manifest.write_text(json.dumps(config))
+        client.answer.reset_mock()
+        return args, client, raw
+
+    def test_resume_rescores_and_persists_legacy_rows_without_inference(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            args, client, raw = self.create_old_run(Path(temporary))
+            args.resume = True
+            report = evaluator.evaluate(args, client)
+            client.answer.assert_not_called()
+            self.assertEqual(report["accuracy"], 1)
+            self.assertEqual(report["config"]["answer_normalization"], evaluator.ANSWER_NORMALIZATION)
+            rows = [json.loads(line) for line in (args.output_dir / "predictions.jsonl").read_text().splitlines()]
+            self.assertEqual(len(rows), 2)
+            self.assertEqual(rows[0]["prediction"], raw)
+            self.assertEqual(rows[-1]["prediction"], "yes")
+            self.assertEqual(rows[-1]["raw_response"], raw)
+            self.assertTrue(rows[-1]["correct"])
+            evaluator.evaluate(args, client)
+            self.assertEqual(len((args.output_dir / "predictions.jsonl").read_text().splitlines()), 2)
+
+    def test_offline_rescore_needs_neither_model_nor_original_dataset(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            args, _, raw = self.create_old_run(Path(temporary))
+            args.questions.unlink()
+            (Path(temporary) / "image.jpg").unlink()
+            with patch.object(evaluator, "inspect_model") as inspect, patch.object(
+                    evaluator, "TransformersClient") as client:
+                self.assertEqual(evaluator.main(["--rescore-only", "--output-dir", str(args.output_dir)]), 0)
+                inspect.assert_not_called()
+                client.assert_not_called()
+            report = json.loads((args.output_dir / "report.json").read_text())
+            self.assertEqual(report["accuracy"], 1)
+            self.assertEqual(report["examples_selected"], 1)
+            self.assertTrue(report["complete"])
+            self.assertEqual(report["config"]["model"], "zai-org/GLM-4.6V-Flash")
+            latest = json.loads((args.output_dir / "predictions.jsonl").read_text().splitlines()[-1])
+            self.assertEqual(latest["raw_response"], raw)
+
+    def test_resume_still_rejects_generation_changes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            args, client, _ = self.create_old_run(Path(temporary))
+            args.resume = True
+            args.seed += 1
+            with self.assertRaisesRegex(ValueError, "Resume configuration differs"):
+                evaluator.evaluate(args, client)
+            client.answer.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

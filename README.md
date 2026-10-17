@@ -449,13 +449,38 @@ labeled examples count as wrong, while unattempted questions are excluded.
 GQA reports exact-match `accuracy` and case-insensitive `normalized_accuracy`.
 PlantExpert reports `em`, `token_f1`, `bleu_1`, `bleu_2`, `rouge_l`, and
 `bertscore_f1`, using the shared repository metrics. Formatting cleanup removes
-Markdown and repeated/escaped whitespace from predictions and references while
+Markdown, GLM's `<|begin_of_box|>`/`<|end_of_box|>` delimiters, and
+repeated/escaped whitespace from predictions and references while
 preserving case, punctuation, and answer content. It does not extract answers
 from explanatory prose. Scores are fractions; rescaled BERTScore can be negative.
 BERTScore defaults to `bert-base-uncased` on CPU, batch size 16, with English
 baseline rescaling. Use `--no-bertscore` for lexical-only PlantExpert scoring,
 or configure `--bertscore-model`, `--bertscore-device`, `--bertscore-batch-size`,
 and `--no-bertscore-rescale`. The report records the scorer's model hash.
+
+GLM's tokenizer declares its box delimiters with `special: false`, so
+`skip_special_tokens=True` leaves them in decoded text. Cleanup turns
+`<|begin_of_box|>yes<|end_of_box|>` into `yes` before scoring; `raw_response`
+retains the decoded text. For example, `STOP WORRYING` still fails against
+`sticker`. This cleanup applies to all presets, including saved predictions.
+`--resume` upgrades the previous `whitespace_markdown_v1` scoring version,
+rescores saved rows, and skips successful inference as usual. Other generation
+and dataset settings must still match.
+
+To repair an existing result folder without loading the VLM or original dataset:
+
+```bash
+python3 -m scripts.evaluate_llm --rescore-only \
+  --output-dir results/glm_4_6v_flash_gqa_zero_shot
+```
+
+This uses the folder's saved configuration, references, and predictions, updates
+`report.json` and `run_config.json`, and appends corrected rows to
+`predictions.jsonl` while retaining the original rows and raw responses. GQA
+rescoring needs no GPU; PlantExpert reloads BERTScore when enabled in the saved
+configuration. In Kaggle, rerun all cells from the updated notebook to restore
+the patched evaluator before resuming or running this command against your
+existing `/kaggle/working/results/...` folder.
 
 ### Evaluate a trained repository model
 

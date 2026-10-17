@@ -80,10 +80,12 @@ PLANTEXPERT_SYSTEM_PROMPT = (
     "prefix, unrelated information, or discussion of your reasoning process."
 )
 METADATA_FIELDS = ("question_type", "question_category", "crop", "disease")
-ANSWER_NORMALIZATION = "whitespace_markdown_v1"
+ANSWER_NORMALIZATION = "whitespace_markdown_glm_box_v2"
+LEGACY_ANSWER_NORMALIZATIONS = (None, "whitespace_markdown_v1")
 NORMALIZATION_DESCRIPTION = (
     "Predictions and references have actual/literal escaped newlines and tabs, "
-    "repeated whitespace, and Markdown emphasis, code fences, headings, and bullets "
+    "repeated whitespace, GLM <|begin_of_box|>/<|end_of_box|> delimiters, "
+    "and Markdown emphasis, code fences, headings, and bullets "
     "normalized before scoring. Meaningful punctuation and case are preserved."
 )
 
@@ -246,6 +248,60 @@ def save_outputs(output: Path, records: dict[str, dict], config: dict,
     return report
 
 
+def load_saved_records(journal: Path, dataset: str, examples_by_id=None) -> tuple[dict, list]:
+    """Rescore the latest journal rows; return corrections to append for auditing."""
+    latest = {}
+    for line in journal.read_text(encoding="utf-8").splitlines():
+        row = json.loads(line)
+        latest[row["question_id"]] = row
+    records, corrections = {}, []
+    for question_id, row in latest.items():
+        example = (examples_by_id[question_id] if examples_by_id is not None else Example(
+            question_id, row["image"], row["question"], row["reference"],
+            {key: row[key] for key in METADATA_FIELDS if key in row},
+        ))
+        record = make_record(example, row, error=row["error"], dataset=dataset)
+        records[question_id] = record
+        if record != row:
+            corrections.append(record)
+    return records, corrections
+
+
+def upgrade_answer_normalization(config: dict):
+    """Allow scoring-only migrations while rejecting unknown scoring versions."""
+    version = config.get("answer_normalization")
+    if version in LEGACY_ANSWER_NORMALIZATIONS:
+        config["answer_normalization"] = ANSWER_NORMALIZATION
+    elif version != ANSWER_NORMALIZATION:
+        raise ValueError(f"Unsupported answer normalization: {version!r}")
+
+
+def rescore_saved_outputs(output: Path) -> dict:
+    """Recompute saved scores without loading a VLM or requiring source images."""
+    manifest = output / "run_config.json"
+    journal = output / "predictions.jsonl"
+    previous_report = json.loads((output / "report.json").read_text(encoding="utf-8"))
+    config = json.loads(manifest.read_text(encoding="utf-8"))
+    upgrade_answer_normalization(config)
+    dataset = config.get("dataset", "gqa")
+    records, corrections = load_saved_records(journal, dataset)
+    bert_scorer = None
+    if dataset == "plantexpert" and config["bertscore"]["enabled"] and any(
+            row["reference"] is not None for row in records.values()):
+        settings = config["bertscore"]
+        bert_scorer = build_bertscore_scorer(
+            model_type=settings["model"], device=settings["device"],
+            batch_size=settings["batch_size"],
+            rescale_with_baseline=settings["rescale_with_baseline"],
+        )
+    report = save_outputs(output, records, config, previous_report["examples_selected"], bert_scorer)
+    with journal.open("a", encoding="utf-8") as handle:
+        for record in corrections:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    manifest.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+    return report
+
+
 def evaluate(args: argparse.Namespace, client: TransformersClient) -> dict:
     examples = load_examples(args.questions)
     if args.limit is not None:
@@ -278,22 +334,18 @@ def evaluate(args: argparse.Namespace, client: TransformersClient) -> dict:
     output.mkdir(parents=True, exist_ok=True)
     manifest = output / "run_config.json"
     journal = output / "predictions.jsonl"
-    records = {}
+    records, corrections = {}, []
     if args.resume:
         saved_config = json.loads(manifest.read_text(encoding="utf-8")) if manifest.is_file() else None
         manifest_config = saved_config.copy() if saved_config is not None else None
         # Older journals retain raw predictions; rescore them with current cleanup.
         if saved_config is not None:
-            saved_config.setdefault("answer_normalization", ANSWER_NORMALIZATION)
+            upgrade_answer_normalization(saved_config)
         if saved_config != config:
             raise ValueError("Resume configuration differs or is missing. Use the original flags or a new output-dir.")
         if journal.is_file():
             examples_by_id = {example.question_id: example for example in examples}
-            for line in journal.read_text(encoding="utf-8").splitlines():
-                row = json.loads(line)
-                records[row["question_id"]] = make_record(
-                    examples_by_id[row["question_id"]], row, error=row["error"], dataset=args.dataset,
-                )
+            records, corrections = load_saved_records(journal, args.dataset, examples_by_id)
     else:
         if any(output.iterdir()):
             raise ValueError(f"Output directory is not empty: {output}. Use --resume or a new output-dir.")
@@ -306,12 +358,15 @@ def evaluate(args: argparse.Namespace, client: TransformersClient) -> dict:
         )
     if not args.resume:
         manifest.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
-    elif "answer_normalization" not in manifest_config:
+    elif manifest_config.get("answer_normalization") != ANSWER_NORMALIZATION:
         manifest_config["answer_normalization"] = ANSWER_NORMALIZATION
         manifest.write_text(json.dumps(manifest_config, indent=2) + "\n", encoding="utf-8")
     print(f"Model: {args.model}; selected questions: {len(examples)}; zero-shot", flush=True)
     try:
         with journal.open("a", encoding="utf-8") as handle:
+            for record in corrections:
+                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+            handle.flush()
             for index, example in enumerate(examples, 1):
                 previous = records.get(example.question_id)
                 if previous is not None and not previous["error"]:
@@ -558,6 +613,8 @@ def parse_args(argv=None):
     parser.add_argument("--no-bertscore-rescale", dest="bertscore_rescale", action="store_false")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--resume", action="store_true", help="Reuse saved successes and retry failed questions")
+    parser.add_argument("--rescore-only", action="store_true",
+                        help="Recompute saved results in --output-dir without loading the VLM or source data")
     parser.add_argument("--continue-on-error", action="store_true", help="Record failures as incorrect and continue")
     args = parser.parse_args(argv)
     args.model = MODEL_PRESETS.get(args.model.lower(), args.model)
@@ -586,6 +643,15 @@ def main(argv=None) -> int:
             print(f"{alias}: {repo}")
         return 0
     try:
+        if args.rescore_only:
+            report = rescore_saved_outputs(args.output_dir)
+            if "accuracy" in report:
+                if report["accuracy"] is not None:
+                    print(f"Accuracy: {report['accuracy']:.2%}; normalized: {report['normalized_accuracy']:.2%}")
+            else:
+                print("PlantExpert metrics: " + json.dumps(report["generated_metrics"]))
+            print(f"Rescored saved predictions: {args.output_dir / 'report.json'}")
+            return 0
         # Stop on bad data or an occupied output directory before model downloads.
         examples = load_examples(args.questions)[:args.limit]
         for example in examples:
