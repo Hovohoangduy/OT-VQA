@@ -1,26 +1,108 @@
 # OT-VQA
 
-Visual question answering with a frozen SigLIP vision encoder, MiniLM question tokens,
-question-conditioned partial optimal transport fusion, and autoregressive answer generation. The
-image encoder remains configurable, and checkpoints retain their encoder configuration.
+Visual question answering with question-conditioned partial optimal transport (OT)
+and autoregressive answer generation. The repository has two model families:
+
+| Model family | Image/question representation | Answer generation | Selection |
+| --- | --- | --- | --- |
+| `legacy` (default) | Frozen SigLIP + MiniLM token states → partial-OT memory | Custom causal decoder | `--model_family legacy` |
+| `qwen3_vl` | Native Qwen3-VL visual features + frozen, query-only MiniLM → OT visual adapter | Pretrained Qwen decoder, optional LoRA | `--model_family qwen3_vl` |
+
+OT remains the default fusion path for both families. Native and pooled adapters
+are explicit research controls. Checkpoints store the chosen family and its model
+configuration; evaluation reconstructs that saved configuration.
 For a code-level walkthrough with diagrams and an interactive transport example,
 open [the architecture guide](docs/optimal_transport_architecture.html).
+
+## Project structure
+
+```text
+OT-VQA/
+├── AGENTS.md                         # Repository guidance for coding agents
+├── README.md                         # Setup, training, evaluation and usage
+├── requirements.txt                  # Runtime and test dependencies
+├── train.py                          # Shared training entry point: legacy / Qwen3-VL
+├── test.py                           # Validation/test metrics and prediction exports
+├── predict.py                        # Single-image answer generation
+├── diagnose_training.py              # Legacy OT diagnostics and input reliance
+├── diagnose_scivqa_breakdown.py       # SciVQA diagnostic entry point
+├── compare_scivqa.py                  # Compare SciVQA evaluation reports
+├── SCIVQA_TUNING.md                   # Historical experiment notes
+├── configs/
+│   ├── config.py                     # Shared defaults and dataset presets
+│   └── arg_parser.py                 # CLI options and preset resolution
+├── model/
+│   ├── factory.py                    # Native model configuration and construction
+│   ├── optimal_transport.py          # FP32 Sinkhorn, partial OT, MH-OT, FGW and UOT
+│   ├── vqa_model.py                  # Legacy OT memory and answer generation
+│   ├── pretrained_vlm.py             # Native Qwen3-VL OT adapter and optional LoRA
+│   ├── features_extraction.py        # Legacy vision/text encoders and answer embeddings
+│   └── decoder_model.py              # Legacy causal answer decoder
+├── utils/
+│   ├── data_processing.py            # CSV validation and text preparation
+│   ├── vqa_dataset.py                # Dataset, versioned prompts and native collation
+│   ├── image_processing.py           # Legacy crop/pad image transforms
+│   ├── download_gqa.py               # GQA subset downloader
+│   ├── download_plantexpert.py       # PlantExpertVQA subset downloader
+│   ├── download_scivqa.py            # SciVQA download and CSV export
+│   ├── checkpoint.py                # Versioned save/load and training-state restore
+│   ├── losses.py                    # Token/example CE reduction
+│   ├── metrics.py                   # Dataset-specific answer scoring
+│   ├── answer_text.py               # Generated-answer text postprocessing
+│   ├── quality_evidence.py          # Quality guardrails and comparison helpers
+│   ├── training_preflight.py        # Training-data checks
+│   ├── training_runtime.py          # Optimizer, AMP, accumulation and resume helpers
+│   ├── profiling.py                 # Stage timing and memory telemetry
+│   ├── device.py                    # CPU / CUDA / MPS selection
+│   └── json_to_csv.py               # Annotation conversion
+├── scripts/
+│   ├── kaggle_train.py              # Validated Kaggle launcher
+│   ├── check_t4_pilot.py             # Pilot acceptance checks
+│   ├── t4_preflight.py               # T4 environment preflight
+│   ├── smoke_native_processor.py    # Native processor smoke check
+│   ├── audit_native_tokens.py       # Native token-budget audit
+│   ├── validate_scivqa_correctness.py # Prompt/decode correctness checks
+│   └── scivqa_evidence.py            # Evidence workflow commands
+├── tools/
+│   └── diagnose_scivqa_breakdown.py  # SciVQA breakdown implementation
+├── tests/                           # Correctness, native, checkpoint and runtime tests
+├── docs/
+│   └── optimal_transport_architecture.html # Architecture, equations and live OT example
+├── .agents/
+│   ├── skills/                      # Current repository-specific Codex skills
+│   └── plans/                       # Experiment plans and Kaggle runbooks
+├── .agent/                          # Archived Gemini-era guidance
+├── data/                            # Local datasets / model outputs; downloaded/generated
+└── results/                         # Evaluation exports; generated when requested
+```
+
+The tree shows the main source files; dataset contents, checkpoints, caches,
+notebooks and individual test files are omitted. `data/` and `results/` contain
+local or generated artifacts and are not required to exist in a fresh checkout.
+The source of truth is the code, current CLI and saved checkpoint configuration;
+verify historical recipes in `SCIVQA_TUNING.md` against them.
+
+*Documentation checked against the repository on 17 October 2026.*
 
 ## Setup
 
 ```bash
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 ```
 
 The default paths expect GQA CSV files under `data/gqa_dataset` and images under
 `data/gqa_dataset/images`. Run `python train.py --help` to see path overrides.
-The current default image encoder is `google/siglip-base-patch16-384`; the text
-encoder is `sentence-transformers/all-MiniLM-L12-v2`. Image size and preprocessing
+For the default `legacy` family, the image encoder is
+`google/siglip-base-patch16-384`; the text encoder is `sentence-transformers/all-MiniLM-L12-v2`. Image size and preprocessing
 are dataset- and checkpoint-controlled. The current SciVQA preset pads the full
 figure to 384×384, while older checkpoints may use 256-pixel center-crop
 preprocessing. The image encoder supplies spatial features, and MiniLM supplies
 token features plus a mean-pooled question vector. Existing checkpoints retain
 their saved encoder names and preprocessing settings.
+
+## Datasets
+
+### GQA
 
 To download random GQA subsets of 10,000 training, 1,000 validation, and 2,000
 test images, with one question–answer pair per image:
@@ -43,6 +125,8 @@ the server's requested cooldown before retrying. If rate limiting persists, set 
 and try `--metadata-workers 1 --request-interval 2`. `--workers` controls image
 downloads separately.
 
+### PlantExpertVQA
+
 To download random PlantExpertVQA subsets of 10,000 training, 1,000 validation,
 and 2,000 test question–answer pairs, with their images:
 
@@ -61,6 +145,8 @@ and any downloaded images. Set `HF_TOKEN` in your shell if you have a Hugging
 Face token.
 For training, use `python train.py --dataset plantexpert`. This automatically
 selects the Python defaults in `configs/config.py`, including dataset paths and answer metrics.
+
+### SciVQA
 
 To download and format [SciVQA](https://huggingface.co/datasets/katebor/SciVQA):
 
@@ -83,24 +169,29 @@ files are cached under `<output>/.download_cache`, and reruns reuse downloaded
 files and verified images. Use `--output` to change the destination or
 `--revision` to choose a Hugging Face commit. `HF_TOKEN` is supported.
 
-Train the OT model with the SciVQA preset:
+## Train the default legacy OT model
+
+Train with the SciVQA preset and a fresh output directory:
 
 ```bash
-python train.py --dataset scivqa
+python train.py --dataset scivqa --model_path data/scivqa_legacy_run1
 ```
 
 The SciVQA preset includes figure type and caption context and allows up to 512
 question tokens. To compare without figure context, use `--no-figure_context`
 and a fresh `--model_path`. The setting is stored in the checkpoint and reused
-for validation, test evaluation, and diagnostics. The [SciVQA experiment guide](SCIVQA_TUNING.md)
-has a two-GPU Kaggle command and a comparison against the cited paper.
+for validation, test evaluation, and diagnostics. Treat the
+[SciVQA experiment notes](SCIVQA_TUNING.md) as historical context; current commands
+and defaults below take precedence.
 
 [`configs/config.py`](configs/config.py) supplies local dataset paths and
 training defaults. For Kaggle, override the CSV/image paths and `--model_path`
 with your input dataset and a directory under `/kaggle/working`.
 The preset uses
 OT fusion, MiniLM/SigLIP backbones, batch size 8 per GPU, up to 30 epochs,
-and freezes both the image and question encoders. AdamW trains the new
+and freezes both the image and question encoders. It also enables four OT
+heads (`--ot_num_heads 4`), tied output embeddings (`--tie_weights`), and auxiliary
+alignment weight `--ot_loss_weight 0.05`. AdamW trains the new
 decoder/fusion layers at `1e-5`, with 5% warmup, weight decay `0.05`, label smoothing
 `0.1`, dropout `0.25`, gradient clipping at `1.0`, and patience 8. Training
 answer metrics use a fixed 512-example subset; image loading uses two workers
@@ -112,12 +203,12 @@ The reference
 and ensembles; Appendix D mentions LoRA on 5,000 Bespoke MiniChart examples
 but provides no full OT training recipe. This preset trains on the complete
 15,120/1,680 train/validation splits and reserves the 4,200 test examples for
-final evaluation. SciVQA checkpoints maximize validation ROUGE-L F1 by default;
+final evaluation. Fresh SciVQA checkpoints maximize validation ROUGE-L F1 by default;
 pass `--selection_metric loss` to select by validation loss instead.
 
-The preset allows 512 question tokens and 64 answer tokens, including special
-tokens. The downloaded splits reach 210/37 tokens with the default MiniLM
-tokenizer, preserving the choice context and unanswerable targets. If exporting
+The legacy preset allows 512 question tokens and 64 answer tokens, including special
+tokens. Check token lengths on the selected dataset revision and formatted prompts;
+figure captions can increase question length. If exporting
 with `--include-caption`, use `--max_question_tokens 512` and check lengths for
 your dataset revision. New SciVQA runs use full-figure padding at 384 pixels with the frozen SigLIP
 vision encoder; this does not reproduce the paper's VLMs.
@@ -129,23 +220,26 @@ use shared defaults, except for SciVQA's training overrides described above.
 Explicit CLI flags override these settings; for example,
 add `--device cuda --batch_size 2` to reduce GPU memory. Edit `configs/config.py`
 to change the dataset defaults.
-Training records the resolved arguments and all nine SciVQA metrics in
+Training records the resolved arguments and enabled SciVQA metrics in
 `run_config.json` and `metrics.jsonl` under `--model_path`.
 The resolved model configuration records image size and preprocessing. Each
 validation history row also includes `val_metrics_by_qa_pair_type` so numerical
 answers and abstention can be inspected separately.
 
-Evaluate the best checkpoint on validation or test:
+Evaluate the selected legacy checkpoint on validation, then use test only for
+final evaluation. Set `--checkpoint` to the output of your run:
 
 ```bash
-python test.py --dataset scivqa --split dev \
+python test.py --dataset scivqa --checkpoint data/scivqa_legacy_run1/best.pt --split dev \
   --report_json results/scivqa/dev_report.json \
   --predictions_csv results/scivqa/dev_predictions.csv
 
-python test.py --dataset scivqa --split test \
+python test.py --dataset scivqa --checkpoint data/scivqa_legacy_run1/best.pt --split test \
   --report_json results/scivqa/test_report.json \
   --predictions_csv results/scivqa/test_predictions.csv
 ```
+
+## Train Qwen3-VL with OT and optional LoRA
 
 For **Qwen3-VL-2B + OT + LoRA** on Kaggle, use the direct two-process command
 below. Install the shared dependencies in your Kaggle cell first:
@@ -154,8 +248,10 @@ below. Install the shared dependencies in your Kaggle cell first:
 %pip install -r requirements.txt
 ```
 
-`requirements.txt` contains the runtime, evaluation, OT/LoRA and test dependencies
-with the reviewed versions pinned. NF4's bitsandbytes dependency installs on
+`requirements.txt` includes runtime, evaluation, OT/LoRA and test dependencies.
+The native integration requires `transformers==5.5.0`; PyTorch, torchvision,
+PEFT, Accelerate, bitsandbytes and pytest also have explicit version pins.
+Some data and metric dependencies remain unpinned. NF4's bitsandbytes dependency installs on
 Linux/Windows; macOS CPU/MPS uses the same file without bitsandbytes.
 
 The [Kaggle runbook](.agents/plans/scivqa-kaggle-final-review.md) includes the matching
@@ -203,6 +299,33 @@ inspect the pilot report, gradient checks and worst shapes before the full run.
 `scripts/kaggle_train.py` remains available as an optional validated launcher.
 These commands start a quality experiment; they do not establish an accuracy gain.
 
+The native path preserves the processor's image placeholders, M-RoPE, KV cache,
+and every DeepStack level. Its single-head partial OT aligns merged visual
+features with question/choice tokens only; figure context stays in the native
+prompt. The same aligned query values condition the main visual output and
+DeepStack outputs through separate learned projections and zero-initialized
+`tanh` gates. Vision, MiniLM and base language weights are frozen; LoRA weights
+are trainable when `--lora_rank` is positive (`0` selects adapter-only training).
+The command above uses rank 16.
+
+Both `--vlm_revision` and `--query_revision` require immutable 40-character
+Hugging Face commit SHAs. `--visual_tokens`, `--query_tokens`,
+`--max_answer_tokens` and `--total_sequence_tokens` enforce token budgets;
+overflow raises an error instead of silently truncating native inputs/targets.
+The SigLIP `--image_size` / `--image_preprocessing` settings apply to legacy;
+Qwen uses its native image processor. NF4 (`--quantize_4bit`) requires CUDA.
+CPU/MPS can use the unquantized path, subject to available memory.
+
+Native training supports single-head partial OT only; multi-head OT, FGW and
+unbalanced OT are rejected. Use `--adapter_control native` or `pooled` and
+`--plan_control independent` in separate controlled experiments. `native`
+bypasses the adapter, `pooled` replaces pairwise transport with pooled query
+conditioning, and `independent` removes pairwise local alignment while
+preserving local marginals and dustbins. No quality gain is established by
+these implementations or smoke tests.
+
+## OT configuration and training behavior
+
 The MiniLM/SigLIP settings described above and below apply to the **legacy**
 model family. Its batch size 8/GPU gives effective batch 16 with accumulation 1.
 `--lr` trains its fusion/decoder; `--encoder_lr` applies to unfrozen text/answer
@@ -226,8 +349,30 @@ SciVQA improvement; a training-figure geometry audit found that the legacy crop
 retains only 50.1% of image area at the median, and 4.6% for the widest figure.
 Those numbers describe area, not useful information or accuracy.
 
-See [the SciVQA experiment guide](SCIVQA_TUNING.md) for the diagnosis,
-copyable Kaggle commands, and a validation-only ablation sequence.
+The [SciVQA experiment notes](SCIVQA_TUNING.md) retain earlier diagnoses and
+ablation ideas; compare their commands with the current CLI before use.
+
+For legacy multi-head OT, each head builds a plan over a feature slice. Aligned
+values are concatenated and the token gates are averaged across heads.
+`--fgw_alpha` optionally applies one structural cost refinement using normalized
+2D patch distances and valid-token rank distances, then solves again; the
+initial plan is detached for that refinement. It is not an iterative FGW
+optimization to convergence. Non-square patch grids skip the structural cost.
+`--unbalanced_tau` enables relaxed marginal scaling with exponent
+`tau / (tau + epsilon)`; exact balanced mass identities no longer apply.
+Both options default off and require separate validation experiments.
+
+The FP32 log-space Sinkhorn solver runs up to `--ot_iterations` iterations.
+Balanced solves can stop after at least five updates when the maximum row
+residual across the solver batch is below `1e-4`; unbalanced solves use the full
+iteration budget. Inspect both row and column residuals.
+
+Training minimizes CE plus `--ot_loss_weight` times the local transport cost
+`mean(sum(P_local * C_local))`, averaged over sample/head plans for legacy.
+This auxiliary term excludes dustbin costs and entropy; gradients flow through
+both the plan and local cost. It defaults to `0` outside the legacy SciVQA
+preset, including fresh Qwen runs. Validation loss remains unsmoothed,
+token-averaged CE and excludes the auxiliary term.
 
 `--selection_metric rouge_l_f1` maximizes full-validation ROUGE-L F1 for both
 `best.pt` and early stopping. Use `bertscore_f1` if that is your primary objective.
@@ -235,7 +380,7 @@ SciVQA defaults to ROUGE-L F1; other datasets minimize validation loss.
 `--train_eval_samples 512` scores a fixed, seeded random training subset each
 epoch; it does not reduce the examples
 used for optimization or validation. Use `0` to skip training-answer scoring, or
-`-1` to score the full training set (the default for other datasets). Subset training metrics should only
+`-1` to score the full training set (the default for other legacy datasets). Subset training metrics should only
 be compared across runs with the same seed and sample count. `--num_workers`
 controls image-loading processes per GPU. BERTScore remains on CPU by default;
 `--bertscore_device cuda --bertscore_batch_size 4` can speed it up if the primary
@@ -255,10 +400,13 @@ data, unanswerable questions make up 14.3% of examples but 48.1%
 of non-padding targets under legacy token averaging. Equal-answer averaging
 reduces this length imbalance without changing targets or evaluation metrics.
 Use `--loss_normalization token` in a separate fresh run as the legacy control.
-Other datasets keep token averaging. Validation loss always uses token averaging.
+Other legacy datasets keep token averaging; fresh native runs use example
+averaging. Validation loss always uses token averaging.
 Logs and checkpoints record the training objective, and resume inherits it
-unless an explicit conflicting override is supplied. The effect on validation
+and rejects conflicting overrides for the saved recipe. The effect on validation
 quality has not yet been measured.
+
+## Resume and checkpoints
 
 For resuming, omit `--epochs` to inherit the saved total epoch target and schedule.
 To continue a run originally targeting 3 epochs up to a total of 20, pass
@@ -287,6 +435,17 @@ without these fields retain 256-pixel crop preprocessing and question-only OT
 memory. Evaluation, single-image prediction, and diagnostics use the checkpoint's
 image transform automatically.
 
+New checkpoints use format 5. Legacy checkpoints contain full model weights;
+native checkpoints contain trainable OT/LoRA parameters and references to pinned
+base weights, plus resumable optimizer/scheduler/AMP/RNG state. Keep access to
+the base model assets when loading a native checkpoint. Loading accepts formats
+2–5; training resume accepts formats 3–5. Use `last.pt` to continue the latest
+saved state; `best_loss.pt` and `best_rouge.pt` record their own selection metric.
+
+## Other legacy training commands
+
+### PlantExpertVQA
+
 To train the OT model on this PlantExpertVQA subset:
 
 ```bash
@@ -304,8 +463,8 @@ It saves
 `--resume data/plantexpert_model/last.pt` to continue an interrupted run, with
 `--epochs` set to the desired total epoch count. `--device auto` chooses CUDA,
 then Apple MPS, then CPU. To choose explicitly, replace it with `--device cpu`
-or `--device cuda` (NVIDIA GPU), or `--device mps` (Apple GPU). The current
-`ot-vqa` environment reports CPU only.
+or `--device cuda` (NVIDIA GPU), or `--device mps` (Apple GPU). Check device
+availability in your active environment.
 
 After training, evaluate the PlantExpert validation split with:
 
@@ -315,7 +474,7 @@ python test.py --dataset plantexpert --split dev \
   --report_json data/plantexpert_model/val_report.json
 ```
 
-## Train
+### CUDA and distributed training
 
 Training uses OT fusion with the configured image encoder (SigLIP for the current
 SciVQA preset), MiniLM question encoder, and autoregressive answer decoder. OT settings are saved in each
@@ -345,7 +504,9 @@ default of 4 if the GPU runs out of memory. `--device auto` also uses CUDA when
 available, but can fall back to another device.
 
 Training writes `last.pt`, the best checkpoint under the validation selection
-metric as `best.pt` (ROUGE-L F1 for SciVQA, loss for other datasets), a JSONL
+metric as `best.pt` (ROUGE-L F1 for fresh SciVQA runs, loss for other datasets),
+independent `best_loss.pt` and `best_rouge.pt` snapshots when those metrics
+improve, a JSONL
 metric history, an evaluation plot, and `run_config.json` with dataset hashes.
 Add `--save_every_epoch` to retain `epoch_0001.pt`, `epoch_0002.pt`, and so on.
 Each epoch file is a full resumable checkpoint, so 100 files can use substantial disk space.
@@ -375,8 +536,8 @@ Use `/kaggle/working` for output because Kaggle input datasets are read-only.
 Resume with the same command plus `--resume /kaggle/working/plantexpert_model/last.pt`.
 This command updates `last.pt` after every epoch without accumulating 100 large
 files. Add `--save_every_epoch` only if you need a separate file for each epoch.
-The default early-stopping patience is 8 epochs; this command disables it to
-run all 100 epochs.
+The shared early-stopping patience is 10 epochs (8 for the SciVQA preset);
+this command disables it to run all 100 epochs.
 Set `--ot_dustbin_mass 0` for a full-OT ablation. Partial OT defaults to mass
 `0.2`, Sinkhorn epsilon `0.05`,
 20 iterations, and dustbin-to-dustbin cost `1.0`. These values require
@@ -408,6 +569,10 @@ OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 python -u test.py \
   --predictions_csv results/OT_fusion_0410_test_predictions.csv \
   --report_json results/OT_fusion_0410_test_report.json
 ```
+
+The same `test.py --checkpoint ...` entry point loads either model family from
+the saved configuration. For native runs, supply the matching SciVQA paths;
+the Qwen base/query weights are loaded from the checkpoint's pinned revisions.
 
 Use the dataset the checkpoint was trained on. If it was trained on GQA,
 replace both `plantexpert_dataset` paths with `gqa_dataset`.
@@ -471,8 +636,9 @@ record `answer_postprocessing=wordpiece_numeric_spacing_v1`. This fixes
 presentation and can affect BERTScore/exact matching; the existing ROUGE
 tokenizer already ignores decimal punctuation and spaces. Reevaluate old
 checkpoints with the same code when comparing experiments.
-Training logs use `train_<metric>` and `val_<metric>`;
-history diagnostics accept the same nine-score schema.
+Use `--no-compute_bertscore` for six ROUGE scores during SciVQA pilots; omit it
+for the full nine-score evaluation. Training logs use `train_<metric>` and
+`val_<metric>`; history diagnostics accept the same nine-score schema.
 
 For PlantExpertVQA and unrecognized dataset paths, evaluation reports the six PlantExpertVQA paper metrics: case-insensitive exact
 match, SQuAD-style token F1, BLEU-1, BLEU-2, ROUGE-L F1, and BERTScore-F1.
@@ -484,14 +650,17 @@ change it with `--bertscore_model`, `--no-bertscore_rescale`, or
 does not define empty-answer scoring; this implementation assigns BERTScore 1
 when both answers are empty and 0 when only one is empty. The paper does not
 specify every tokenizer and BERTScore setting, so these scores should
-not be treated as numerically identical to its published results. The local
-5,000/1,000 train/validation subset also differs from the paper's full test
-set. Throughput and peak CUDA memory describe VQA generation and loss only.
+not be treated as numerically identical to its published results. Sampled local
+train/validation subsets also differ from the paper's full test set. Throughput and peak CUDA memory describe VQA generation and loss only.
 If your CSV has a `question_type` column, the prediction export
 includes it. The paper's results are for image-text retrieval; VQA quality
 must be established with this repository's generated-answer evaluation.
 
 ## Predict
+
+`predict.py` also selects the family from the checkpoint. SciVQA checkpoints
+with figure context require `--caption` and `--figure_type`; optional
+`--answer_options` accepts a JSON list of label/text objects.
 
 ```bash
 python predict.py \
@@ -502,8 +671,10 @@ python predict.py \
 
 ## Diagnose training
 
-`diagnose_training.py` reports overfitting, output collapse, and sensitivity to
-shuffled images or questions.
+`diagnose_training.py` inspects the legacy model for overfitting, output collapse
+and sensitivity to shuffled images or questions. For native Qwen runs, use
+`metrics.jsonl`, `scripts/check_t4_pilot.py`, the evidence scripts and
+`test.py` prediction/report exports.
 
 ```bash
 python diagnose_training.py \
@@ -516,7 +687,7 @@ python diagnose_training.py \
 
 Codex reads repository instructions from [`AGENTS.md`](AGENTS.md) and discovers project skills under [`.agents/skills/`](.agents/skills/). The original `.agent/` directory is retained for the existing Gemini setup. The Codex guidance treats question-conditioned partial Optimal Transport as the core image-question fusion path; claimed VQA gains still require measured validation results and controlled comparisons.
 
-## SciVQA evidence-plan implementation (2026-10-15)
+## Prompt and decoding compatibility
 
 The legacy OT model remains the default. Fresh runs use `scivqa-v2` prompts
 (panel **count**, no guessed target panel) and `task-v2` decoding (no numeric
@@ -525,19 +696,12 @@ To evaluate a correctness intervention on an old checkpoint, explicitly pass
 `--prompt_version scivqa-v2 --decode_version task-v2`; this is an input/decode
 intervention, not a retrained accuracy result.
 
-The new `--model_family qwen3_vl` path preserves the native processor, image
-placeholders, M-RoPE, KV cache and all DeepStack levels. Query-only frozen
-MiniLM representations condition merged visual features through partial OT.
-`--adapter_control native|pooled` and `--plan_control independent` are explicit
-research controls; OT is the default. Gate zero gives native no-op parity;
-random output projections let the gates learn on the first update.
+The [implementation runbook](.agents/plans/scivqa-implementation-runbook.md)
+records the evidence plan and remaining acceptance checks. Use the current
+[Qwen training recipe](#train-qwen3-vl-with-ot-and-optional-lora) for the CLI.
 
-See [the implementation and T4 runbook](.agents/plans/scivqa-implementation-runbook.md)
-for the pinned environment, pilot commands, controlled comparisons and remaining
-acceptance gates. **No >80% accuracy claim is implied by implementation or smoke
-tests.** CUDA/NF4, two-T4 memory and quality must be measured on that hardware.
+## Validation checks
 
-Run persistent regression tests with `python -m pytest tests -q` after installing
-`transformers==5.5.0`, `peft==0.18.1`, `accelerate==1.13.0` and pytest. Tests use
+Install `requirements.txt`, then run `python -m pytest tests -q`. Tests use
 small native Qwen models, CPU DDP, and available device checks; they do not
 require downloading 2B weights or evaluating the held-out test split.

@@ -3,9 +3,9 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="Source-grounded architecture and component guide to the optimal transport path in OT-VQA.">
+  <meta name="description" content="Legacy SigLIP/MiniLM and native Qwen3-VL optimal transport architecture, project tree, configuration and usage.">
   <meta name="color-scheme" content="light">
-  <title>OT-VQA · Optimal transport architecture and paper methodology</title>
+  <title>OT-VQA · Legacy and Qwen3-VL optimal transport architecture</title>
   <style>
     :root { --ink:#182a38; --muted:#546674; --paper:#f5f6f3; --line:#d8e1dd; --green:#146c58; --soft:#eaf4ee; --nav:#142d2c; --orange:#9e5818; }
     * { box-sizing:border-box; }
@@ -98,10 +98,11 @@
 <div class="layout">
   <aside aria-label="Architecture guide">
     <div class="brand">OT / VQA</div>
-    <div class="side-note">Optimal transport architecture<br>Repository guide · 11 October 2026</div>
+    <div class="side-note">Optimal transport architecture<br>Repository guide · 17 October 2026</div>
     <nav aria-label="Sections">
       <a href="#overview">01 · Overview</a>
-      <a href="#architecture">02 · Architecture</a>
+      <a href="#native">Qwen3-VL · Native OT adapter</a>
+      <a href="#architecture">02 · Legacy architecture</a>
       <a href="#components">03 · Encoders &amp; components</a>
       <a href="#shapes">04 · Tensor contracts</a>
       <a href="#transport">05 · Partial transport</a>
@@ -112,7 +113,7 @@
       <a href="#configuration">10 · Configuration</a>
       <a href="#workflow">11 · Run &amp; evaluate</a>
       <a href="#diagnostics">12 · Diagnostics</a>
-      <a href="#source-map">13 · Source map</a>
+      <a href="#source-map">13 · Project tree &amp; source map</a>
       <a href="#comparison">14 · Comparing OT</a>
       <a href="#formal-method">15 · Formal methodology</a>
       <a href="#derivations">16 · Derivations &amp; properties</a>
@@ -128,27 +129,56 @@
     <header>
       <div class="eyebrow">Architecture / implementation / optimal transport</div>
       <h1>From visual evidence<br>to grounded answers.</h1>
-      <p>How this repository uses partial optimal transport to align image locations with question tokens, build multimodal memory, and generate an answer. Includes formal derivations, a worked example, and material for writing the method and experiments sections of a paper.</p>
-      <div class="chips"><span class="chip">Frozen image encoder</span><span class="chip">Trainable question encoder</span><span class="chip">Cosine costs</span><span class="chip">Log-space Sinkhorn</span><span class="chip">Dustbin capacity</span></div>
+      <p>How the default SigLIP/MiniLM model and the native Qwen3-VL model use question-conditioned partial optimal transport. Includes current training defaults, a project tree, formal derivations, and an interactive transport example. Code and saved checkpoint configuration are authoritative.</p>
+      <div class="chips"><span class="chip">Frozen image encoder</span><span class="chip">Configurable question freezing</span><span class="chip">Cosine costs</span><span class="chip">Log-space Sinkhorn</span><span class="chip">Dustbin capacity</span></div>
     </header>
 
     <section id="overview">
       <div class="kicker">01 / The implemented system</div>
       <h2>Optimal transport is the fusion layer</h2>
-      <p class="lead">Given an image and an English question, <a href="../model/vqa_model.py"><code>VQAModel</code></a> extracts spatial image features and contextual question features. The model always uses OT fusion: <a href="../model/optimal_transport.py"><code>PartialTransportFusion</code></a> solves a differentiable matching problem between them. The matching determines which visual evidence enriches each question token.</p>
+      <p class="lead">The default <code>--model_family legacy</code> uses <a href="../model/vqa_model.py"><code>VQAModel</code></a>: frozen SigLIP image features and MiniLM question states feed <a href="../model/optimal_transport.py"><code>PartialTransportFusion</code></a>, then a custom causal decoder generates the answer. The opt-in <code>--model_family qwen3_vl</code> instead conditions native visual features with an OT adapter before the pretrained Qwen decoder. OT is the default in both families; native/pooled adapters are explicit research controls.</p>
       <div class="grid">
         <div class="card"><span class="tag">REPRESENT</span><h3>Keep local information</h3><p>Preserve spatial image locations and individual question tokens instead of reducing both inputs to a single vector before fusion.</p></div>
         <div class="card"><span class="tag">ALIGN</span><h3>Allocate shared mass</h3><p>Use one transport plan with prescribed row and column mass. Two dustbins give local content an alternative to matching directly.</p></div>
         <div class="card"><span class="tag">GENERATE</span><h3>Read grounded memory</h3><p>A causal answer decoder reads one global memory token plus visually enriched question tokens and predicts the next answer token.</p></div>
       </div>
-      <div class="callout"><strong>What is learned?</strong><p>The question encoder, feature projections, memory construction, decoder, and vocabulary head learn from answer-token cross-entropy. The OT solver has no learnable weights of its own; gradients flow through its finite sequence of operations into the costs and features.</p></div>
+      <div class="callout"><strong>What is learned?</strong><p>In legacy runs, projections, memory construction, decoder and output head are trainable; question-encoder freezing is configurable and enabled by the SciVQA preset. Its training objective combines answer CE with optional local OT cost. In native runs, vision, MiniLM and base language weights stay frozen; OT adapter parameters and optional LoRA weights train. Sinkhorn itself has no trainable parameters.</p></div>
       <p class="small">This guide describes the checked-in OT implementation and its supporting pipeline. The interactive example uses synthetic costs and is not a trained-model prediction.</p>
       <div class="callout"><strong>Reading path for writing a paper</strong><p>Read Sections 2–7 for the architecture, then <a href="#formal-method">formal methodology</a>, <a href="#derivations">derivations</a>, and the <a href="#algorithm">algorithm</a>. Use <a href="#paper-experiments">experiment design</a> to plan evidence and <a href="#manuscript">manuscript material</a> to draft the paper. Mathematical properties below are derived from this implementation; proposed experiments are explicitly labeled and no benchmark results are invented.</p></div>
     </section>
 
+    <section id="native">
+      <div class="kicker">Model families / Native integration</div>
+      <h2>Qwen3-VL keeps its native visual-language path</h2>
+      <p><a href="../model/pretrained_vlm.py"><code>PretrainedVLM</code></a> uses the Qwen processor, chat template, image placeholders, M-RoPE, merged visual token order, every DeepStack level and generation KV cache. It does not build the legacy global-plus-question decoder memory.</p>
+      <div class="equation">RGB image → native processor → frozen Qwen vision → merged main + DeepStack features
+question + choices → frozen MiniLM → valid query token states
+main visual features + query states → single-head partial OT → aligned query values
+visual level ℓ → visual level ℓ + tanh(gℓ) · outputℓ(aligned query)
+conditioned native visual sequence + prompt → Qwen language model (+ optional LoRA) → answer</div>
+      <div class="grid two">
+        <div class="card"><h3>Query-only conditioning</h3><p>The dataset provides a query containing the question and answer choices; task-format metadata and figure context are added only to the native prompt. Cost projections map merged main features and query states to <code>cost_dim=128</code>. Uniform local marginals and two global-feature dustbins define the plan. Its local block aggregates query values for each visual token.</p></div>
+        <div class="card"><h3>Trainable residuals</h3><p>Each main/DeepStack output receives a separate projection of the same aligned query values. The learned <code>tanh</code> gates start at zero, so the initial adapter is a no-op; output projections are randomly initialized so the gates can receive gradients immediately. LoRA is optional: LoRA rank 0 trains only the adapter; the documented Kaggle recipe uses rank 16 on language self-attention Q/K/V/O projections.</p></div>
+        <div class="card"><h3>Native labels and generation</h3><p>Prompt and padding labels use <code>−100</code>; answer tokens plus EOS receive supervision. The forward pass selects positions that predict answer tokens, applying the causal shift once. Generation is greedy with <code>use_cache=True</code>. Evaluation runs a reference forward pass and a separate generation pass; unlike legacy evaluation, these do not share a single visual encoding.</p></div>
+        <div class="card"><h3>Budgets and supported controls</h3><p>Defaults are at most 256 merged visual tokens, 256 MiniLM query tokens, 64 answer tokens and 2048 total sequence tokens. Overflow raises an error. Native training supports single-head partial OT; multi-head, FGW and unbalanced settings are rejected. NF4 is CUDA-only; unquantized execution can use CPU/MPS subject to memory.</p></div>
+      </div>
+      <div class="table-wrap"><table>
+        <caption>Explicit native ablation controls; use a fresh run for training comparisons.</caption>
+        <thead><tr><th>Setting</th><th>Behavior</th></tr></thead>
+        <tbody>
+          <tr><td><code>--adapter_control ot --plan_control learned</code></td><td>Default feature-dependent partial OT adapter.</td></tr>
+          <tr><td><code>--adapter_control native</code></td><td>Bypass visual adaptation; adapter parameters are frozen.</td></tr>
+          <tr><td><code>--adapter_control pooled</code></td><td>Pooled query conditioning with a relevance gate and trainable projections; no pairwise transport solve.</td></tr>
+          <tr><td><code>--plan_control independent</code></td><td>Replace the local plan by its independent coupling while retaining local row/column sums and all dustbin entries.</td></tr>
+        </tbody>
+      </table></div>
+      <p>The integration requires <code>transformers==5.5.0</code> and immutable 40-character <code>--vlm_revision</code>/<code>--query_revision</code> commits. See the <a href="../README.md#train-qwen3-vl-with-ot-and-optional-lora">README native training command</a> and <a href="../.agents/plans/scivqa-kaggle-final-review.md">Kaggle runbook</a> for the pinned two-GPU recipe and pilot checks. CUDA/NF4 memory, throughput and answer quality require hardware measurements; implementation does not establish a quality gain.</p>
+    </section>
+
     <section id="architecture">
       <div class="kicker">02 / Full pipeline and model architecture</div>
-      <h2>From dataset preparation to a generated answer</h2>
+      <h2>Legacy pipeline: dataset preparation to a generated answer</h2>
+      <div class="callout"><strong>Scope of the detailed equations and diagrams.</strong><p>The remaining feature/memory diagrams and mathematical derivations describe the legacy single-head, balanced, feature-cost baseline unless an extension is named. The current SciVQA legacy preset uses four OT heads and an auxiliary loss. Optional visual memory, FGW and unbalanced OT change the stated baseline behavior. The native Qwen adapter is described separately above.</p></div>
       <p class="lead">The complete process has three connected parts: prepare the data and initialize the OT model; train and select a checkpoint; then load that checkpoint for held-out evaluation or single-example inference. The model-level diagram below expands the encoding and decoding operation used within this lifecycle.</p>
       <div class="diagram" id="full-pipeline">
         <svg viewBox="0 0 940 1290" role="img" aria-labelledby="pipeline-title pipeline-desc">
@@ -200,12 +230,12 @@
             </g>
             <g font-size="13">
               <text x="46" y="86">Sample/download or provide CSV + images → validate rows and paths → RGB loading</text>
-              <text x="46" y="108">Resize / crop / tensor → DataLoader → (annotation IDs, images, questions, answers)</text>
+              <text x="46" y="108">Resize / crop or pad / tensor → DataLoader → (annotation IDs, images, questions, answers)</text>
               <text x="46" y="218">Resolve OT flags, backbones, token limits, seed and device; construct model and losses</text>
               <text x="46" y="243">Set frozen/trainable modules; create AdamW + scheduler; optionally restore state from last.pt</text>
               <text x="46" y="746">No gradients, evaluation mode: full training split and validation split</text>
-              <text x="46" y="770">Each batch: one image/question encoding → unsmoothed reference loss + greedy answers → metrics</text>
-              <text x="46" y="891">Save last.pt every epoch; update best.pt only when validation token loss decreases</text>
+              <text x="46" y="770">Each batch: legacy encoding → unsmoothed reference loss + generated answers → metrics</text>
+              <text x="46" y="891">Save last.pt; update best.pt using the configured validation selection metric</text>
               <text x="46" y="915">Append metrics / patience state; continue next epoch or stop at patience / total epoch limit</text>
               <text x="46" y="1042">Reconstruct saved OT configuration, strictly load model weights, move to device, set eval mode</text>
               <text x="46" y="1179">Test CSV + images → OT memory → loss + answers</text>
@@ -232,7 +262,7 @@
                 <text x="717" y="393">Reference prefix embeddings</text><text x="717" y="413">Causal masks → next-token logits</text>
                 <text x="157" y="542">Shifted answer targets</text><text x="157" y="562">Ignore PAD; training label smoothing</text>
                 <text x="434" y="542">Unroll through decoder and OT</text><text x="434" y="562">Image backbone stays frozen</text>
-                <text x="717" y="542">Update trainable parameters</text><text x="717" y="562">Advance scheduler after each batch</text>
+                <text x="717" y="542">Update trainable parameters</text><text x="717" y="562">Advance after optimizer update</text>
               </g>
               <text x="688" y="636" font-size="11" fill="#a16830">dashed loop: updated weights are used for the next batch</text>
             </g>
@@ -245,7 +275,7 @@
       <div class="diagram">
         <svg viewBox="0 0 940 485" role="img" aria-labelledby="architecture-title architecture-desc">
           <title id="architecture-title">Optimal transport VQA architecture</title>
-          <desc id="architecture-desc">RGB images pass through preprocessing, a frozen image encoder, and an image projection. Questions pass through tokenization, a trainable question encoder, and a question projection. Both feed cosine costs with dustbins, log Sinkhorn, and grounded memory. Answer prefix embeddings feed a decoder which reads this memory and produces next token logits.</desc>
+          <desc id="architecture-desc">RGB images pass through preprocessing, a frozen image encoder, and an image projection. Questions pass through tokenization, a configurable question encoder, and a question projection. Both feed cosine costs with dustbins, log Sinkhorn, and grounded memory. Answer prefix embeddings feed a decoder which reads this memory and produces next token logits.</desc>
           <defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8" fill="#628175"/></marker></defs>
           <g fill="none" stroke="#628175" stroke-width="2" marker-end="url(#arrow)">
             <path d="M160 60 H193"/><path d="M387 60 H423"/><path d="M607 60 H644"/>
@@ -273,12 +303,12 @@
           </g>
           <g text-anchor="middle" fill="#203b30" font-size="15" font-weight="650">
             <text x="85" y="65">RGB image</text>
-            <text x="291" y="51">Resize / crop / tensor</text><text x="291" y="76" font-size="12" font-weight="400">256 × 256 by default</text>
+            <text x="291" y="51">Resize / crop or pad / tensor</text><text x="291" y="76" font-size="12" font-weight="400">256 crop / SciVQA 384 pad</text>
             <text x="516" y="51">Image encoder</text><text x="516" y="76" font-size="12" font-weight="400">Frozen · spatial features</text>
             <text x="783" y="51">Project image values → D</text><text x="783" y="76" font-size="12" font-weight="400">Keep patches; remove ViT CLS if present</text>
             <text x="85" y="159">Question text</text>
             <text x="291" y="144">Tokenizer + mask</text><text x="291" y="169" font-size="12" font-weight="400">PAD / specials excluded from OT</text>
-            <text x="516" y="144">Question encoder</text><text x="516" y="169" font-size="12" font-weight="400">Trainable · contextual tokens</text>
+            <text x="516" y="144">Question encoder</text><text x="516" y="169" font-size="12" font-weight="400">Configurable · token states</text>
             <text x="783" y="144">Project question values → D</text><text x="783" y="169" font-size="12" font-weight="400">Local tokens + pooled global vector</text>
             <text x="110" y="281">Cosine cost + dustbins</text><text x="110" y="306" font-size="12" font-weight="400">Prescribe marginals a, b</text>
             <text x="327" y="281">Log Sinkhorn</text><text x="327" y="306" font-size="12" font-weight="400">Extended transport plan P</text>
@@ -299,17 +329,17 @@
         <tbody>
           <tr><td>1. Dataset materialization</td><td>Source data → split CSVs and required image files.</td><td>Optional <a href="../utils/download_gqa.py">GQA</a> or <a href="../utils/download_plantexpert.py">PlantExpert</a> downloader; existing compatible files can be supplied directly.</td></tr>
           <tr><td>2. Row validation</td><td>CSV → validated question/answer rows and annotation IDs.</td><td><a href="../utils/data_processing.py"><code>load_dataframe()</code></a> checks required fields and normalizes whitespace. Scored evaluation requires references.</td></tr>
-          <tr><td>3. Image loading and batching</td><td>Rows + image root → <code>(ids, images, questions, answers)</code>.</td><td><a href="../utils/vqa_dataset.py"><code>VQADataset</code></a> opens RGB files; <a href="../configs/config.py"><code>Config.transforms</code></a> resizes/crops/converts tensors; the DataLoader collates a batch.</td></tr>
+          <tr><td>3. Image loading and batching</td><td>Rows + image root → <code>(ids, images, questions, answers)</code>.</td><td><a href="../utils/vqa_dataset.py"><code>VQADataset</code></a> opens RGB files; <a href="../utils/image_processing.py"><code>build_image_transform()</code></a> prepares tensors using saved crop/pad settings; the DataLoader collates a batch.</td></tr>
           <tr><td>4. Run initialization</td><td>Arguments / resume checkpoint → configured model, device and optimizer state.</td><td><a href="../train.py"><code>_run_training()</code></a> resolves defaults, seeds the run, initializes modules, losses, AdamW and scheduler; optional <a href="../utils/checkpoint.py"><code>restore_training_state()</code></a> restores weights, optimizer, scheduler and RNG state.</td></tr>
           <tr><td>5. Image representation</td><td><code>[B,3,H,W]</code> → projected spatial values <code>[B,K,D]</code>.</td><td><a href="../model/features_extraction.py"><code>ImageEmbedding</code></a> applies processor handling and the frozen backbone. The model projects feature width and excludes ViT CLS when present.</td></tr>
           <tr><td>6. Question representation</td><td>Strings → token states, content mask and global summary.</td><td><code>QuestionEmbedding.encode_tokens()</code> tokenizes/pads/truncates, encodes contextual states, blocks PAD/specials for local matching, and pools the global feature.</td></tr>
           <tr><td>7. Transport construction</td><td>Projected features + mask → <code>C̃, a, b</code>.</td><td><a href="../model/optimal_transport.py"><code>PartialTransportFusion.forward()</code></a> constructs local/global cosine costs, dustbin row/column, and uniform valid-token marginals.</td></tr>
-          <tr><td>8. Alignment</td><td><code>C̃, a, b</code> → approximate extended plan <code>P⁽ˢ⁾</code>.</td><td><code>log_sinkhorn()</code> performs FP32 masked log-space scaling for the configured iteration count. Optional diagnostics measure residuals and dustbin flows.</td></tr>
+          <tr><td>8. Alignment</td><td><code>C̃, a, b</code> → approximate extended plan <code>P⁽ˢ⁾</code>.</td><td><code>log_sinkhorn()</code> performs FP32 masked log-space scaling up to the configured iteration cap, with balanced early stopping. Optional diagnostics measure residuals and dustbin flows.</td></tr>
           <tr><td>9. Memory construction</td><td>Local plan + feature values → memory <code>[B,1+L,D]</code> and blocked mask.</td><td>Compute token-wise matched mass, aligned patch averages, visual gates and normalized residuals. Prepend global memory; zero and block invalid question positions.</td></tr>
           <tr><td>10. Reference-prefix decoding</td><td>Memory + tokenized answer prefix → logits <code>[B,A−1,V]</code>.</td><td><a href="../model/vqa_model.py"><code>forward()</code></a> shifts reference IDs; answer embeddings/projection feed the causal <a href="../model/decoder_model.py">decoder</a> and vocabulary head.</td></tr>
-          <tr><td>11. Optimization</td><td>Logits + shifted targets → updated trainable weights.</td><td><a href="../train.py"><code>train()</code></a> computes smoothed cross-entropy, clears gradients, backpropagates through OT, clips gradients, updates AdamW, and steps the scheduler.</td></tr>
-          <tr><td>12. Epoch scoring</td><td>Current model + train/dev batches → validation loss and generated-answer scores.</td><td><a href="../test.py"><code>evaluation()</code></a> calls <code>evaluate_batch()</code>. One encoding supports both unsmoothed reference loss and greedy generation; <a href="../utils/metrics.py">dataset metrics</a> score decoded answers.</td></tr>
-          <tr><td>13. Checkpoint selection</td><td>Validation loss + training state → <code>last.pt</code>, optional improved <code>best.pt</code>, history.</td><td><code>save_checkpoint()</code> stores resumable state. The epoch loop records metrics and patience, then continues or stops. Generated-answer scores do not select the checkpoint.</td></tr>
+          <tr><td>11. Optimization</td><td>Logits + shifted targets → updated trainable weights.</td><td><a href="../train.py"><code>train()</code></a> computes the configured CE plus optional OT cost, accumulates gradients, clips them, and advances AdamW/scheduler on successful optimizer updates.</td></tr>
+          <tr><td>12. Epoch scoring</td><td>Current model + train/dev batches → validation loss and generated-answer scores.</td><td><a href="../test.py"><code>evaluation()</code></a> calls <code>evaluate_batch()</code>. One encoding supports both unsmoothed reference loss and task-constrained greedy generation; <a href="../utils/metrics.py">dataset metrics</a> score decoded answers.</td></tr>
+          <tr><td>13. Checkpoint selection</td><td>Validation scores + training state → <code>last.pt</code>, optional improved <code>best.pt</code>, history.</td><td><code>save_checkpoint()</code> stores resumable state. The epoch loop records metrics and patience, then continues or stops. Fresh SciVQA runs select maximum validation ROUGE-L F1; other datasets select minimum validation loss by default. <code>--selection_metric</code> controls both <code>best.pt</code> and early stopping.</td></tr>
           <tr><td>14. Held-out evaluation</td><td>Best checkpoint + test rows → predictions and evaluation report.</td><td><a href="../test.py">test.py</a> reconstructs saved configuration, evaluates loss and generated answers, reports runtime, and optionally exports CSV/JSON.</td></tr>
           <tr><td>15. Single-example prediction</td><td>Checkpoint + RGB image + question → answer string.</td><td><a href="../predict.py">predict.py</a> preprocesses the input, calls <code>generate()</code>, then <code>answers_from_ids()</code> decodes the result.</td></tr>
         </tbody>
@@ -327,15 +357,15 @@
       <h2>What each component contributes</h2>
       <div class="grid two">
         <div class="card"><span class="tag">DATA CONTRACT</span><h3>CSV processing &amp; dataset</h3><p><a href="../utils/data_processing.py"><code>load_dataframe()</code></a> checks required columns and normalizes whitespace. <a href="../utils/vqa_dataset.py"><code>VQADataset</code></a> opens images as RGB and returns <code>(anno_id, image, question, answer)</code>. A missing <code>anno_id</code> is generated. Training and scored evaluation require answers.</p></div>
-        <div class="card"><span class="tag frozen">FROZEN</span><h3>ImageEmbedding</h3><p>The default backbone is <code>apple/mobilevitv2-2.0-imagenet1k-256</code>. Spatial maps flatten from <code>[B,C,Hf,Wf]</code> to <code>[B,K,C]</code>. The image processor applies the configured channel order and normalization. Backbone weights stay frozen, in evaluation mode, under <code>torch.no_grad()</code>.</p></div>
-        <div class="card"><span class="tag">TRAINABLE</span><h3>QuestionEmbedding</h3><p>The default is <code>sentence-transformers/all-MiniLM-L12-v2</code>. The tokenizer pads to the batch length and truncates to the question limit. Contextual token states go to OT. Padding and special tokens are excluded from local matching; punctuation and subword pieces remain content tokens unless marked special.</p></div>
+        <div class="card"><span class="tag frozen">FROZEN</span><h3>ImageEmbedding</h3><p>The default backbone is <code>google/siglip-base-patch16-384</code>. SigLIP supplies spatial token states; supported convolutional backbones flatten maps from <code>[B,C,Hf,Wf]</code> to <code>[B,K,C]</code>. The image processor applies the configured channel order and normalization. Backbone weights stay frozen, in evaluation mode, under <code>torch.no_grad()</code>.</p></div>
+        <div class="card"><span class="tag">CONFIGURABLE FREEZING</span><h3>QuestionEmbedding</h3><p>The default is <code>sentence-transformers/all-MiniLM-L12-v2</code>. SciVQA freezes it by default; other legacy runs can train it. The tokenizer pads to the batch length and truncates to the question limit. Contextual token states go to OT. Padding and special tokens are excluded from local matching; punctuation and subword pieces remain content tokens unless marked special.</p></div>
         <div class="card"><span class="tag">GLOBAL CONTEXT</span><h3>Question &amp; image summaries</h3><p>For names beginning <code>sentence-transformers/</code>, the question summary is the normalized mean over attention-mask-valid states, including special tokens. Other supported text paths use the first token state. The image summary is the mean of projected spatial tokens. Both influence dustbin costs and global memory.</p></div>
         <div class="card"><span class="tag">TRAINABLE</span><h3>Feature &amp; fusion projections</h3><p><code>image_projection</code> maps the image width to <code>D</code>, or is identity when widths match. Inside OT, <code>question_projection</code> always maps text width to <code>D</code>. <code>grounding_projection</code> transforms aligned visual evidence, while <code>global_projection</code> combines the two global summaries.</p></div>
         <div class="card"><span class="tag frozen">FROZEN BY CLI DEFAULT</span><h3>AnswerEmbedding</h3><p>A separate pretrained embedding module from the same text model embeds answer IDs, including their positions. It does not run the full question encoder. <code>answer_projection</code> maps its width to <code>D</code> when needed. CLI training freezes the embedding weights; direct <code>VQAModel()</code> construction leaves them trainable by default.</p></div>
       </div>
-      <h3>Shared answer decoder, used by the OT model</h3>
+      <h3>Custom answer decoder, used by the legacy model</h3>
       <p><a href="../model/decoder_model.py"><code>Decoder</code></a> stacks layers containing causal answer self-attention, cross-attention to OT memory, and a two-layer feed-forward network with ReLU. Each sublayer uses dropout, a residual connection, and post-residual normalization. Attention has learned query/key/value projections and scales dot products by the square root of the per-head width.</p>
-      <p>The output head is <code>Dropout(0.3) → Linear(D,D) → GELU → Linear(D,V)</code>. Its final vocabulary size comes from the answer embedding table. The head is a separate learned projection; it is not tied to the embedding weights.</p>
+      <p>The untied head is <code>Dropout(max(drop_prob,0.2)) → Linear(D,D) → GELU → Linear(D,V)</code>. With <code>--tie_weights</code> (enabled in the SciVQA preset), <code>TiedOutputProjection</code> maps decoder states to the answer embedding width and reuses that embedding table as the output weights, with a learned vocabulary bias. Its default dropout is <code>max(drop_prob,0.25)</code>; <code>--output_drop_prob</code> overrides either head’s dropout.</p>
       <div class="callout"><strong>Cross-attention inside the decoder is part of the OT pipeline.</strong><p>It reads already-fused memory. The transport plan itself is used earlier to construct that memory and is not passed directly to decoder attention.</p></div>
     </section>
 
@@ -347,14 +377,14 @@
         <caption>Shapes along the OT path; spatial count K depends on the selected image backbone.</caption>
         <thead><tr><th>Tensor</th><th>Shape</th><th>Meaning</th></tr></thead>
         <tbody>
-          <tr><td>Input images</td><td><code>[B,3,256,256]</code></td><td>Default RGB float tensors after preprocessing.</td></tr>
+          <tr><td>Input images</td><td><code>[B,3,Simg,Simg]</code></td><td>Legacy RGB tensors: generic default 256/crop; SciVQA 384/pad.</td></tr>
           <tr><td>Projected spatial values X</td><td><code>[B,K,D]</code></td><td>Image CLS is removed for ViT before fusion; MobileViTV2 uses all spatial locations.</td></tr>
           <tr><td>Question states / projected Q</td><td><code>[B,L,T]</code> / <code>[B,L,D]</code></td><td>Full padded sequence retained, including masked positions.</td></tr>
           <tr><td>Content mask M</td><td><code>[B,L]</code></td><td><strong>True = valid</strong> for the mask passed to OT. Every sample needs at least one valid token.</td></tr>
-          <tr><td>Extended cost C / plan P</td><td><code>[B,K+1,L+1]</code></td><td>Last row = image dustbin; last column = question dustbin.</td></tr>
+          <tr><td>Extended cost C / plan P</td><td><code>[B,K+1,L+1]</code> per head</td><td>For multiple heads the solver batches <code>B·H</code> plans; diagnostic plans use <code>[B,H,K+1,L+1]</code>. Last row/column are dustbins.</td></tr>
           <tr><td>Row / column marginals</td><td><code>[B,K+1]</code> / <code>[B,L+1]</code></td><td>Zero question mass for padding and specials; each side totals one.</td></tr>
           <tr><td>Local plan / aligned evidence</td><td><code>[B,K,L]</code> / <code>[B,L,D]</code></td><td>The dustbin row and column do not enter the visual weighted average.</td></tr>
-          <tr><td>Memory / memory_blocked</td><td><code>[B,1+L,D]</code> / <code>[B,1+L]</code></td><td>Global token followed by grounded question positions. <strong>True = blocked</strong> for decoder memory.</td></tr>
+          <tr><td>Memory / memory_blocked</td><td><code>[B,1+L,D]</code> / <code>[B,1+L]</code></td><td>Global token followed by grounded question positions; optional visual memory adds K tokens. <strong>True = blocked</strong> for decoder memory.</td></tr>
           <tr><td>Teacher-forced logits / targets</td><td><code>[B,A−1,V]</code> / <code>[B,A−1]</code></td><td>Prefix IDs predict the shifted next-token targets.</td></tr>
           <tr><td>Decoder self-mask / cross-mask</td><td><code>[B,1,S,S]</code> / <code>[B,1,1,1+L]</code></td><td>For prefix length S, block future and PAD keys; cross-mask broadcasts over answer positions and heads.</td></tr>
         </tbody>
@@ -400,18 +430,18 @@ subject to:           P · 1 = a,    Pᵀ · 1 = b</div>
     <section id="sinkhorn">
       <div class="kicker">06 / Numerical engine</div>
       <h2>Sinkhorn scaling in log space</h2>
-      <p><a href="../model/optimal_transport.py"><code>log_sinkhorn()</code></a> checks shape compatibility, nonnegative marginals, matching total mass, positive epsilon/iteration count, and a positive row and column in every sample. It converts the cost and marginals to FP32, even when inputs use half precision.</p>
+      <p><a href="../model/optimal_transport.py"><code>log_sinkhorn()</code></a> checks shape compatibility, nonnegative marginals, matching total mass for balanced solves, positive epsilon/iteration count, and a positive row and column in every sample. It converts the cost and marginals to FP32, even when inputs use half precision.</p>
       <div class="equation">log K = −C / ε
-repeat ot_iterations times:
+repeat up to ot_iterations times (balanced early stop below):
   log uᵢ = log aᵢ − logsumexpⱼ(log Kᵢⱼ + log vⱼ)
   log vⱼ = log bⱼ − logsumexpᵢ(log Kᵢⱼ + log uᵢ)
 Pᵢⱼ = exp(log Kᵢⱼ + log uᵢ + log vⱼ)</div>
       <div class="grid">
         <div class="card"><h3>Stable reductions</h3><p>Log-sum-exp avoids directly scaling an extremely small exponential kernel. Each row update enforces source mass given the current column scaling, then each column update enforces destination mass.</p></div>
         <div class="card"><h3>Zero-mass masking</h3><p>Invalid pairs initially use a finite <code>−1e4</code> kernel sentinel. Invalid row/column dual variables are masked to <code>−∞</code>, and the final invalid plan entries are set to zero.</p></div>
-        <div class="card"><h3>Fixed iterations</h3><p>The code runs the configured number of iterations; there is no residual-based early stop. Twenty iterations are the default, not a guarantee of convergence. Inspect both marginal residuals.</p></div>
+        <div class="card"><h3>Iteration cap and early stopping</h3><p>Twenty iterations are the default maximum. Balanced solves check the maximum row residual after at least five updates and stop when it is below <code>tol=1e−4</code>. Unbalanced solves disable this early stop. Neither the cap nor the tolerance guarantees answer quality; inspect both residuals.</p></div>
       </div>
-      <p>The plan remains connected to PyTorch autograd. Cost and plan work scales roughly as <code>O(B·K·L)</code> per iteration, with cost construction also depending on width <code>D</code>. Training retains intermediate operations for backward propagation, so increasing iterations also increases training work and memory use.</p>
+      <p>The plan remains connected to PyTorch autograd. Cost and plan work scales roughly as <code>O(B·K·L)</code> per iteration, with cost construction also depending on width <code>D</code>. Training retains the executed operations for backward propagation. Increasing the iteration cap can increase training work and memory; the balanced stopping decision is a discrete check on the row residual.</p>
     </section>
 
     <section id="memory">
@@ -427,13 +457,13 @@ groundedⱼ = LayerNorm(qⱼ + gateⱼ · grounding_projection(alignedⱼ))</div
 memory = concat([global], grounded question positions)
 memory_blocked = concat([False], NOT content_mask)</div>
       <p>Invalid question positions are explicitly zeroed after grounding and blocked from decoder cross-attention. The always-visible global token offers a second visual/text context route alongside local transport. Consequently, this model can use global image information even when local matches are weak.</p>
-      <div class="callout"><strong>The decoder memory is question-length, not patch-length.</strong><p>It contains <code>1+L</code> positions: a global token and the full padded question sequence. Raw image patches and dustbin positions do not become separate decoder memory tokens.</p></div>
+      <div class="callout"><strong>Question memory is the legacy default.</strong><p>It contains <code>1+L</code> positions. With <code>--ot_visual_memory</code>, the reverse direction of the same per-head plan aggregates question values for image positions, adding a gated residual and learned 2D coordinate projection. This appends K spatial tokens; the 384-pixel SciVQA SigLIP grid contributes 576 tokens. Dustbins never become memory tokens. Visual memory requires a square grid and defaults off.</p></div>
     </section>
 
     <section id="explorer" class="explorer">
       <div class="kicker">08 / Interactive method example</div>
       <h2>Inspect how transport mass moves</h2>
-      <p class="lead">This illustrative browser solver uses three image locations, three valid words, one PAD column, and two dustbins. It runs the same alternating log-space scaling equations. The hand-chosen cosine-range costs are synthetic; no encoder, checkpoint, or answer generation runs here.</p>
+      <p class="lead">This illustrative browser solver uses three image locations, three valid words, one PAD column, and two dustbins. It runs the same alternating log-space scaling equations. The hand-chosen cosine-range costs are synthetic; no encoder, checkpoint, or answer generation runs here. This single-head balanced demo uses the displayed iteration budget without the Python solver’s early stop, FGW or unbalanced relaxation.</p>
       <div class="panel">
         <div class="controls">
           <label for="rho">Dustbin mass ρ <output id="rho-value" for="rho">0.20</output><input id="rho" type="range" min="0" max="0.8" step="0.05" value="0.2"></label>
@@ -461,21 +491,21 @@ memory_blocked = concat([False], NOT content_mask)</div>
       <h3>The training loop</h3>
       <ol class="steps">
         <li><strong>Forward through OT and the decoder.</strong> Use reference-prefix embeddings, causal self-masks, and blocked-memory masks.</li>
-        <li><strong>Compute token cross-entropy.</strong> Training applies label smoothing (default 0.1). Validation uses unsmoothed cross-entropy. Both ignore the answer PAD ID.</li>
-        <li><strong>Backpropagate through memory and transport.</strong> Gradients reach projections and the question encoder through cost construction, Sinkhorn, aligned values, gates, and the global memory route. The image backbone remains frozen.</li>
-        <li><strong>Update trainable parameters.</strong> AdamW, default learning rate <code>1e−5</code>, weight decay 0.05, gradient clipping at 1.0, and linear learning-rate decay with zero warmup.</li>
-        <li><strong>Score generated answers on train and validation splits.</strong> Rank 0 performs the full scoring passes after each epoch. Within each evaluated batch, loss and generation share one encoding.</li>
-        <li><strong>Save and select.</strong> Save <code>last.pt</code> every epoch and <code>best.pt</code> when validation loss decreases. Early stopping uses validation loss with default patience 8.</li>
+        <li><strong>Compute the objective.</strong> Legacy SciVQA averages token CE within each answer, then across answers, and adds <code>0.05 × OT loss</code>. Shared defaults use token averaging and zero auxiliary weight. Legacy label smoothing defaults to 0.1; fresh native runs use 0. Validation always uses unsmoothed token CE without the auxiliary term. Legacy ignores PAD targets; native ignores <code>−100</code>.</li>
+        <li><strong>Backpropagate through memory and transport.</strong> Gradients reach trainable projections through costs, Sinkhorn, aligned values, gates and global memory. Question-encoder gradients depend on its freeze setting; SciVQA freezes it by default. The image backbone stays frozen.</li>
+        <li><strong>Update trainable parameters.</strong> Legacy AdamW uses <code>--lr</code> for fusion/decoder and optional <code>--encoder_lr</code> for unfrozen text/answer embeddings. SciVQA uses <code>1e−5</code>/<code>2e−6</code>, 5% warmup, weight decay 0.05 and clipping at 1.0. Native defaults use OT LR <code>1e−4</code> and LoRA LR <code>2e−5</code>. AMP and gradient accumulation are configurable.</li>
+        <li><strong>Score generated answers on train and validation splits.</strong> Rank 0 scores full validation after each epoch. <code>--train_eval_samples</code> chooses all training rows (−1), none (0), or a fixed seeded subset; legacy SciVQA uses 512 and native defaults to 0. Legacy loss and generation share an encoding; native evaluation uses separate forward/generation passes.</li>
+        <li><strong>Save and select.</strong> Save <code>last.pt</code> at the epoch boundary and update <code>best.pt</code> on the selected validation metric. Fresh SciVQA maximizes ROUGE-L F1; others minimize loss. Patience defaults to 8 for SciVQA and 10 otherwise. Independent loss/ROUGE best snapshots are also written when improved.</li>
       </ol>
-      <div class="callout amber"><strong>There is no separate OT loss in this implementation.</strong><p>The entropic objective defines the plan inside fusion. The training objective is answer-token cross-entropy; the code does not add transport cost, contrastive retrieval loss, supervised patch matching, or a dustbin penalty to that loss.</p></div>
-      <p><code>generate()</code> disables gradients, temporarily switches the model to evaluation mode, and restores its previous training state. Decoding recomputes attention over the whole growing prefix each step; this implementation has no KV cache or beam search.</p>
+      <div class="callout amber"><strong>Auxiliary alignment is separate from entropic regularization.</strong><p><code>ℒtrain = ℒCE + wOT · mean(Σ P_local · C_local)</code>. The auxiliary cost excludes dustbin blocks and entropy, and differentiates through both the local plan and cost. For legacy it averages sample/head plans. <code>--ot_loss_weight</code> defaults to 0.05 for legacy SciVQA, and 0 otherwise, including native runs. Validation loss excludes this term. There are no direct patch-alignment labels.</p></div>
+      <p><code>generate()</code> disables gradients, temporarily switches the model to evaluation mode, and restores its previous training state. Legacy decoding recomputes the growing prefix without a KV cache. Task constraints restrict binary/choice outputs; fresh <code>task-v2</code> removes the old numeric hard mask so abstention remains possible. Native generation uses Qwen’s KV cache and greedy decoding.</p>
     </section>
 
     <section id="configuration">
       <div class="kicker">10 / Reproducible settings</div>
       <h2>Defaults depend on the entry point</h2>
       <div class="table-wrap"><table>
-        <caption>Resolved defaults for a new CLI training run versus direct Python model construction.</caption>
+        <caption>Generic legacy CLI defaults versus direct Python construction; SciVQA and native overrides follow below.</caption>
         <thead><tr><th>Setting</th><th><code>python train.py</code></th><th><code>VQAModel()</code></th></tr></thead>
         <tbody>
           <tr><td>Fusion</td><td><code>ot</code></td><td><code>ot</code></td></tr>
@@ -494,11 +524,29 @@ memory_blocked = concat([False], NOT content_mask)</div>
         <thead><tr><th>OT flag</th><th>Constraint</th><th>Role</th></tr></thead>
         <tbody>
           <tr><td><code>--ot_epsilon</code></td><td>Positive</td><td>Entropy strength; influences concentration and numerical convergence.</td></tr>
-          <tr><td><code>--ot_iterations</code></td><td>Integer ≥ 1</td><td>Fixed solver work; inspect residuals to choose sufficient iterations.</td></tr>
+          <tr><td><code>--ot_iterations</code></td><td>Integer ≥ 1</td><td>Maximum solver updates; balanced solves can stop early on row residual.</td></tr>
           <tr><td><code>--ot_dustbin_mass</code></td><td><code>0 ≤ ρ &lt; 1</code></td><td>Capacity allocated to each dustbin; zero gives full local OT.</td></tr>
           <tr><td><code>--ot_dustbin_cost</code></td><td><code>0 ≤ cost ≤ 2</code></td><td>Cost for dustbin-to-dustbin flow in the cosine-distance range.</td></tr>
         </tbody>
       </table></div>
+      <h3>Dataset and family overrides for fresh runs</h3>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Setting</th><th>Legacy SciVQA</th><th>Qwen3-VL with SciVQA</th></tr></thead>
+        <tbody>
+          <tr><td>Image path</td><td>SigLIP, 384×384 full-figure padding</td><td>Native processor; visual cap 256</td></tr>
+          <tr><td>Question / answer budget</td><td>512 / 64 including specials</td><td>Query 256; answer including EOS 64; total 2048</td></tr>
+          <tr><td>Batch/GPU / accumulation</td><td>8 / 1</td><td>1 / 8</td></tr>
+          <tr><td>OT heads / auxiliary weight</td><td>4 / 0.05</td><td>1 / 0</td></tr>
+          <tr><td>Question encoder / output head</td><td>Frozen / tied embeddings</td><td>Frozen query-only MiniLM / native Qwen head</td></tr>
+          <tr><td>Label smoothing / CE reduction</td><td>0.1 / example</td><td>0 / example</td></tr>
+          <tr><td>Epoch target / selection / patience</td><td>30 / ROUGE-L F1 / 8</td><td>Inherits SciVQA 30 / ROUGE-L F1 / 8; README recipe explicitly uses 3 / ROUGE-L F1 / 2</td></tr>
+          <tr><td>Prompt / decode version</td><td>scivqa-v2 / task-v2</td><td>scivqa-v2 / native-greedy-v1</td></tr>
+        </tbody>
+      </table></div>
+      <h3>Legacy OT extensions</h3>
+      <p><code>--ot_num_heads</code> splits projected feature channels into H slices and solves a plan per head. Aligned values are concatenated and gates averaged across heads. <code>D</code> must be divisible by H; this head count is separate from decoder <code>--num_heads</code>.</p>
+      <p><code>--fgw_alpha</code> defaults to 0. A positive value computes one structural cost refinement from the detached initial plan, normalized 2D patch distances and valid-token rank distances, then re-solves with <code>max(iterations//2,5)</code> updates. Non-square patch grids skip the structural cost. This is a single refinement, not FGW optimization to convergence.</p>
+      <p><code>--unbalanced_tau</code> defaults to None. A finite positive τ scales both log-dual updates by <code>τ/(τ+ε)</code>, relaxing marginal constraints. The exact balanced mass bounds and gate-as-fraction identities in the baseline derivations no longer follow; residuals then measure deviation from reference marginals, not balanced feasibility.</p>
       <p>Other important run defaults: batch size 4, 10 epochs, seed 1105, and <code>--device auto</code> (CUDA → MPS → CPU). <code>D</code> must be divisible by the number of heads, and <code>output_size</code> must equal <code>d_model</code>. A question must retain at least one non-special token; a limit of two can leave only CLS/SEP and cause OT to reject the sample.</p>
     </section>
 
@@ -544,22 +592,34 @@ python predict.py --checkpoint data/gqa_ot/best.pt \
         <thead><tr><th>Artifact</th><th>Contents / purpose</th></tr></thead>
         <tbody>
           <tr><td><code>run_config.json</code></td><td>Resolved model configuration, CLI arguments, train/dev example counts and CSV hashes, PyTorch version, dataset and metric names; scoring-model hash when applicable.</td></tr>
-          <tr><td><code>last.pt</code> / <code>best.pt</code></td><td>Current training state / lowest-validation-loss state. Format 4 stores model configuration and weights, backbone names, revision metadata, token limits, optimizer/scheduler state, epoch, global step, best loss, patience state, and RNG states.</td></tr>
+          <tr><td><code>last.pt</code> / <code>best.pt</code></td><td>Latest boundary state / best state under the selected metric. Format 5 stores family/configuration, full legacy weights or trainable-only native OT/LoRA weights, base-weight references, optimizer/scheduler/AMP state, per-rank RNG and best-metric/patience bookkeeping.</td></tr>
+          <tr><td><code>best_loss.pt</code> / <code>best_rouge.pt</code></td><td>Independent best validation-loss / ROUGE-L F1 states; each records its own selection metric.</td></tr>
           <tr><td><code>epoch_0001.pt</code> etc.</td><td>Optional full resumable checkpoints enabled by <code>--save_every_epoch</code>.</td></tr>
           <tr><td><code>metrics.jsonl</code></td><td>Per-epoch train loss, validation loss, generated-answer metrics, learning rate, improvement and patience values.</td></tr>
           <tr><td><code>evaluation_metrics_plot.png</code></td><td>Training/validation generated-answer metric curves for the epochs executed in the invocation.</td></tr>
           <tr><td>Evaluation CSV / JSON</td><td>Per-example generated answers and scores / aggregate loss, generated metrics, data hash, trainable parameter count, and runtime summary.</td></tr>
         </tbody>
       </table></div>
-      <p><a href="../utils/checkpoint.py"><code>save_checkpoint()</code></a> writes a temporary file before replacing the destination. <code>load_model()</code> stages weights on CPU, reconstructs the saved model, adapts supported legacy keys, strictly loads weights, and switches to evaluation mode. Loading accepts formats 2/3/4; training resume requires format 3/4. Backbone names are used to load pretrained assets; recorded revision hashes are metadata, not enforced download pins.</p>
+      <p><a href="../utils/checkpoint.py"><code>save_checkpoint()</code></a> writes a temporary file before replacing the destination. <code>load_model()</code> stages weights on CPU, reconstructs the saved model, adapts supported legacy keys, strictly loads weights, and switches to evaluation mode. Loading accepts formats 2–5; training resume requires formats 3–5. Legacy revision hashes are metadata; native base and query downloads enforce immutable saved commit SHAs. Native trainable-only checkpoints require the referenced pretrained assets. Missing legacy prompt/decode versions inherit <code>scivqa-v1</code>/<code>task-v1</code>.</p>
+      <h3>SciVQA workflow and resume</h3>
+      <pre><code>python -m utils.download_scivqa
+python train.py --dataset scivqa --model_path data/scivqa_legacy_run1
+python test.py --dataset scivqa --checkpoint data/scivqa_legacy_run1/best.pt \
+  --split dev --report_json results/scivqa/dev_report.json \
+  --predictions_csv results/scivqa/dev_predictions.csv
+
+# Continue the latest state to a total of 40 epochs.
+python train.py --dataset scivqa --resume data/scivqa_legacy_run1/last.pt --epochs 40</code></pre>
+      <p>Resume inherits the saved epoch target unless explicitly increased. Increasing it keeps weights, optimizer/scaler/RNG and early-stopping history, but recalculates the remaining linear schedule at the saved update index. Learning rates can increase after an extension. Use the original data/recipe and output directory; conflicting saved settings are rejected. See the <a href="../README.md#resume-and-checkpoints">README resume details</a>. <a href="../SCIVQA_TUNING.md">SCIVQA_TUNING.md</a> is historical experiment context, not the current CLI authority.</p>
       <h3>Answer metrics are separate from transport diagnostics</h3>
       <div class="grid two">
         <div class="card"><h3>GQA</h3><p><code>accuracy</code> is binary exact match after trimming only leading/trailing whitespace. Case, punctuation, and internal whitespace still matter. It averages 0/1 per answer and does not give partial synonym credit.</p></div>
         <div class="card"><h3>PlantExpertVQA</h3><p>Case-insensitive EM, SQuAD-style token F1, BLEU-1/2, ROUGE-L F1, and BERTScore F1. BERTScore defaults to <code>bert-base-uncased</code>, CPU, and English baseline rescaling. Rescaled scores can be negative.</p></div>
       </div>
-      <p><code>--dataset auto</code> detects GQA from the CSV path. Use an explicit dataset flag for custom paths. Performance reports measure VQA loss and generation time separately from answer scoring; CUDA peak memory is reported only for CUDA runs. Best checkpoint selection remains validation loss for either dataset.</p>
+      <div class="card"><h3>SciVQA</h3><p>Nine macro-averaged scores: ROUGE-1 and ROUGE-L precision/recall/F1, plus BERTScore precision/recall/F1. BERTScore defaults to <code>roberta-large</code>, CPU and no baseline rescaling. <code>--no-compute_bertscore</code> gives a six-score ROUGE-only SciVQA report. Reports also include guardrails and QA-type breakdowns where available.</p></div>
+      <p><code>--dataset auto</code> detects GQA or SciVQA from the CSV path. Use an explicit dataset flag for custom paths. Performance reports measure VQA loss and generation time separately from answer scoring; CUDA peak memory is reported only for CUDA runs. Fresh SciVQA selects ROUGE-L F1 by default; other datasets select loss. An explicit <code>--selection_metric</code> overrides the fresh-run default.</p>
       <h3>Distributed training</h3>
-      <p><code>torchrun --standalone --nnodes=1 --nproc_per_node=2 train.py --fusion ot --device cuda</code> launches one worker per CUDA GPU. A distributed sampler partitions training, DDP synchronizes gradients, and rank 0 performs evaluation and writes artifacts. Batch size is per GPU. The single-device path also supports CPU and MPS.</p>
+      <p><code>torchrun --standalone --nnodes=1 --nproc_per_node=2 train.py --fusion ot --device cuda</code> launches one worker per CUDA GPU. A distributed sampler partitions training, DDP synchronizes gradients, and rank 0 performs evaluation and writes artifacts. Batch size is per GPU; effective batch is <code>batch_size × gradient_accumulation_steps × world_size</code>. The single-device path also supports CPU and MPS; native NF4 requires CUDA.</p>
     </section>
 
     <section id="diagnostics">
@@ -598,11 +658,70 @@ python diagnose_training.py --checkpoint data/gqa_ot/best.pt \
 
     <section id="source-map">
       <div class="kicker">13 / Navigate the code</div>
-      <h2>Component and file map for the OT path</h2>
+      <h2>Project tree and component map</h2>
+      <p>Main source files and directories are shown below. Dataset contents, checkpoints, caches, notebooks and individual test files are omitted. <code>data/</code> and <code>results/</code> are local/generated locations and may be absent in a fresh checkout.</p>
+      <pre><code>OT-VQA/
+├── AGENTS.md                         # Repository guidance for coding agents
+├── README.md                         # Setup, training, evaluation and usage
+├── requirements.txt                  # Runtime and test dependencies
+├── train.py                          # Shared training entry point: legacy / Qwen3-VL
+├── test.py                           # Validation/test metrics and prediction exports
+├── predict.py                        # Single-image answer generation
+├── diagnose_training.py              # Legacy OT diagnostics and input reliance
+├── diagnose_scivqa_breakdown.py       # SciVQA diagnostic entry point
+├── compare_scivqa.py                  # Compare SciVQA evaluation reports
+├── SCIVQA_TUNING.md                   # Historical experiment notes
+├── configs/
+│   ├── config.py                     # Shared defaults and dataset presets
+│   └── arg_parser.py                 # CLI options and preset resolution
+├── model/
+│   ├── factory.py                    # Native model configuration and construction
+│   ├── optimal_transport.py          # FP32 Sinkhorn, partial OT, MH-OT, FGW and UOT
+│   ├── vqa_model.py                  # Legacy OT memory and answer generation
+│   ├── pretrained_vlm.py             # Native Qwen3-VL OT adapter and optional LoRA
+│   ├── features_extraction.py        # Legacy vision/text encoders and answer embeddings
+│   └── decoder_model.py              # Legacy causal answer decoder
+├── utils/
+│   ├── data_processing.py            # CSV validation and text preparation
+│   ├── vqa_dataset.py                # Dataset, versioned prompts and native collation
+│   ├── image_processing.py           # Legacy crop/pad image transforms
+│   ├── download_gqa.py               # GQA subset downloader
+│   ├── download_plantexpert.py       # PlantExpertVQA subset downloader
+│   ├── download_scivqa.py            # SciVQA download and CSV export
+│   ├── checkpoint.py                # Versioned save/load and training-state restore
+│   ├── losses.py                    # Token/example CE reduction
+│   ├── metrics.py                   # Dataset-specific answer scoring
+│   ├── answer_text.py               # Generated-answer text postprocessing
+│   ├── quality_evidence.py          # Quality guardrails and comparison helpers
+│   ├── training_preflight.py        # Training-data checks
+│   ├── training_runtime.py          # Optimizer, AMP, accumulation and resume helpers
+│   ├── profiling.py                 # Stage timing and memory telemetry
+│   ├── device.py                    # CPU / CUDA / MPS selection
+│   └── json_to_csv.py               # Annotation conversion
+├── scripts/
+│   ├── kaggle_train.py              # Validated Kaggle launcher
+│   ├── check_t4_pilot.py             # Pilot acceptance checks
+│   ├── t4_preflight.py               # T4 environment preflight
+│   ├── smoke_native_processor.py    # Native processor smoke check
+│   ├── audit_native_tokens.py       # Native token-budget audit
+│   ├── validate_scivqa_correctness.py # Prompt/decode correctness checks
+│   └── scivqa_evidence.py            # Evidence workflow commands
+├── tools/
+│   └── diagnose_scivqa_breakdown.py  # SciVQA breakdown implementation
+├── tests/                           # Correctness, native, checkpoint and runtime tests
+├── docs/
+│   └── optimal_transport_architecture.html # Architecture, equations and live OT example
+├── .agents/
+│   ├── skills/                      # Current repository-specific Codex skills
+│   └── plans/                       # Experiment plans and Kaggle runbooks
+├── .agent/                          # Archived Gemini-era guidance
+├── data/                            # Local datasets / model outputs; downloaded/generated
+└── results/                         # Evaluation exports; generated when requested</code></pre>
       <div class="table-wrap"><table>
         <thead><tr><th>Source</th><th>Role in this architecture</th></tr></thead>
         <tbody>
           <tr><td><a href="../model/optimal_transport.py">model/optimal_transport.py</a></td><td><code>log_sinkhorn</code> and <code>PartialTransportFusion</code>: cost matrix, marginals, transport, visual gates, memory, diagnostics.</td></tr>
+          <tr><td><a href="../model/pretrained_vlm.py">model/pretrained_vlm.py</a> / <a href="../model/factory.py">factory.py</a></td><td>Native Qwen construction, query-only visual OT adapter, DeepStack residuals, optional LoRA, native processor/labels and cached generation.</td></tr>
           <tr><td><a href="../model/vqa_model.py">model/vqa_model.py</a></td><td>Model assembly, OT fusion, image/answer projections, encode/decode, teacher forcing, greedy generation, vocabulary output head.</td></tr>
           <tr><td><a href="../model/features_extraction.py">model/features_extraction.py</a></td><td>Image backbone and processor, question tokenizer/encoder/pooling, answer embeddings, English model-name validation.</td></tr>
           <tr><td><a href="../model/decoder_model.py">model/decoder_model.py</a></td><td>Scaled dot-product attention, answer self-attention, memory cross-attention, feed-forward, normalization, decoder stack.</td></tr>
@@ -611,11 +730,15 @@ python diagnose_training.py --checkpoint data/gqa_ot/best.pt \
           <tr><td><a href="../utils/download_gqa.py">utils/download_gqa.py</a> / <a href="../utils/download_plantexpert.py">download_plantexpert.py</a></td><td>Prepare reproducible sampled dataset CSVs and required image files for the OT training pipeline.</td></tr>
           <tr><td><a href="../utils/json_to_csv.py">utils/json_to_csv.py</a></td><td>Convert supported annotation JSON into the image/question/answer CSV contract; keeps the first alternative answer.</td></tr>
           <tr><td><a href="../train.py">train.py</a></td><td>Loaders, resolved OT configuration, optimizer/scheduler, teacher-forced loss, DDP, generated scoring, early stopping, manifests and checkpoints.</td></tr>
-          <tr><td><a href="../test.py">test.py</a></td><td>Checkpoint reconstruction, shared-encoding validation loss and generation, answer scoring, prediction/report exports, runtime measurement.</td></tr>
+          <tr><td><a href="../test.py">test.py</a></td><td>Checkpoint reconstruction, family-specific loss/generation, answer scoring, guardrails and QA-type breakdowns, prediction/report exports and runtime measurement.</td></tr>
           <tr><td><a href="../predict.py">predict.py</a></td><td>Single-image RGB preprocessing, question normalization, checkpoint loading and answer generation.</td></tr>
           <tr><td><a href="../utils/checkpoint.py">utils/checkpoint.py</a></td><td>Atomic saving, supported-format loading, legacy-key adaptation, strict state restoration and resumable optimizer/RNG state.</td></tr>
           <tr><td><a href="../utils/device.py">utils/device.py</a> / <a href="../utils/metrics.py">metrics.py</a></td><td>Device selection and seed setup / generated-answer dataset metrics and BERTScore setup.</td></tr>
           <tr><td><a href="../diagnose_training.py">diagnose_training.py</a></td><td>OT mass and residual summaries, learning-history checks, shuffled-input sensitivity and prediction diversity.</td></tr>
+          <tr><td><a href="../utils/download_scivqa.py">utils/download_scivqa.py</a></td><td>SciVQA source download, official labeled split export, metadata and figure-context preservation.</td></tr>
+          <tr><td><a href="../utils/training_runtime.py">utils/training_runtime.py</a> / <a href="../utils/training_preflight.py">training_preflight.py</a></td><td>Optimizer groups, accumulation, AMP, resume recipe checks and data preflight.</td></tr>
+          <tr><td><a href="../scripts/kaggle_train.py">scripts/kaggle_train.py</a> / <a href="../scripts/check_t4_pilot.py">check_t4_pilot.py</a></td><td>Kaggle launcher and hardware-pilot acceptance checks.</td></tr>
+          <tr><td><a href="../tests/">tests/</a></td><td>Legacy/native correctness, checkpoint serialization, training-entry and runtime regression checks.</td></tr>
           <tr><td><a href="../requirements.txt">requirements.txt</a></td><td>PyTorch/Transformers, data/image tools, plotting and answer-metric dependencies.</td></tr>
         </tbody>
       </table></div>
@@ -642,7 +765,7 @@ python diagnose_training.py --checkpoint data/gqa_ot/best.pt \
           <tr><td><code>Mⱼ, J</code></td><td>Content-token indicator and set <code>J={j:Mⱼ=1}</code>.</td><td>Inverse of the question encoder’s blocked mask.</td></tr>
           <tr><td><code>xᵢ, qⱼ</code></td><td>Projected image and question values in <code>ℝᴰ</code>.</td><td>Projected spatial image tokens and <code>question_values</code>.</td></tr>
           <tr><td><code>x̄, q̄</code></td><td>Global image and projected question summaries.</td><td><code>image_global_value</code>, <code>question_global_value</code>.</td></tr>
-          <tr><td><code>ρ, ε, c∅, S</code></td><td>Dustbin capacity, entropy strength, bottom-right cost, Sinkhorn iteration count.</td><td>The four OT hyperparameters; constants during training.</td></tr>
+          <tr><td><code>ρ, ε, c∅, S</code></td><td>Dustbin capacity, entropy strength, bottom-right cost, Sinkhorn iteration count.</td><td>The four baseline OT hyperparameters; S is an iteration cap.</td></tr>
           <tr><td><code>C̃, a, b, P⁽ˢ⁾</code></td><td>Extended cost, source/target marginals, plan after S updates.</td><td><code>cost</code>, <code>row_marginal</code>, <code>column_marginal</code>, <code>plan</code>.</td></tr>
           <tr><td><code>mⱼ, zⱼ, γⱼ, hⱼ</code></td><td>Local incoming mass, aligned evidence, visual gate, grounded token.</td><td><code>matched_per_token</code>, <code>aligned</code>, <code>gate</code>, <code>grounded</code>.</td></tr>
           <tr><td><code>H, y&lt;t</code></td><td>Decoder memory and reference/generated answer prefix.</td><td><code>memory</code> and the IDs supplied to <code>decode()</code>.</td></tr>
@@ -661,14 +784,14 @@ C̃ᵢⱼ = 1 − normalize(xᵢ)ᵀ normalize(qⱼ)
 C̃ᵢ∅ = 1 − normalize(xᵢ)ᵀ normalize(q̄)
 C̃∅ⱼ = 1 − normalize(x̄)ᵀ normalize(qⱼ)
 C̃∅∅ = c∅</div>
-      <p>The symbol ∅ identifies the added dustbin row or column. Cost computation uses FP32 copies, with the denominator floor from <a href="https://docs.pytorch.org/docs/2.14/generated/torch.nn.functional.normalize.html">PyTorch’s documented normalize default</a>. A dot product of normalized vectors determines compatibility, but the vectors used for aggregation keep their original magnitude. For unit normalized vectors, <code>1−cosine = ½ ||x̂−q̂||₂²</code>; this is half the squared Euclidean distance. Vectors below the normalization floor are not unit vectors, so that identity does not apply to those degenerate cases.</p>
+      <p>The symbol ∅ identifies the added dustbin row or column. Cost computation uses FP32 copies, with the denominator floor from <a href="https://docs.pytorch.org/docs/2.10/generated/torch.nn.functional.normalize.html">PyTorch’s documented normalize default</a>. A dot product of normalized vectors determines compatibility, but the vectors used for aggregation keep their original magnitude. For unit normalized vectors, <code>1−cosine = ½ ||x̂−q̂||₂²</code>; this is half the squared Euclidean distance. Vectors below the normalization floor are not unit vectors, so that identity does not apply to those degenerate cases.</p>
       <h3 id="eq-coupling">F3. Marginals and coupling</h3>
       <div class="equation">a = [(1−ρ)/K,…,(1−ρ)/K, ρ]
 b = [M₁(1−ρ)/N,…,ML(1−ρ)/N, ρ]
 U(a,b) = {P ≥ 0 : P1 = a, Pᵀ1 = b}
 P* = argmin over P∈U(a,b) [ ⟨P,C̃⟩ + ε Σᵢⱼ Pᵢⱼ(log Pᵢⱼ−1) ]
 P⁽ˢ⁾ = LogSinkhorn(C̃,a,b; ε,S)</div>
-      <p><code>P*</code> denotes the ideal converged solution; the network actually uses <code>P⁽ˢ⁾</code>. Interpret <code>0 log 0</code> as zero. Remove zero-mass rows/columns when discussing the positive-support problem. Keep them in implementation tensor shapes for batched masking.</p>
+      <p><code>P*</code> denotes the ideal converged solution; <code>P⁽ˢ⁾</code> denotes the computed approximation with at most S updates, allowing balanced early stopping. These equations assume one head, no FGW refinement and no unbalanced relaxation. Interpret <code>0 log 0</code> as zero. Remove zero-mass rows/columns when discussing the positive-support problem. Keep them in implementation tensor shapes for batched masking.</p>
       <h3 id="eq-grounding">F4. Local grounding and memory</h3>
       <div class="equation">mⱼ = Σᵢ₌₁ᴷ P⁽ˢ⁾ᵢⱼ
 zⱼ = Σᵢ₌₁ᴷ P⁽ˢ⁾ᵢⱼ xᵢ / max(mⱼ, δ),     δ=10⁻⁸
@@ -681,9 +804,13 @@ H = [h₀;h₁;…;hL],    memory_blocked = [False; NOT M]</div>
       <div class="equation">pθ(Y | I,Q) = Πₜ pθ(yₜ | y&lt;t,Hθ(I,Q))
 πₜ = softmax(VocabularyHead(Decoder(H, AnswerEmbed(y&lt;t))))
 qtargetₜ(v) = (1−λ)·1[v=yₜ] + λ/V
-ℒtrain = −(1/Tvalid) Σₜ:yₜ≠PAD Σᵥ qtargetₜ(v) log πₜ(v)</div>
-      <p>Here <code>λ=0.1</code> is the CLI training label-smoothing default, and <code>Tvalid</code> counts non-PAD targets including EOS. The loss shown is the minibatch reduction. Validation sets <code>λ=0</code>. Training logs average minibatch losses weighted by their non-PAD token counts. Do not confuse this λ with entropy ε or use the same symbol for both in the paper.</p>
-      <p>The vocabulary distribution includes the full vocabulary during training. Generation separately forbids selecting PAD and BOS. Thus greedy decoding has an additional token-selection constraint that is absent from the training softmax.</p>
+ℓb,t = −Σᵥ qtarget_b,t(v) log π_b,t(v),   nb = valid target count for answer b
+ℒCE,token = (Σb Σt:valid ℓb,t) / (Σb nb)
+ℒCE,example = (1/B) Σb [(1/nb) Σt:valid ℓb,t]
+ℒOT = mean over sample/head plans [Σᵢⱼ P_local[i,j] C_local[i,j]]
+ℒtrain = selected ℒCE + wOT · ℒOT</div>
+      <p>Legacy label smoothing defaults to <code>λ=0.1</code>; native fresh runs use 0. Valid targets include EOS. SciVQA defaults to example-averaged CE; other datasets use token averaging. The auxiliary weight is 0.05 for legacy SciVQA and 0 otherwise, including native runs. Validation always reports token-averaged CE with <code>λ=0</code> and no auxiliary term. Keep label smoothing λ, entropy ε and auxiliary weight wOT distinct.</p>
+      <p>The vocabulary distribution includes the full vocabulary during training. Generation separately forbids selecting PAD and BOS. Legacy task decoding also constrains binary/choice formats based on the question. The old <code>task-v1</code> numeric hard mask is disabled by <code>task-v2</code>. These generation constraints are absent from the training softmax; native generation uses its own tokenizer and greedy decoder.</p>
     </section>
 
     <section id="derivations">
@@ -736,8 +863,9 @@ At ρ=0.2: local=0.64, dustbin-to-dustbin=0.04, each cross flow=0.16</div>
       <div class="equation">Routing: ℒ → decoder → H → {m,z,γ} → P⁽ˢ⁾ → C̃ → {x,q,x̄,q̄}
 Values:  ℒ → decoder → H → {x,q,grounding/global projections}
 θimage_backbone: frozen; no parameter gradients
-θquestion_encoder, projections, decoder, head: trainable</div>
-      <p>This is unrolled differentiation through an approximate solver. The code neither differentiates implicitly through an exact optimum nor applies an envelope-theorem gradient of a standalone transport loss. Also, spatial locations are not assigned learned, question-dependent source marginal weights: task conditioning enters through the question features, globals, and pair costs.</p>
+θquestion_encoder: trainable unless frozen (frozen in the SciVQA preset)
+θprojections, decoder, head: trainable subject to tied/frozen embedding weights</div>
+      <p>This is unrolled differentiation through an approximate solver. The code does not use implicit differentiation through an exact optimum. When auxiliary OT loss is enabled, gradients differentiate through both P and C; they are not an envelope-theorem shortcut. Also, spatial locations are not assigned learned, question-dependent source marginal weights: task conditioning enters through the question features, globals, and pair costs.</p>
     </section>
 
     <section id="worked-example">
@@ -770,7 +898,7 @@ Values:  ℒ → decoder → H → {x,q,grounding/global projections}
       <div class="kicker">18 / Reproducible algorithm and resource analysis</div>
       <h2>Describe exactly what one forward pass computes</h2>
       <pre><code>Algorithm 1: Question-conditioned partial-OT memory
-Input: image I, question Q; frozen Eimage; trainable Equestion;
+Input: image I, question Q; frozen Eimage; configurable Equestion;
        projections; ρ, ε, c∅, S; decoder width D.
 Output: memory H and blocked-memory mask.
 
@@ -783,7 +911,7 @@ Output: memory H and blocked-memory mask.
 7. Normalize FP32 copies and build the extended cosine cost C̃.
 8. Set uniform real-token marginals and dustbin marginals ρ.
 9. Initialize valid log-scalings to zero; invalid scalings to −∞.
-10. Repeat S times: update row log-scaling; update column log-scaling.
+10. Up to S times: update row/column scalings; balanced stop if row error &lt; 1e-4 after 5 updates.
 11. Exponentiate the log-plan; set all invalid-pair entries to zero.
 12. Extract the real-image / real-question block R.
 13. For each token, compute incoming mass m, aligned value z, and gate γ.
@@ -792,7 +920,7 @@ Output: memory H and blocked-memory mask.
 16. Project concatenated global image/question values; global LayerNorm.
 17. Concatenate global and grounded tokens; construct blocked mask.
 Return H, mask; optionally return plan and mass/residual diagnostics.</code></pre>
-      <p>Training then embeds the reference answer prefix, decodes with causal and memory masks, and computes the smoothed next-token loss. Inference reuses the same encoded memory at every greedy decoding step. OT is question-conditioned but not answer-prefix-conditioned: changing the generated answer prefix does not recompute the plan.</p>
+      <p>Algorithm 1 is the one-head balanced baseline. Multi-head runs repeat the plan computation per feature slice, concatenate aligned values and average gates. FGW/UOT/visual-memory extensions are described in the configuration section. Training then embeds the reference answer prefix, decodes with causal and memory masks, and computes CE plus the configured auxiliary OT term. Inference reuses the same encoded memory at every greedy decoding step. OT is question-conditioned but not answer-prefix-conditioned: changing the generated answer prefix does not recompute the plan.</p>
       <h3>Complexity of the fusion stage</h3>
       <div class="table-wrap"><table>
         <caption>Leading costs per sample, excluding backbone encoders, answer decoder, and vocabulary projection.</caption>
@@ -805,7 +933,7 @@ Return H, mask; optionally return plan and mass/residual diagnostics.</code></pr
           <tr><td>Grounding / global projection</td><td><code>O(L·D² + D²)</code></td><td>Dense token projection and a 2D-to-D global projection.</td></tr>
         </tbody>
       </table></div>
-      <p>Storing the cost and final plan alone takes <code>O((K+1)(L+1))</code> elements per sample. Ordinary unrolled autograd also retains solver intermediates across S iterations; actual training memory can grow with S and cannot be described by final-plan storage alone. Multiply tensor costs by batch size B and include encoder/decoder activations when reporting whole-model memory.</p>
+      <p>Storing the cost and final plan alone takes <code>O((K+1)(L+1))</code> elements per sample. Ordinary unrolled autograd also retains solver intermediates across S iterations; actual training memory can grow with S and cannot be described by final-plan storage alone. For multi-head runs, plan storage and solver reductions also scale with the OT head count. FGW refinement adds pairwise structural matrices and a second solve. Multiply by batch size B and include encoder/decoder activations when reporting whole-model memory.</p>
       <p>Without a KV cache, generation recomputes the growing answer prefix. Within each decoder layer, answer self-attention scales quadratically with prefix length and memory attention with prefix length times <code>1+L</code>. The output projection also scales with vocabulary size. Fusion-only complexity is therefore not a complete estimate of end-to-end generation latency.</p>
       <h3>Parameter count of PartialTransportFusion</h3>
       <div class="equation">question projection:       T·D + D
@@ -814,9 +942,9 @@ global projection:         2D² + D
 two affine LayerNorms:     4D
 Total inside OT fusion:    T·D + 3D² + 7D
 For T=D=384:               592,512 parameters</div>
-      <p>This algebra counts the three affine layers and two affine LayerNorms defined in <code>PartialTransportFusion</code>. It excludes image projection, answer projection, encoders, decoder, and output head. Changing S or ρ does not change this parameter count. Report actual whole-model trainable and total counts from each run, because freezing and backbone widths affect them.</p>
+      <p>This algebra counts the baseline three affine layers and two affine LayerNorms in <code>PartialTransportFusion</code>, with visual memory off. Multi-head slicing adds no parameters. Visual memory adds <code>D²+5D</code> parameters for its image grounding, coordinate projection and affine LayerNorm. It excludes image projection, answer projection, encoders, decoder, and output head. Changing S or ρ does not change this parameter count. Report actual whole-model trainable and total counts from each run, because freezing and backbone widths affect them.</p>
       <h3>Implementation details the paper should state</h3>
-      <p>Uniform local marginals; global-feature dustbins; fixed bottom-right cost; FP32 transport calculations; finite unrolled iterations; zero-mass PAD/special handling; preserved feature magnitudes in values; matched-mass gate; separate global memory token; causal answer decoding; pretrained frozen image backbone; separate answer embeddings; and checkpoint selection by unsmoothed validation token loss. Each changes how the method should be reproduced.</p>
+      <p>Uniform local marginals; global-feature dustbins; fixed bottom-right cost; FP32 transport calculations; finite unrolled iterations; zero-mass PAD/special handling; preserved feature magnitudes in values; matched-mass gate; separate global memory token; causal answer decoding; pretrained frozen image backbone; separate answer embeddings; and checkpoint selection by the recorded validation metric (ROUGE-L F1 for fresh SciVQA; loss for other datasets). Each changes how the method should be reproduced.</p>
     </section>
 
     <section id="paper-experiments">
@@ -832,7 +960,7 @@ For T=D=384:               592,512 parameters</div>
           <tr><td>Does c∅ drive excessive unmatched flow?</td><td>Proposed sweep <code>c∅∈{0,0.5,1,1.5,2}</code> under fixed ρ.</td><td>Local/dustbin mass identities, residuals, and answer quality, not mass alone.</td></tr>
           <tr><td>Does matched-mass gating contribute?</td><td>Replace valid-token gates with one while retaining plan and normalized evidence. Requires code edits.</td><td>Retrained answer quality, especially for tokens with substantial dustbin mass.</td></tr>
           <tr><td>Does global context dominate?</td><td>Remove or block the global memory token while keeping global features for dustbin costs. Requires code edits.</td><td>Retrained quality and image-shuffle sensitivity; isolates the decoder global route.</td></tr>
-          <tr><td>Is learned cost routing useful?</td><td>Use a cost-independent product coupling <code>abᵀ</code> with the same projections, grounding, and decoder. Requires code edits.</td><td>Quality versus the feature-dependent plan; keep parameter budget and memory shape aligned.</td></tr>
+          <tr><td>Is learned cost routing useful?</td><td>For legacy, use a cost-independent product coupling <code>abᵀ</code> with matched projections/decoder (requires code edits). Native <code>--plan_control independent</code> is available, but preserves the learned local marginals and dustbins, so it tests a different intervention.</td><td>Quality versus the feature-dependent plan; keep parameter budget and memory shape aligned.</td></tr>
         </tbody>
       </table></div>
       <p>Run one-factor analyses before an expensive combined grid, or use a declared joint search budget. Retrain architecture ablations: changing memory or gates only during inference tests sensitivity to a distribution shift, not the performance of a trained alternative architecture. Full OT automatically has gate one when marginals are exact, so a gating ablation is informative primarily for partial OT.</p>
@@ -857,12 +985,12 @@ For T=D=384:               592,512 parameters</div>
       <p>Report hardware, software versions, precision, batch size, actual generated lengths, token limits, and timing scope. <code>test.py</code> measures a pass containing data iteration, encoding, teacher-forced decoding, and generation; this is not pure single-answer inference latency. It excludes subsequent answer scoring. Its timing explicitly synchronizes CUDA, but does not explicitly synchronize MPS, so dedicated warmup/synchronization controls are needed for precise device comparisons.</p>
       <h3>Transport and behavioral figures</h3>
       <ol class="steps">
-        <li><strong>Qualitative alignment panel.</strong> Show an image, original question, reference answer, generated answer, valid tokenizer pieces, and the extended plan. Overlay a token’s normalized local patch weights on the processed crop, with its visual gate and dustbin mass.</li>
+        <li><strong>Qualitative alignment panel.</strong> Show an image, original question, reference answer, generated answer, valid tokenizer pieces, and the extended plan. Overlay a token’s normalized local patch weights on the processed image, with its visual gate and dustbin mass.</li>
         <li><strong>Mass and residual distributions.</strong> Report medians/quantiles as well as maxima; stratify by available question types and correct/incorrect generated answers. Means alone can hide poorly converged samples.</li>
         <li><strong>Input reliance.</strong> Compare original versus shuffled-image/shuffled-question predictions. Report the perturbation protocol and include failure cases. This is a reliance diagnostic, not proof that a particular pixel causes an answer.</li>
         <li><strong>Hyperparameter response.</strong> Plot validation answer quality and residuals against ρ, ε, and S. Report the selected configuration before opening final test results.</li>
       </ol>
-      <p>The code returns the plan and aggregate mass diagnostics but does not automatically export all of these plots, confidence intervals, or gate distributions. Reconstruct per-token gates from the local plan and known marginals, and record the tokenizer positions correctly. Mapping spatial tokens back to a crop requires the backbone’s actual feature-map layout; do not guess a grid from K alone.</p>
+      <p>The code returns the plan and aggregate mass diagnostics but does not automatically export all of these plots, confidence intervals, or gate distributions. Reconstruct per-token gates from the local plan and known marginals, and record the tokenizer positions correctly. Mapping spatial tokens back to the processed image requires the backbone’s actual feature-map layout; do not guess a grid from K alone.</p>
     </section>
 
     <section id="manuscript">
@@ -883,16 +1011,16 @@ For T=D=384:               592,512 parameters</div>
       </table></div>
       <h3>Abstract draft, before results</h3>
       <div class="panel">
-        <p>Visual question answering requires associating question content with relevant visual evidence while handling incomplete local correspondence. We study a question-conditioned partial optimal transport fusion module for generative VQA. A frozen image encoder and a trainable question encoder produce spatial and contextual representations, which are projected into a shared feature space. Cosine costs, global-feature dustbins, and prescribed marginals define an entropy-regularized coupling estimated by finite log-space Sinkhorn iterations. The local coupling aggregates visual evidence for each content token, and its incoming matched mass controls a gated visual residual. A separate global memory token and the grounded question states condition autoregressive answer generation. Training uses answer-token cross-entropy without direct alignment labels. We define controlled comparisons with full OT and diagnostic analyses of transport mass, marginal residuals, and input reliance. The empirical benefits and computational tradeoffs must be determined through held-out evaluation.</p>
+        <p>Visual question answering requires associating question content with relevant visual evidence while handling incomplete local correspondence. We study a question-conditioned partial optimal transport fusion module for generative VQA. A frozen image encoder and a configurable question encoder produce spatial and contextual representations, which are projected into a shared feature space. Cosine costs, global-feature dustbins, and prescribed marginals define an entropy-regularized coupling estimated by finite log-space Sinkhorn iterations. The local coupling aggregates visual evidence for each content token, and its incoming matched mass controls a gated visual residual. A separate global memory token and the grounded question states condition autoregressive answer generation. Training combines answer cross-entropy with an optional local OT cost, without direct alignment labels. We define controlled comparisons with full OT and diagnostic analyses of transport mass, marginal residuals, and input reliance. The empirical benefits and computational tradeoffs must be determined through held-out evaluation.</p>
       </div>
       <p class="small">After experiments, replace the final two sentences with the actual datasets/split sizes, primary metric changes, variability, and runtime tradeoff. Do not fill the abstract with planned improvements.</p>
       <h3>Method-section draft</h3>
       <div class="panel">
         <p>Given an image I and a question Q, we construct decoder memory from spatial image features and contextual question tokens. Image features are projected to width D, and question states are mapped to the same width by a learned affine layer. Local matching excludes padding and special question tokens. The projected features remain unnormalized as values, while normalized FP32 copies define cosine matching costs.</p>
-        <p>We augment the local cost matrix with an image-dustbin row and a question-dustbin column. Their costs compare local values with the opposite modality’s global representation; the dustbin-to-dustbin cost is a fixed hyperparameter. Real image locations share mass 1−ρ uniformly, valid question tokens share the same mass uniformly, and each dustbin receives mass ρ. The resulting balanced extended problem permits partial local correspondence. We approximate its entropic optimum using S alternating log-space row and column scaling updates.</p>
-        <p>For each valid question token, the local coupling provides a normalized weighted average of spatial image values. The ratio of incoming real-patch mass to the token’s prescribed target mass scales a learned visual residual before token normalization. Padding and special-token memory positions are zeroed and blocked. We prepend a global token obtained from projected global image and question summaries, and use the resulting memory in a causal answer decoder. Model training minimizes smoothed next-token cross-entropy, propagating gradients through the finite transport iterations into the trainable question encoder and projections.</p>
+        <p>We augment the local cost matrix with an image-dustbin row and a question-dustbin column. Their costs compare local values with the opposite modality’s global representation; the dustbin-to-dustbin cost is a fixed hyperparameter. Real image locations share mass 1−ρ uniformly, valid question tokens share the same mass uniformly, and each dustbin receives mass ρ. The resulting balanced extended problem permits partial local correspondence. For the balanced, feature-only baseline, we approximate its entropic optimum using at most S alternating log-space row/column updates, with early stopping on row residual. State multi-head, structural-cost or unbalanced extensions explicitly when used.</p>
+        <p>For each valid question token, the local coupling provides a normalized weighted average of spatial image values. The ratio of incoming real-patch mass to the token’s prescribed target mass scales a learned visual residual before token normalization. Padding and special-token memory positions are zeroed and blocked. We prepend a global token obtained from projected global image and question summaries, and use the resulting memory in a causal answer decoder. Training minimizes the configured token/example CE plus an optional local OT cost. Gradients propagate through the executed transport iterations into projections and, when unfrozen, the question encoder. The SciVQA preset freezes that encoder and enables the auxiliary loss.</p>
       </div>
-      <p>Insert <a href="#eq-features">F1</a>–<a href="#eq-objective">F5</a> next to these paragraphs, define all masks and clamps, and cite established OT/dustbin ideas. Add implementation defaults from <a href="#configuration">Section 10</a> and actual run settings from the manifest. Use “approximate plan” when describing the implemented finite solver.</p>
+      <p>This draft describes the legacy memory model; revise it for native Qwen experiments rather than applying the legacy decoder equations to that family. Insert <a href="#eq-features">F1</a>–<a href="#eq-objective">F5</a> next to these paragraphs, define all masks and clamps, and cite established OT/dustbin ideas. Add implementation defaults from <a href="#configuration">Section 10</a> and actual run settings from the manifest. Use “approximate plan” when describing the implemented finite solver.</p>
       <details><summary>Copyable LaTeX for the core equations</summary>
         <pre><code>\begin{align}
 \widetilde C_{ij} &amp;= 1-\cos(x_i,q_j), \\
@@ -923,30 +1051,30 @@ h_0 &amp;= \operatorname{LN}_{\mathrm{glob}}(W_0[\bar x;\bar q]+b_0),
         <li><strong>Method.</strong> Problem definition → features/masks → extended costs/marginals → finite solver → gated memory → answer objective. Include Algorithm 1, the architecture figure, and the dustbin mass identity.</li>
         <li><strong>Experiments.</strong> Dataset provenance and actual subsets, train/validation/test protocol, primary metrics, hyperparameter selection budget, software/hardware, parameter counts, and matched comparison settings.</li>
         <li><strong>Results and analysis.</strong> Main answer-quality table, OT ablations, convergence/runtime, representative successes/failures, and input-reliance diagnostics. Keep planned rows marked pending until measurements exist.</li>
-        <li><strong>Limitations and conclusion.</strong> Uniform token mass, fixed image representations, cropping, tokenization, solver approximation, global-path reliance, and limited subset generalization. Match the conclusion to measured findings.</li>
+        <li><strong>Limitations and conclusion.</strong> Uniform token mass, frozen image representations, resolution/preprocessing, tokenization, solver approximation, global-path reliance, and limited subset generalization. Match the conclusion to measured findings.</li>
       </ol>
       <h3>Questions to answer before submission</h3>
       <p>Can another researcher reproduce the exact split hashes and checkpoint configuration? Do results use the same generated-answer scorer? Were solver residuals small enough to support constraint-based explanations? Do ablations distinguish gated memory from the global context route? Are both successful and failed alignments shown? Are claims about novelty and improvements tied to references or results? Are proposed modifications clearly separated from the released implementation?</p>
     </section>
 
     <section id="references">
-      <div class="kicker">21 / Verified primary references</div>
+      <div class="kicker">21 / Foundational references</div>
       <h2>Cite the foundations and the exact assets</h2>
-      <p>These primary references were checked when expanding the guide. They support the cited foundations and assets; they do not by themselves establish the novelty or measured performance of this repository. Bibliographic metadata should match the version you actually cite.</p>
+      <p>These references provide background for the cited foundations and assets; they do not by themselves establish the novelty or measured performance of this repository. Bibliographic metadata should match the version you actually cite.</p>
       <div class="table-wrap"><table>
         <thead><tr><th>Reference</th><th>Use in the paper</th></tr></thead>
         <tbody>
           <tr><td>Marco Cuturi. <a href="https://papers.neurips.cc/paper_files/paper/2013/hash/af21d0c97db2e27e13572cbf59eb343d-Abstract.html">Sinkhorn Distances: Lightspeed Computation of Optimal Transport</a>. NeurIPS 2013.</td><td>Established entropy-regularized transport and efficient matrix scaling. Cite in the solver formulation.</td></tr>
           <tr><td>Gabriel Peyré and Marco Cuturi. <a href="https://arxiv.org/abs/1803.00567">Computational Optimal Transport</a>. Foundations and Trends in Machine Learning, 2019; arXiv:1803.00567.</td><td>Broader mathematical background for discrete couplings and numerical OT. This implementation’s mass/gate derivations are stated separately above.</td></tr>
-          <tr><td>Zhengxin Pan, Haishuai Wang, Fangyu Wu, Bailing Zhang, Jiajun Bu, and Hongyang Chen. <a href="https://arxiv.org/abs/2603.14349">Learning Image-Text Matching with Optimal Partial Transport</a>. arXiv:2603.14349v1, 2026.</td><td>OMIT’s global-feature dustbin construction in image–text retrieval. The arXiv record notes ICASSP 2025 acceptance; the 2026 date here identifies the checked arXiv version.</td></tr>
-          <tr><td>Sachin Mehta and Mohammad Rastegari. <a href="https://arxiv.org/abs/2206.02680">Separable Self-attention for Mobile Vision Transformers</a>. arXiv:2206.02680, 2022.</td><td>MobileViTv2 visual backbone. This guide does not reproduce the backbone’s internal architecture.</td></tr>
+          <tr><td>Zhengxin Pan, Haishuai Wang, Fangyu Wu, Bailing Zhang, Jiajun Bu, and Hongyang Chen. <a href="https://arxiv.org/abs/2603.14349">Learning Image-Text Matching with Optimal Partial Transport</a>. arXiv:2603.14349v1, 2026.</td><td>OMIT’s global-feature dustbin construction in image–text retrieval. The 2026 date identifies the cited arXiv version.</td></tr>
+          <tr><td>Sachin Mehta and Mohammad Rastegari. <a href="https://arxiv.org/abs/2206.02680">Separable Self-attention for Mobile Vision Transformers</a>. arXiv:2206.02680, 2022.</td><td>Optional MobileViTv2 visual backbone. This guide does not reproduce the backbone’s internal architecture.</td></tr>
           <tr><td><a href="https://arxiv.org/abs/2002.10957">MiniLM: Deep Self-Attention Distillation for Task-Agnostic Compression of Pre-Trained Transformers</a>, 2020; <a href="https://huggingface.co/sentence-transformers/all-MiniLM-L12-v2">all-MiniLM-L12-v2 model card</a>.</td><td>Distillation foundation and the actual sentence-transformers checkpoint. The model card specifies 384-dimensional representations and masked mean pooling plus normalization; the repository additionally uses token states and applies its own question length limit.</td></tr>
           <tr><td>Drew A. Hudson and Christopher D. Manning. <a href="https://arxiv.org/abs/1902.09506">GQA: A New Dataset for Real-World Visual Reasoning and Compositional Question Answering</a>. CVPR 2019; <a href="https://cs.stanford.edu/people/dorarad/gqa/evaluate.html">official evaluation page</a>.</td><td>Dataset provenance and evaluation context. Clearly identify the repository’s sampled labeled subsets and its implemented answer metric.</td></tr>
         </tbody>
       </table></div>
       <p class="small">The document remains self-contained: external links are references opened on demand, not downloaded scripts, fonts, or diagram assets. Add the original dataset publication and metric references for whichever experimental dataset and scorers you actually use.</p>
     </section>
-    <footer>OT-VQA · Source-grounded architecture and manuscript-methodology guide · 11 October 2026.<br>Open this file directly in a browser. All styles, diagrams, and example calculations are embedded; source links point to files in the parent repository folder. Research references open online only when selected.</footer>
+    <footer>OT-VQA · Source-grounded legacy/native architecture and manuscript-methodology guide · 17 October 2026.<br>Open this file directly in a browser. All styles, diagrams, and example calculations are embedded; source links point to files in the parent repository folder. Research references open online only when selected.</footer>
   </main>
 </div>
 <script>
